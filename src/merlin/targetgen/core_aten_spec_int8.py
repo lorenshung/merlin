@@ -138,7 +138,7 @@ def readout_refusals(selection, decision):
 
 def admission_plan(module, selection, *, captured=False, native=False):
     """Independently screen all six steps at each source contraction's actual ranks."""
-    from merlin.kernels.shapes import observe_contractions, zero_initialised
+    from merlin.kernels.shapes import accumulator_init, observe_contractions, zero_initialised
     from merlin.llvmlower.contraction_quantization import closed_float_mac
     from merlin.targetgen.core_aten_readout import host_readout_bridge, planned_readout_geometry
     from merlin.targetgen.operation_numerics import integer_split_k_limit
@@ -149,7 +149,12 @@ def admission_plan(module, selection, *, captured=False, native=False):
     for op, shape in observe_contractions(module):
         rank = len(op.results[0].type.get_shape())
         steps, reasons = [], pipeline_refusals(selection)
-        geometry = planned_readout_geometry(op) if not native else None
+        # A capture in the integer_readout numerics reads the accumulator out ON THE DEVICE: one fused
+        # requantization to int8, the bias an int32 accumulator seed. Then there is no host cast, no
+        # host multiply and no cast exactness bound on K; the readout is a fused contraction stage.
+        readout = device_readout(op) if (captured or native) else None
+        seeded = accumulator_init(op) == "int32_seed"
+        geometry = planned_readout_geometry(op) if not native and readout is None else None
         readout_proof = None
         readout_rank = rank
         if geometry is not None:
@@ -170,7 +175,7 @@ def admission_plan(module, selection, *, captured=False, native=False):
         def screen(step, name, signature, placement="host"):
             row = {"step": step, "op": name, "signature": signature}
             for authority, document in (("software", spec), ("host", host)):
-                if placement == "accelerator" and authority == "host":
+                if placement in {"accelerator", "fused_accelerator"} and authority == "host":
                     continue
                 if name == "contraction":
                     from merlin.targetgen.software_spec import admit_contraction_operation
@@ -202,10 +207,15 @@ def admission_plan(module, selection, *, captured=False, native=False):
                     ),
                 )
         transfers = spec.get("transfer_contracts", {})
-        for step, key, source, destination, dtype, ranks in (
+        crossings = [
             (2, "operand_load", "host", "accelerator", "int8", [len(v.type.get_shape()) for v in op.operands[:2]]),
-            (4, "accumulator_readout", "accelerator", "host", "i32", [rank]),
-        ):
+            (4, "int8_readout", "accelerator", "host", "int8", [rank])
+            if readout is not None
+            else (4, "accumulator_readout", "accelerator", "host", "i32", [rank]),
+        ]
+        if seeded:
+            crossings.insert(1, (2, "accumulator_seed_load", "host", "accelerator", "i32", [rank]))
+        for step, key, source, destination, dtype, ranks in crossings:
             from merlin.targetgen.transfer_contracts import screen_transfer_contract
 
             transfer = next((r for r in transfers.get("declarations", []) if r["id"] == key), {})
@@ -254,7 +264,29 @@ def admission_plan(module, selection, *, captured=False, native=False):
         )
         screen(3, "contraction", signature, "accelerator")
         cast_obligation = None
-        if not native:
+        if readout is not None:
+            # The fused readout stage: acc_scale (and a ReLU before it) on the contraction's accumulator.
+            stages = ["relu", "acc_scale"] if readout["relu"] else ["acc_scale"]
+            screen(
+                4,
+                "elementwise_map",
+                dict(
+                    family="elementwise_map",
+                    operand_dtype="i32",
+                    readout_dtype="i8",
+                    rank=rank,
+                    epilogues=stages,
+                    composed_with=["contraction"],
+                    scale_granularity=readout["granularity"],
+                ),
+                "fused_accelerator",
+            )
+            steps[-1]["device_readout"] = {key: value for key, value in readout.items() if key != "operation"}
+            if readout["relu"] and any(scale <= 0 for scale in readout["scales"]):
+                reasons.append(
+                    "step 4 a readout ReLU runs before the scale, so it cannot pair with a nonpositive scale"
+                )
+        if not native and readout is None:
             screen(
                 5,
                 "aten._to_copy.default",
@@ -324,8 +356,10 @@ def admission_plan(module, selection, *, captured=False, native=False):
         if shape.dtypes != expected:
             reasons.append(f"source dtype {shape.dtypes} is not {expected}")
         closed = closed_integer_mac(op) if captured or native else closed_float_mac(op)
-        if not closed or not zero_initialised(op):
-            reasons.append("source is not a closed unflagged from-zero MAC")
+        if not closed or not (zero_initialised(op) or (seeded and readout is not None)):
+            reasons.append(
+                "source is not a closed unflagged MAC from zero (or from an int32 seed it reads out on device)"
+            )
         try:
             bound = integer_split_k_limit(spec, tile_dim=1, full_k=shape.reduction[0])
             if bound is None:
@@ -340,6 +374,8 @@ def admission_plan(module, selection, *, captured=False, native=False):
                 source_dtypes=list(shape.dtypes),
                 result_rank=rank,
                 host_readout_bridge=readout_proof,
+                readout="device_int8" if readout is not None else "host",
+                accumulator_init="int32_seed" if seeded else "zero",
                 steps=sorted(steps, key=lambda s: s["step"]),
                 partial_sum_obligation=bound,
                 cast_exact_range_obligation=cast_obligation,
@@ -427,6 +463,54 @@ def source_declaration_continuity(initial, captured):
         "initial_source_admissions": initial_steps,
         "captured_source_operator_counts": dict(observed),
         "unpreserved_exact_source_operators": dict(missing),
+    }
+
+
+def device_readout(op) -> dict | None:
+    """The fused int8 readout that consumes ``op``'s accumulator, or None.
+
+    The frontend's ``integer_readout`` numerics emit it as the accumulator's ONLY user: a parallel
+    ``linalg.generic`` tagged ``prov.role = "readout"`` with an i8 result, its scale, zero point, range
+    and ReLU carried as ``prov.quant.*`` attributes. Read from those attributes, never from a name; an
+    absent or malformed one means there is no readout this plan can state.
+    """
+    from merlin.common import mlir_query as mq
+
+    result = op.results[0] if len(op.results) == 1 else None
+    users = list(result.uses) if result is not None else []
+    if len(users) != 1:
+        return None
+    reader = users[0].operation
+    if mq.op_name(reader) != "linalg.generic" or mq.attr_str(reader, "prov.role") != "readout":
+        return None
+    if str(getattr(reader.results[0].type, "element_type", "")) != "i8":
+        return None  # an f32 acc_readout leaves the multiply to the host
+    attributes = reader.attributes
+
+    def number(key):
+        value = attributes.get(key)
+        data = getattr(getattr(value, "value", None), "data", None)
+        return data if isinstance(data, (int, float)) and not isinstance(data, bool) else None
+
+    scale = attributes.get("prov.quant.scale")
+    if scale is not None and hasattr(scale, "data") and isinstance(scale.data, tuple):
+        scales = [getattr(getattr(item, "value", None), "data", None) for item in scale.data]
+    else:
+        scales = [number("prov.quant.scale")]
+    parameters = {key: number(f"prov.quant.{key}") for key in ("zero_point", "quant_min", "quant_max")}
+    relu = mq.attr_str(reader, "prov.quant.relu")
+    if (
+        any(not isinstance(v, (int, float)) for v in scales)
+        or None in parameters.values()
+        or relu not in {"true", "false"}
+    ):
+        return None
+    return {
+        "scales": [float(v) for v in scales],
+        "granularity": "tensor" if len(scales) == 1 else "channel",
+        **{key: int(value) for key, value in parameters.items()},
+        "relu": relu == "true",
+        "operation": reader,
     }
 
 

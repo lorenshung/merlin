@@ -392,8 +392,15 @@ def run_pt2e_reference(model, inputs):
     )
 
 
-def selected_pt2e_reference(model, inputs, *, declared_readout=False):
-    """Select the independent reference and bind its actual implementation bytes."""
+def selected_pt2e_reference(model, inputs, *, declared_readout=False, numerics="float_readout"):
+    """Select the independent reference and bind its actual implementation bytes.
+
+    ``numerics`` is the integerizer's readout (``float_readout`` or ``integer_readout``); the reference
+    evaluates the SAME readout the capture emits, so the oracle and the program agree by construction
+    on where the rounding is. The declared host-readout chain exists for the float readout only.
+    """
+    import inspect
+
     import copy
     import hashlib
     import sys
@@ -406,7 +413,14 @@ def selected_pt2e_reference(model, inputs, *, declared_readout=False):
     source = Path(sys.modules[run.__module__].__file__).resolve()
     if not source.is_file():
         raise RuntimeError("selected integer reference source is unavailable")
-    return run(model, inputs), {"path": str(source), "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}
+    identity = {"path": str(source), "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}
+    if numerics == "float_readout":
+        return run(model, inputs), identity
+    if declared_readout:
+        raise ValueError("a declared host-readout chain is the float readout; it cannot check integer_readout")
+    if "numerics" not in inspect.signature(run).parameters:
+        raise ValueError("the selected frontend reference cannot evaluate the integer_readout numerics")
+    return run(model, inputs, numerics=numerics), {**identity, "numerics": numerics}
 
 
 def write_pt2e_reference(path, reference, leaves, source):

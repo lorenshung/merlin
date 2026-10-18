@@ -116,13 +116,26 @@ def contraction_partition(receipt: dict) -> dict[str, int]:
     return {"seen": seen, "integerized": integerized, "preserved": remaining}
 
 
-def integerize_static_pt2e(model, inputs):
+#: The frontend's integer readouts: two f32 multiplies on the host (PT2E-portable), or the int8
+#: accelerator readout -- an int32 bias seed and ONE RNE requantization (gate-3 validated).
+READOUT_NUMERICS = ("float_readout", "integer_readout")
+
+
+def integerize_static_pt2e(model, inputs, *, numerics: str = "float_readout"):
     """Reuse frontend integerization while preserving each source result layout.
 
     The frontend's conv rewrite computes its i32 matrix in patch order and
     exposes an NHWC-backed NCHW view. Materialize the source's own dense output
     layout after the readout; its rank and arithmetic are unchanged.
+
+    ``numerics`` selects the frontend's readout (:data:`READOUT_NUMERICS`). A frontend build that
+    predates the selection can only give the float readout, so asking it for the integer one is refused
+    rather than silently answered with the other arithmetic.
     """
+    if numerics not in READOUT_NUMERICS:
+        raise ValueError(f"unknown integer readout numerics {numerics!r}; expected one of {READOUT_NUMERICS}")
+    import inspect
+
     import torch
     from m2m.capture.pt2e_integerize import integerize_pt2e
 
@@ -137,7 +150,13 @@ def integerize_static_pt2e(model, inputs):
             else:
                 raise ValueError("integer convolution source has no supported dense result layout")
             layouts[node.name] = (layout, list(value.stride()))
-    model, receipt = integerize_pt2e(model, inputs)
+    if "numerics" in inspect.signature(integerize_pt2e).parameters:
+        model, receipt = integerize_pt2e(model, inputs, numerics=numerics)
+    elif numerics == "float_readout":
+        model, receipt = integerize_pt2e(model, inputs)
+    else:
+        raise ValueError("the selected frontend integerizer cannot produce the integer_readout numerics")
+    receipt.setdefault("readout_numerics", numerics)
     restorations = []
     graph = model.graph
     for node in list(graph.nodes):

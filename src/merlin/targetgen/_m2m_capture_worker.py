@@ -1150,6 +1150,9 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         from merlin.capture.integerization import integerize_static_pt2e
 
         selected_engine = recipe.get("software_numerical_engine") if recipe is not None else None
+        # The recipe states which readout the target executes (quant_recipe.readout_numerics); the
+        # frontend default stays the portable float readout.
+        readout_numerics = (recipe or {}).get("readout_numerics", "float_readout")
         if selected_engine not in (None, "integer_reference"):
             raise ValueError(f"static int8 capture cannot realize numerical engine {selected_engine!r}")
         with torch.no_grad():
@@ -1164,7 +1167,10 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 from merlin.targetgen.core_aten_w8a8_reference import selected_pt2e_reference
 
                 independent, independent_source = selected_pt2e_reference(
-                    mdl, tuple(inputs), declared_readout=recipe.get("host_readout_declarations") is not None
+                    mdl,
+                    tuple(inputs),
+                    declared_readout=recipe.get("host_readout_declarations") is not None,
+                    numerics=readout_numerics,
                 )
                 if not all(
                     hasattr(independent, field)
@@ -1174,7 +1180,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             except Exception as exc:  # noqa: BLE001 -- record a failed selected reference, never substitute portable
                 independent_error = f"{type(exc).__name__}: {exc}"[:2000]
                 independent = None
-        mdl, integerization_receipt = integerize_static_pt2e(mdl, tuple(inputs))
+        mdl, integerization_receipt = integerize_static_pt2e(mdl, tuple(inputs), numerics=readout_numerics)
         if recipe is not None and recipe.get("host_readout_declarations") is not None:
             if independent is not None:
                 leaves, _ = _output_abi(independent.output)
