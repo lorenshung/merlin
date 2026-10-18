@@ -10,7 +10,10 @@ from merlin.targetgen.core_aten_components import prepare_integer_components
 
 
 @pytest.mark.parametrize("native", [False, True])
-def test_native_f32_is_explicit_and_keeps_the_independent_bit_gate(tmp_path, native):
+def test_native_f32_is_explicit_and_keeps_the_independent_bit_gate(tmp_path, monkeypatch, native):
+    monkeypatch.setattr(
+        "merlin.targetgen.transfer_contracts.screen_transfer_contract", lambda *args, **kwargs: dict(status="admitted")
+    )
     module = parse_mlir_text("""module {
       func.func @forward(%x: tensor<3xf32>) -> (tensor<3xf32>,tensor<3xf32>) {
         %e=tensor.empty() : tensor<3xf32>

@@ -514,7 +514,7 @@ def prepare_integer_components(
                 dependence_proofs=[p["ieee_dependence_proof"] for p in floating_proofs if "ieee_dependence_proof" in p],
                 output_floor="native_eager_bits_including_nan_payload_and_signed_zero",
             )
-            if ieee_pointwise
+            if ieee_pointwise and any("ieee_dependence_proof" in p for p in floating_proofs)
             else None
         ),
         boolean_semantics={"source": "closed_boolean_or_and", "integer_components": boolean_count},
