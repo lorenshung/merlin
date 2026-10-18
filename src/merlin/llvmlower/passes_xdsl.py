@@ -196,12 +196,27 @@ def lower_quant_ext(module, *, on_rewrite: Callable[[Any, tuple[Any, ...], Any],
 
         elem = out_t.element_type
         scale_elem = scale.type.element_type
-        # PT2E may request a BF16/FP16 result while retaining an f32 scale. MLIR arithmetic
-        # requires same-type operands. Keep same-type captures unchanged; for mixed precision,
-        # compute at the wider precision and round exactly once to the result element type.
-        # In particular, truncating the scale *before* multiplication would add a rounding
-        # absent from the captured quantization expression.
-        if elem == scale_elem:
+        # A half-width readout needs one rounding of the exact dyadic product.
+        # For byte codes, a bounded centered integer times a <=24-bit scale is
+        # exactly representable in binary64 (including all f32 subnormals).
+        # A binary32 intermediate would introduce a second rounding at ties.
+        if str(elem) in {"f16", "bf16"}:
+            from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
+
+            zero_point = _constant_of(zp)
+            zero_width = zp.type.element_type.width.data
+            centered_bound = (
+                128 + abs(int(zero_point)) if isinstance(zero_point, int) else 128 + (1 << (zero_width - 1))
+            )
+            scale_precision = {"f16": 11, "bf16": 8, "f32": 24}.get(str(scale_elem))
+            if (
+                str(w.type.element_type) != "i8"
+                or scale_precision is None
+                or centered_bound.bit_length() + scale_precision > 53
+            ):
+                raise ValueError("exact half dequantization lacks a binary64 exact-product proof")
+            compute_elem = f64
+        elif elem == scale_elem:
             compute_elem = elem
         elif isinstance(elem, Float64Type) or isinstance(scale_elem, Float64Type):
             compute_elem = f64

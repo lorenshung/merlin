@@ -101,7 +101,7 @@ def test_dequant_f32_scale_to_bf16_result_verifies(kind, attrs, scale_type):
         attrs,
         "tensor<2x8xi8>",
         scale_type,
-        "tensor<i64>" if kind == "per_tensor" else "tensor<2xi64>",
+        "tensor<i16>" if kind == "per_tensor" else "tensor<2xi16>",
         "tensor<2x8xbf16>",
     )
     assert lower_quant_ext(mod) == 1
@@ -111,12 +111,13 @@ def test_dequant_f32_scale_to_bf16_result_verifies(kind, attrs, scale_type):
         "arith.sitofp",
         "arith.sitofp",
         "arith.subf",
+        "arith.extf",
         "arith.mulf",
         "arith.truncf",
         "linalg.yield",
     ]
     mul = next(op for op in body.ops if op.name == "arith.mulf")
-    assert all(str(value.type) == "f32" for value in mul.operands)
+    assert all(str(value.type) == "f64" for value in mul.operands)
 
 
 def test_per_tensor_quantize_lowers_to_exact_standard_qdq_expression():
@@ -212,3 +213,42 @@ def test_the_captured_per_channel_spelling_lowers():
     gen = next(o for o in mod.walk() if o.name == "linalg.generic")
     assert gen.attributes["prov.transforms"].data == "dequant_per_channel"
     assert str(gen.indexing_maps.data[1]) == "affine_map<(d0, d1) -> (d1)>"
+
+
+def test_half_dequant_refuses_unproved_wide_zero_point():
+    mod = _mod("per_tensor", "", "tensor<2xi8>", "tensor<f32>", "tensor<i64>", "tensor<2xf16>")
+    with pytest.raises(ValueError, match="exact-product proof"):
+        lower_quant_ext(mod)
+
+
+@pytest.mark.parametrize("output", ["f16", "bf16"])
+def test_half_dequant_literal_byte_zero_point_has_exact_product_proof(output):
+    mod = parse_mlir_text(f"""module {{
+      func.func @f(%w: tensor<2xi8>, %s: tensor<f32>) -> tensor<2x{output}> {{
+        %z = arith.constant dense<127> : tensor<i64>
+        %r = "quant_ext.dequantize_per_tensor"(%w, %s, %z) :
+          (tensor<2xi8>, tensor<f32>, tensor<i64>) -> tensor<2x{output}>
+        return %r : tensor<2x{output}>
+      }}
+    }}""")
+    assert lower_quant_ext(mod) == 1
+    mod.verify()
+    mul = next(op for op in mod.walk() if op.name == "arith.mulf")
+    assert str(mul.result.type) == "f64"
+    assert sum(op.name == "arith.truncf" for op in mod.walk()) == 1
+
+
+def test_f32_product_rounding_can_change_a_half_tie():
+    import struct
+    from fractions import Fraction
+
+    # q=3 and this canonical f32 scale straddle a half midpoint: f32
+    # multiplication rounds to the midpoint before the old second rounding.
+    scale = struct.unpack('<f', struct.pack('<f', 0.3338215947151184))[0]
+    exact = Fraction.from_float(scale) * 3
+    midpoint = Fraction(1) + Fraction(3, 2048)
+    assert exact < midpoint
+    intermediate = struct.unpack('<f', struct.pack('<f', float(exact)))[0]
+    assert Fraction.from_float(intermediate) == midpoint
+    assert struct.unpack('<H', struct.pack('<e', float(exact)))[0] == 0x3C01
+    assert struct.unpack('<H', struct.pack('<e', intermediate))[0] == 0x3C02
