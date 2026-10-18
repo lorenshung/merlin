@@ -122,6 +122,27 @@ def restore_caller_layouts(module, original, fresh, semantic_path):
     semantic_path.write_text(json.dumps(boundary, sort_keys=True) + "\n")
 
 
+def scalarized_contraction_candidates(module):
+    """Find frontend contraction families expressed as ordered scalar loops.
+
+    This requests a recapture, never device admission. The captured integer
+    contractions still need the ordinary declaration, source-reference and
+    provider schedule proofs before they can replace the host program.
+    """
+    candidates = []
+    for ordinal, op in enumerate(module.walk()):
+        if op.name != "linalg.generic" or getattr(op.attributes.get("prov.family"), "data", None) != "contraction":
+            continue
+        children = list(op.body.walk())
+        if any(child.name == "scf.for" for child in children) and any(
+            child.name == "arith.mulf"
+            and all(getattr(value.owner, "name", None) != "arith.constant" for value in child.operands)
+            for child in children
+        ):
+            candidates.append(ordinal)
+    return candidates
+
+
 def prepare_spec_int8(
     directory: Path,
     report: dict,
@@ -291,7 +312,11 @@ def prepare_spec_int8(
         for record in report["cases"]
         if record["status"] == "bundled"
     )
-    non_contraction = not selected and not views and any(site["status"] == "admitted" for site in prospective)
+    scalarized = scalarized_contraction_candidates(module)
+    plan["scalarized_contraction_recapture_candidates"] = scalarized
+    non_contraction = (
+        not selected and not views and (any(site["status"] == "admitted" for site in prospective) or bool(scalarized))
+    )
     recipes = [
         r
         for r in selection["recipes"]
