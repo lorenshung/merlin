@@ -117,6 +117,28 @@ def _independent_batch_matmul_maps(op) -> bool:
     return list(maps) == expected
 
 
+def _known_rational_reference(source):
+    """Check the registered Merlin oracle and its complete arithmetic dependencies."""
+    from merlin.common.paths import module_source_path
+
+    if not isinstance(source, dict) or source.get("arithmetic") != "exact_rational":
+        return False
+    if source.get("numerics") not in {"integer_readout", "float_readout"}:
+        return False
+
+    def identity(name):
+        path = module_source_path(name).resolve()
+        return dict(path=str(path), sha256=hashlib.sha256(path.read_bytes()).hexdigest())
+
+    expected = identity("merlin.targetgen.exact_quantized_reference")
+    expected.update(
+        arithmetic="exact_rational",
+        numerics=source["numerics"],
+        dependencies=[identity("merlin.targetgen.exact_arithmetic"), identity("merlin.runtime.exact_readout")],
+    )
+    return source == expected
+
+
 def verify_capture_receipt(path: str | Path) -> dict:
     """Verify the capture's materialized artifact bytes against its adjacent receipt.
 
@@ -244,7 +266,10 @@ def verify_capture_receipt(path: str | Path) -> dict:
             or not isinstance(reference, dict)
             or pointer.get("sha256") != reference.get("sha256")
             or not isinstance(source, dict)
-            or source.get("sha256") != tool_sources.get("m2m/capture/pt2e_integer_reference.py")
+            or not (
+                source.get("sha256") == tool_sources.get("m2m/capture/pt2e_integer_reference.py")
+                or _known_rational_reference(source)
+            )
         ):
             errors.append("independent integer reference or its source is not bound by the capture receipt")
     result = {
