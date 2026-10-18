@@ -370,15 +370,29 @@ def evaluate_operation(target, args, kwargs):
         widths = [(0, 0)] * a[0].ndim
         for i in range(len(args[1]) // 2):
             widths[-1 - i] = tuple(args[1][2 * i : 2 * i + 2])
-        # Negative padding crops first; NumPy accepts only nonnegative widths.
-        cropped = a[0][
-            tuple(slice(max(-lo, 0), size - max(-hi, 0)) for size, (lo, hi) in zip(a[0].shape, widths, strict=True))
-        ]
-        widths = [(max(lo, 0), max(hi, 0)) for lo, hi in widths]
         if op == "constant_pad_nd":
+            cropped = a[0][
+                tuple(slice(max(-lo, 0), size - max(-hi, 0)) for size, (lo, hi) in zip(a[0].shape, widths, strict=True))
+            ]
+            widths = [(max(lo, 0), max(hi, 0)) for lo, hi in widths]
             out = np.pad(cropped, widths, constant_values=rational(args[2] if len(args) > 2 else 0))
         else:
-            out = np.pad(cropped, widths, mode="reflect" if op.startswith("reflection") else "edge")
+            # Reflect about the ORIGINAL endpoints: cropping before reflection
+            # would change the mirror when one side crops and the other pads.
+            out = a[0]
+            for axis, (low, high) in enumerate(widths):
+                size = a[0].shape[axis]
+                if size <= 0 or size + low + high <= 0:
+                    raise ValueError("exact padding requires nonempty dimensions")
+                positions = np.arange(size + low + high) - low
+                if op.startswith("reflection"):
+                    if low >= size or high >= size:
+                        raise ValueError("reflection padding must be smaller than the input dimension")
+                    positions = np.where(positions < 0, -positions, positions)
+                    positions = np.where(positions >= size, 2 * size - 2 - positions, positions)
+                else:
+                    positions = np.clip(positions, 0, size - 1)
+                out = np.take(out, positions, axis=axis)
     elif op in {"slice_scatter", "select_scatter"}:
         out = a[0].copy()
         indices = [slice(None)] * out.ndim

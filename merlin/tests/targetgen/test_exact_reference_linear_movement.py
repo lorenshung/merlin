@@ -193,3 +193,23 @@ for mask in [(True,True,True),(True,False,False),(False,True,False),(False,False
    exact=np.vectorize(lambda v:F(int(v))*factor,otypes=[object])(integer.numpy())
    assert np.array_equal(value.values,exact)
 """)
+
+
+def test_padding_crops_keep_original_reflection_endpoints():
+    run_torch(r"""
+import torch
+import numpy as np
+from fractions import Fraction as F
+from merlin.targetgen.exact_quantized_reference import evaluate_operation
+from merlin.targetgen.exact_arithmetic import dequantize
+for dims in [1,2,3]:
+ codes=torch.arange(5**dims,dtype=torch.int64).reshape(1,*([5]*dims))
+ x=dequantize(codes,F(1,32),-3,-128,127,dtype=torch.float32)
+ for mode in ['reflection','replication']:
+  target=getattr(torch.ops.aten,f'{mode}_pad{dims}d').default
+  for pair in [[-3,3],[3,-3],[-1,2],[2,-1]]:
+   padding=pair*dims
+   expected=target(codes,padding).numpy()
+   actual=evaluate_operation(target,(x,padding),{})
+   assert np.array_equal(actual.values,(expected+3)/32)
+""")
