@@ -134,8 +134,7 @@ def estimate_reference(original, plan, declaration, facts):
             traffic = 2 * size
             host = traffic / rates["host_memcpy_bytes_per_cycle"]
             literal = any(
-                op.name in {"tensor.splat", "linalg.fill", "arith.constant"}
-                and any(hasattr(v.type, "get_shape") for v in op.results)
+                op.name in {"tensor.splat", "linalg.fill"} and any(hasattr(v.type, "get_shape") for v in op.results)
                 for op in original.walk()
             )
             if literal:

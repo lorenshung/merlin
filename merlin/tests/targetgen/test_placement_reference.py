@@ -250,3 +250,17 @@ def test_policy_evidence_is_attributed_only_to_the_bundled_case(tmp_path, admitt
     assert inactive == dict(status="not_in_shard", case_id="unselected")
     assert "placement_cost" in report["cases"][0]["numeric_admission"]
     json.dumps(report)
+
+
+def test_shape_literal_does_not_turn_a_row_copy_into_scalar_fill_work():
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import DenseIntOrFPElementsAttr, TensorType, i64
+
+    declaration, facts = inputs()
+    module = movement()
+    before = estimate_reference(module, candidate(module, "movement", "F1"), declaration, facts)
+    function = next(op for op in module.walk() if op.name == "func.func")
+    shape = arith.ConstantOp(DenseIntOrFPElementsAttr.from_list(TensorType(i64, [2]), [1, 7]))
+    function.body.block.insert_op_before(shape, function.body.block.first_op)
+    after = estimate_reference(module, candidate(module, "movement", "F1"), declaration, facts)
+    assert after == before
