@@ -590,6 +590,84 @@ def _site_family(op) -> str | None:
     return None
 
 
+_DEQUANTIZE_OPS = frozenset({"quant_ext.dequantize_per_tensor"})
+_QUANTIZE_OPS = frozenset({"quant_ext.quantize_per_tensor"})
+#: Value producers that carry no data from a host tensor: a constant, a splat of one, an empty init.
+_CONSTANT_PRODUCERS = frozenset({"arith.constant", "tensor.empty", "tensor.splat", "linalg.fill"})
+
+
+def quantized_islands(module) -> set[int]:
+    """``id``s of the floating-point operations that compute only between int8 quantization edges.
+
+    PT2E leaves a quantized non-contraction operation as ``dequantize -> f32 op -> quantize``. Such an
+    op computes on int8 codes and its result is read only as int8: it is int8 work whose floating
+    spelling is the frontend's, exactly as a backend that matches the sandwich treats it. An op belongs
+    to an island when every tensor operand comes from a dequantize, a constant producer or another
+    island op, and every user is a quantize or another island op (a fixpoint, so chains -- a window
+    sum followed by its division, the slices of a pad -- form one island).
+    """
+    from merlin.common import mlir_query as mq
+
+    operations = [op for op in module.walk() if mq.op_name(op) not in {"builtin.module", "func.func", "func.return"}]
+
+    def floating(op) -> bool:
+        return any("f32" in str(getattr(result.type, "element_type", "")) for result in op.results)
+
+    def ranked(op) -> bool:
+        return any(list(getattr(result.type, "get_shape", lambda: [])()) for result in op.results)
+
+    candidates = {
+        id(op): op
+        for op in operations
+        if floating(op)
+        and mq.op_name(op) not in _DEQUANTIZE_OPS | _QUANTIZE_OPS | {"tensor.empty", "arith.constant"}
+        # A rank > 0 fill is the work of fill/full/full_like; a scalar one is a quantization parameter.
+        and (mq.op_name(op) not in _CONSTANT_PRODUCERS or ranked(op))
+        and not _nested_in_linalg(op)
+    }
+    changed = True
+    while changed:
+        changed = False
+        for key, op in list(candidates.items()):
+            sourced = all(
+                (owner := getattr(value, "owner", None)) is not None
+                and hasattr(owner, "results")
+                and (
+                    mq.op_name(owner) in _DEQUANTIZE_OPS
+                    or mq.op_name(owner) in _CONSTANT_PRODUCERS
+                    or id(owner) in candidates
+                )
+                for value in op.operands
+                if hasattr(value.type, "get_shape")
+            )
+            consumed = all(
+                mq.op_name(use.operation) in _QUANTIZE_OPS or id(use.operation) in candidates
+                for result in op.results
+                for use in result.uses
+            ) and any(result.uses for result in op.results)
+            if not (sourced and consumed):
+                del candidates[key]
+                changed = True
+    return set(candidates)
+
+
+def _dense_tensor(tensor_type) -> bool:
+    """A ranked tensor type with no layout encoding (the default dense row-major layout)."""
+    from xdsl.dialects.builtin import NoneAttr
+
+    encoding = getattr(tensor_type, "encoding", None)
+    return encoding is None or isinstance(encoding, NoneAttr)
+
+
+def _nested_in_linalg(op) -> bool:
+    parent = op.parent_op()
+    while parent is not None:
+        if getattr(parent, "name", "").startswith("linalg."):
+            return True
+        parent = parent.parent_op()
+    return False
+
+
 def non_contraction_sites(module, selection, *, contract=None):
     """Screen every top-level non-contraction site of an integer program for device placement.
 
@@ -619,6 +697,7 @@ def non_contraction_sites(module, selection, *, contract=None):
     undetermined = undetermined_families_from_contract(contract) if contract is not None else None
     contractions = {id(op) for op, _shape in observe_contractions(module)}
     ordinals = {id(op): i for i, op in enumerate(module.walk())}
+    islands = quantized_islands(module)
 
     def precision(value) -> str | None:
         dtype = mq.type_shape_dtype(value.type)[1]
@@ -636,8 +715,21 @@ def non_contraction_sites(module, selection, *, contract=None):
         return any(id(getattr(value, "owner", None)) in contractions for value in op.operands)
 
     sites = []
+
+    def quantization_parameter(op) -> bool:
+        """A scalar or a value read only by quantize/dequantize ops: a scale or zero point, not work."""
+        results = list(op.results)
+        if results and all(not list(getattr(r.type, "get_shape", lambda: [0])()) for r in results):
+            return True
+        users = [use.operation for result in results for use in result.uses]
+        return (
+            bool(users)
+            and all(mq.op_name(user) in _DEQUANTIZE_OPS | _QUANTIZE_OPS for user in users)
+            and all(use.index != 0 for result in results for use in result.uses)
+        )
+
     for op in module.walk():
-        if id(op) in contractions or nested(op):
+        if id(op) in contractions or nested(op) or quantization_parameter(op):
             continue
         family = _site_family(op)
         if family is None:
@@ -650,10 +742,23 @@ def non_contraction_sites(module, selection, *, contract=None):
         rank = len(results[0].type.get_shape()) if results and hasattr(results[0].type, "get_shape") else None
         source = mq.attr_str(op, "prov.aten") or name
         observations = access_observations.observe(op, family)
+        if name.startswith("tensor.") and all(
+            _dense_tensor(value.type) for value in [*op.operands, *op.results] if hasattr(value.type, "get_shape")
+        ):
+            # Tensor-dialect values are immutable SSA with the default dense row-major layout.
+            observations = {**observations, "layout": "row_major_contiguous", "aliasing": "disjoint_inputs_outputs"}
         form = sf.carrier_form(op) if family == "movement" else None
         kind = cc.reduction_kind(op) if family == "reduction" else None
         in_dtype = precision(tensors[0]) if tensors else (operand_dtypes[0] if operand_dtypes else None)
         out_dtype = result_dtypes[0] if result_dtypes else None
+        quantized = id(op) in islands
+        if quantized:
+            # Int8 work in the frontend's floating spelling (dequantize -> op -> quantize): its codes are
+            # int8 on both edges, so it is screened as the int8 operation the island computes.
+            operand_dtypes = ["i8" if dtype == "f32" else dtype for dtype in operand_dtypes]
+            result_dtypes = ["i8" if dtype == "f32" else dtype for dtype in result_dtypes]
+            in_dtype = "i8" if in_dtype in (None, "f32") else in_dtype
+            out_dtype = "i8" if out_dtype == "f32" else out_dtype
         signature = {
             "family": family,
             "operand_dtype": in_dtype,
@@ -746,6 +851,7 @@ def non_contraction_sites(module, selection, *, contract=None):
                 "source_operation": name,
                 "source_operator": source,
                 "family": family,
+                "quantized_island": quantized,
                 "signature": signature,
                 "steps": steps,
                 "status": status,
