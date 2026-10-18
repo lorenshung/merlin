@@ -235,14 +235,22 @@ def centered_operand_coverage(op, kernel):
     provider_coverage; this validates the exact representation/readout contract.
     """
     schedule = kernel.get("schedule", {})
+    refusal = "centered i32 operands require a source-bound exact byte-product/correction proof and full int32 readout"
+    if not isinstance(schedule, dict):
+        return refusal
     proof = schedule.get("centered_byte_contraction", {})
+    if not isinstance(proof, dict):
+        return refusal
     planes = proof.get("operand_planes", [])
     bounds = proof.get("operand_bounds", [])
     digests = proof.get("selector_sha256", [])
+    if any(not isinstance(items, (list, tuple)) for items in (planes, bounds, digests)):
+        return refusal
     low, high = proof.get("accumulator_min"), proof.get("accumulator_max")
     if (
         kernel.get("exact_arithmetic") is not True
         or kernel.get("device_readout") != "full_i32"
+        or type(proof.get("version")) is not int
         or proof.get("version") != 1
         or proof.get("rule") != "closed_byte_selectors_plus_literal_integer_planes"
         or proof.get("unsigned_packing") != "xor_0x80_then_add_128"
@@ -266,7 +274,7 @@ def centered_operand_coverage(op, kernel):
         or kernel.get("accumulator_min") != low
         or kernel.get("accumulator_max") != high
     ):
-        return "centered i32 operands require a source-bound exact byte-product/correction proof and full int32 readout"
+        return refusal
     return None
 
 
