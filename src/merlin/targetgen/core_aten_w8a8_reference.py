@@ -76,6 +76,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
         "f16": torch.float16,
         "bf16": torch.bfloat16,
         "i1": torch.bool,
+        "index": torch.int64,
         "f32": torch.float32,
         "f64": torch.float64,
         "i8": torch.int8,
@@ -105,25 +106,52 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
             )
         return torch.tensor(value.value.data, dtype=dtype(op.results[0].type))
 
-    def scalar_body(block, operands):
+    def scalar_body(block, operands, point=()):
         local = dict(zip(block.args, operands, strict=True))
         for inner in block.ops:
             name = inner.name
-            xs = [local[v] for v in inner.operands]
+            xs = [local[v] if v in local else env[v] for v in inner.operands]
             if name == "linalg.yield":
                 return xs[0]
             if name == "arith.constant":
                 y = constant(inner)
-            elif name in {"arith.extf", "arith.truncf", "arith.extsi", "arith.trunci"}:
+            elif name in {"arith.uitofp", "arith.extui"}:
+                width = getattr(getattr(inner.operands[0].type, "width", None), "data", None)
+                if width is None or width > 32:
+                    raise ValueError("source IEEE reference lacks a native unsigned-width conversion proof")
+                unsigned = xs[0].to(torch.int64) & ((1 << width) - 1)
+                y = unsigned.to(dtype(inner.results[0].type))
+            elif name in {"arith.extf", "arith.truncf", "arith.extsi", "arith.trunci", "arith.sitofp"}:
                 y = xs[0].to(dtype(inner.results[0].type))
             elif name in {"arith.addf", "arith.addi"}:
                 y = xs[0] + xs[1]
             elif name in {"arith.mulf", "arith.muli"}:
                 y = xs[0] * xs[1]
-            elif name == "arith.subf":
+            elif name in {"arith.subf", "arith.subi"}:
                 y = xs[0] - xs[1]
             elif name == "arith.divf":
                 y = xs[0] / xs[1]
+            elif name == "arith.negf":
+                y = -xs[0]
+            elif name == "linalg.index":
+                y = torch.tensor(point[inner.dim.value.data], dtype=torch.int64)
+            elif name == "arith.cmpi":
+                predicate = inner.predicate.value.data
+                if predicate not in (0, 1, 2, 3, 4, 5):
+                    raise ValueError("source IEEE reference has no unsigned predicate proof")
+                left, right = xs
+                y = (left == right, left != right, left < right, left <= right, left > right, left >= right)[predicate]
+            elif name == "arith.cmpf":
+                predicate = inner.predicate.value.data
+                if predicate not in (1, 2, 3, 4, 5, 6):
+                    raise ValueError("source IEEE reference has no floating predicate proof")
+                left, right = xs
+                y = (left == right, left > right, left >= right, left < right, left <= right, left != right)[
+                    predicate - 1
+                ]
+                y = y & ~torch.isnan(left) & ~torch.isnan(right)
+            elif name == "arith.select":
+                y = torch.where(xs[0], xs[1], xs[2])
             else:
                 raise ValueError(f"W8A8 reference refuses scalar op {name}")
             local[inner.results[0]] = y
@@ -239,7 +267,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
             indices = [amap.eval(point, ()) for amap in maps]
             values = [x[index] for x, index in zip(xs[:-1], indices[:-1], strict=True)]
             values.append(result[indices[-1]])
-            result[indices[-1]] = scalar_body(op.body.block, values)
+            result[indices[-1]] = scalar_body(op.body.block, values, point)
         return result
 
     for op in function.body.block.ops:
@@ -366,7 +394,7 @@ def main():
     from merlin.frontends.linalg_mlir import parse_mlir_file
 
     directory = Path(sys.argv[1])
-    if "--ieee-closure" in sys.argv[2:]:
+    if "--ieee-closure" in sys.argv[2:] or "--native-source" in sys.argv[2:]:
         import hashlib
 
         source = directory / "model.mlir"
@@ -377,12 +405,28 @@ def main():
             values, _ = evaluate(module, arrays, [], quant_min=-128, quant_max=127, eps=2**-12)
             has_nan = any(bool(value.is_floating_point() and value.isnan().any()) for value in values)
             result = dict(status="source_nan" if has_nan else "no_source_nan")
+            if "--native-source" in sys.argv[2:]:
+                result["output_bytes"] = [
+                    value.detach()
+                    .cpu()
+                    .contiguous()
+                    .reshape(-1)
+                    .view(__import__("torch").uint8)
+                    .numpy()
+                    .tobytes()
+                    .hex()
+                    for value in values
+                ]
         except (ValueError, KeyError, TypeError, NotImplementedError) as exc:
             result = dict(status="unknown", reason=str(exc))
         result.update(
             source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
             input_sha256=hashlib.sha256((directory / "inputs.npz").read_bytes()).hexdigest(),
-            scope="typed_source_ieee_nan_closure_only_no_finite_numerical_qualification",
+            scope=(
+                "typed_source_ieee_storage_bits_no_target_qualification"
+                if "--native-source" in sys.argv[2:]
+                else "typed_source_ieee_nan_closure_only_no_finite_numerical_qualification"
+            ),
         )
         (directory / "source-ieee-closure.json").write_text(json.dumps(result, sort_keys=True) + "\n")
         return

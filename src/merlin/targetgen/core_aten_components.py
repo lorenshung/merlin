@@ -113,18 +113,18 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         or (op.name == "linalg.generic" and any(it.data.value == "reduction" for it in op.get_iterator_types()))
         for op in module.walk()
     )
-    # A finite rational reduction proof does not define the CPU NaN bits
-    # produced by intermediate IEEE overflow. Detect this closed source
-    # situation independently of eager answers before granting a native floor.
-    # Unsupported source interpreters provide no additional admission evidence.
-    if (
+    from merlin.targetgen.core_aten_exact_dtype import native_dtype_request
+
+    source_agreement_required = not order_dependent and native_dtype_request(report)
+    closure_required = (
         order_dependent
         and any(dtype in {"f16", "bf16", "f64", "complex<f32>"} for dtype in native_types)
         and all(np.isfinite(value).all() for value in arrays)
-    ):
+    )
+    if source_agreement_required or closure_required:
         from merlin.targetgen.core_aten_numeric import _source_reference
 
-        observed = _source_reference(directory, "--ieee-closure")
+        observed = _source_reference(directory, "--native-source" if source_agreement_required else "--ieee-closure")
         closure_path = directory / "source-ieee-closure.json"
         closure = json.loads(closure_path.read_text()) if observed.returncode == 0 and closure_path.exists() else {}
         if closure and (
@@ -132,8 +132,27 @@ def prepare_integer_components(directory, report, selection, provider, package, 
             or closure.get("input_sha256") != hashlib.sha256((directory / "inputs.npz").read_bytes()).hexdigest()
         ):
             raise ValueError("source IEEE closure observation does not bind the current source and inputs")
-        source_nan = closure.get("status") == "source_nan"
-        if source_nan:
+        if source_agreement_required and "output_bytes" in closure:
+            from merlin.targetgen.core_aten_host_floor import grade_native_bits
+
+            comparisons = [
+                grade_native_bits(record, [bytes.fromhex(raw) for raw in closure["output_bytes"]])
+                for record in report["cases"]
+            ]
+            if any(row["status"] == "mismatch" for row in comparisons):
+                (directory / "exact-dtype-refusal.json").write_text(
+                    json.dumps(
+                        dict(
+                            family="F2",
+                            code="native_source_eager_disagreement",
+                            reason="captured typed source differs from the independent native CPU boundary",
+                            source_agreement=comparisons,
+                        )
+                    )
+                    + "\n"
+                )
+                return None
+        if closure_required and closure.get("status") == "source_nan":
             (directory / "exact-dtype-refusal.json").write_text(
                 json.dumps(
                     dict(
