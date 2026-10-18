@@ -2,7 +2,6 @@
 
 from fractions import Fraction
 
-import numpy as np
 import pytest
 
 from merlin.targetgen.exact_arithmetic import ExactTensor, dequantize, materialize, quantize

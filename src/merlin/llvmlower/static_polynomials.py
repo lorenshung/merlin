@@ -13,7 +13,7 @@ class PolynomialRefusal(ValueError):
     pass
 
 
-def analyze_static_polynomial(op, *, work_limit=1_000_000):
+def analyze_static_polynomial(op, *, work_limit=1_000_000, require_bilinear=True):
     from xdsl.dialects.builtin import FloatAttr, IntegerAttr
     from xdsl.ir.affine import AffineMap
 
@@ -79,6 +79,8 @@ def analyze_static_polynomial(op, *, work_limit=1_000_000):
             if work > work_limit:
                 raise PolynomialRefusal("static polynomial work budget exceeded")
             name = child.name
+            if getattr(child.properties.get("fastmath"), "data", frozenset()):
+                raise PolynomialRefusal("exact static polynomials refuse floating fastmath flags")
             if name in {"scf.yield", "linalg.yield"}:
                 return tuple(get(v) for v in child.operands)
             args = [] if name in {"tensor.extract", "scf.for", "scf.if"} else [get(v) for v in child.operands]
@@ -114,6 +116,11 @@ def analyze_static_polynomial(op, *, work_limit=1_000_000):
                 result = add(*args, sign=-1 if name == "arith.subf" else 1)
             elif name == "arith.mulf":
                 result = multiply(*args)
+            elif name == "arith.divf":
+                divisor = args[1]
+                if set(divisor) != {()} or not divisor[()]:
+                    raise PolynomialRefusal("division requires a nonzero rational literal")
+                result = {key: value / divisor[()] for key, value in args[0].items()}
             elif name == "arith.extf":
                 result = args[0]
             elif name == "arith.negf":
@@ -179,6 +186,6 @@ def analyze_static_polynomial(op, *, work_limit=1_000_000):
         if not isinstance(result, dict):
             raise PolynomialRefusal("floating polynomial required")
         rows.append(result)
-    if not any(len(key) == 2 for row in rows for key in row):
+    if require_bilinear and not any(len(key) == 2 for row in rows for key in row):
         raise PolynomialRefusal("no bilinear data producer")
     return atoms, rows

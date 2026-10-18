@@ -9,7 +9,7 @@ from merlin.llvmlower.integer_components import rewrite_integer_components
 
 @pytest.mark.parametrize("divisor,exponent,denominator", [(2.0, -3, 1), (-2.0, -3, 1), (3.0, -2, 3), (0.5, -1, 1)])
 def test_literal_division_has_a_complete_numerator_producer(divisor, exponent, denominator):
-    module = parse_mlir_text(f'''module {{
+    module = parse_mlir_text(f"""module {{
       func.func @forward(%x: tensor<4xf16>) -> tensor<4xf16> {{
         %c = arith.constant {divisor} : f16
         %s = tensor.splat %c : tensor<4xf16>
@@ -22,7 +22,7 @@ def test_literal_division_has_a_complete_numerator_producer(divisor, exponent, d
         }} -> tensor<4xf16>
         return %r : tensor<4xf16>
       }}
-    }}''')
+    }}""")
     bounds, proofs = rewrite_floating_components(module, [(-2, 7)])
     assert len(proofs) == 1 and proofs[0]["source_data_arithmetic"]
     assert proofs[0]["common_exponent"] == exponent

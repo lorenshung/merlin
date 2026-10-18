@@ -56,3 +56,9 @@ def test_cubic_data_work_is_refused():
 def test_static_analysis_has_a_hard_work_budget():
     with pytest.raises(PolynomialRefusal, match="work budget"):
         analyze_static_polynomial(source("%p=arith.mulf %af,%bf : f32"), work_limit=2)
+
+
+def test_linear_rational_coefficients_remain_exact():
+    op = source("%two=arith.constant 2.0 : f32\n%p=arith.divf %af,%two : f32")
+    _, rows = analyze_static_polynomial(op, require_bilinear=False)
+    assert len(rows[0]) == 3 and set(rows[0].values()) == {Fraction(1, 2)}
