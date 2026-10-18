@@ -551,6 +551,8 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
     for row in candidates:
         constraints = row["signature"]
         missing, refused = [], []
+        if row.get("admission_basis") == "declared_unchecked" and row.get("status") != "reviewed":
+            missing.append("unchecked declaration requires explicit operation review")
         missing.extend(sorted(set(constraints) - _SIGNATURE_FIELDS))
         for declaration_key in ("restriction", "semantics"):
             if declaration_key in constraints:
@@ -715,6 +717,7 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
                 "reason": reason,
                 "op": op,
                 "declaration": row["id"],
+                "admission_basis": row.get("admission_basis", "authored"),
                 "constraints_status": "refused" if refused else "unknown" if missing else "matched",
                 "unresolved_constraints": missing,
                 "review_status": (

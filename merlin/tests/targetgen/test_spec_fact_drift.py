@@ -554,3 +554,21 @@ def test_unchecked_semantic_paths_are_never_fact_derived():
     assert row["placement"] == "unknown"
     assert "derived_from_facts" not in row
     assert resolution["unresolved"]
+
+
+@pytest.mark.parametrize("review", [None, "unreviewed", "reviewed"])
+def test_unchecked_form_admission_requires_an_explicitly_reviewed_spec_row(review):
+    spec = _derived_spec()
+    original = _rows(spec)["residual_add"]
+    if review is not None:
+        original["status"] = review
+    resolved, record = D.resolve_spec(spec, _facts(semantic_facts=None))
+    row = _rows(resolved)["residual_add"]
+    assert "derived_from_facts" not in row
+    if review == "reviewed":
+        assert row["placement"] == "accelerator"
+        assert row["admission_basis"] == "declared_unchecked"
+        declared = next(r for r in record["declarations"] if r["id"] == "residual_add")
+        assert declared["basis"] == "declared_unchecked" and declared["evidence"] == {}
+    else:
+        assert row["placement"] == "unknown"

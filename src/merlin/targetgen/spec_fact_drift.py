@@ -302,7 +302,16 @@ def fact_capabilities(
                     *(e for form in by_form.values() for e in form.get("dtypes", FactField((), True, ())).evidence),
                 ),
             )
+    declarations = {}
+    for family, capabilities in declared.items():
+        verdict = CR.family_admission(
+            units, family, prohibited_roles=prohibited_roles, semantic_facts=semantic_facts, review_status="reviewed"
+        )
+        if verdict["standalone"] and verdict["basis"] == "declared_unchecked":
+            dtypes = {_dtype(dtype) for cap in capabilities if not cap.composed_with for dtype in cap.dtypes}
+            declarations[family] = {"standalone": {"placement": ["accelerator"], "dtypes": sorted(dtypes)}}
     return {
+        "declared_unchecked_forms": declarations,
         "families": families,
         "forms": forms,
         "quantization": {
@@ -516,6 +525,18 @@ def resolve_spec(spec: Mapping[str, Any], facts: Mapping[str, Any]) -> tuple[dic
         form = (forms.get(family) or {}).get(form_name)
         record = {"id": row["id"], "family": family, "form": form_name, "fields": {}, "evidence": {}}
         signature = row.setdefault("signature", {})
+        declared_form = ((facts.get("declared_unchecked_forms") or {}).get(family) or {}).get(form_name)
+        if form is None and declared_form and spec.get("status") == "reviewed" and row.get("status") == "reviewed":
+            row["placement"] = declared_form["placement"][0]
+            for field, values in declared_form.items():
+                if field != "placement" and values:
+                    # Authored constraints may narrow this declaration but never widen it.
+                    selected = signature.get(field, values)
+                    signature[field] = [value for value in selected if value in values]
+            row["admission_basis"] = "declared_unchecked"
+            record.update(status="declared_unchecked", basis="declared_unchecked", fields=declared_form)
+            rows.append(record)
+            continue
         if form is None:
             row["placement"] = "unknown"
             record["status"] = "unresolved"
