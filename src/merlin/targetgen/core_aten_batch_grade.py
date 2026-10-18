@@ -407,6 +407,7 @@ def grade_core_aten_batch(
             and record.get("numeric_admission", {}).get("status") == "admitted"
             and (
                 record["numeric_admission"].get("quantized_contractions", 0) > 0
+                or record["numeric_admission"].get("quantized_non_contraction_sites", 0) > 0
                 or record["numeric_admission"].get("native_contractions", 0) > 0
             )
         ):
@@ -420,7 +421,10 @@ def grade_core_aten_batch(
                     if record["numeric_admission"].get("host_int8_narrowing")
                     else "conforming"
                 )
-            if "observation" in verdict and record["numeric_admission"].get("quantized_contractions", 0):
+            if "observation" in verdict and (
+                record["numeric_admission"].get("quantized_contractions", 0)
+                or record["numeric_admission"].get("quantized_non_contraction_sites", 0)
+            ):
                 verdict["observation"]["numeric_reference"] = {
                     "policy": "spec_int8",
                     "gate": verdict["integer_reference"],

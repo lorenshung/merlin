@@ -255,3 +255,42 @@ assert str(receipt) == "no eligible contraction"
         [sys.executable, "-I", "-S", "-c", script, str(Path(capture_refusals.__file__).parent), str(tmp_path)],
         check=True,
     )
+
+
+def test_contraction_free_quantized_execution_keeps_its_exact_reference_policy(monkeypatch):
+    from merlin.targetgen.core_aten_batch_grade import grade_core_aten_batch
+
+    monkeypatch.setattr("merlin.targetgen.core_aten_device.verify_execution_evidence", lambda _: True)
+    raw = np.array([7.0], np.float64).tobytes()
+    record = dict(
+        overload="aten._to_copy.default",
+        status="bundled",
+        numeric_policy="spec_int8",
+        case=dict(expected=dict(kind="tensor", dtype="float64", shape=[1], values=[7.0])),
+        output_indices=[0],
+        output_abi=[dict(dtype="f64", shape=[1])],
+        numeric_admission=dict(
+            status="admitted",
+            quantized_contractions=0,
+            quantized_non_contraction_sites=1,
+            integer_reference=dict(status="prepared", engine="independent", expected_output_bytes={"0": raw.hex()}),
+        ),
+        routing=dict(
+            lane="device",
+            routed=True,
+            target="gemmini",
+            routed_operations=[{}],
+            execution_evidence=dict(
+                case_id="aten._to_copy.default",
+                status="measured",
+                attribution="single_case_shard",
+                executed_instructions=1,
+                target="gemmini",
+            ),
+        ),
+    )
+    result = grade_core_aten_batch(dict(cases=[record]), [raw])
+    assert result["cases"][record["overload"]]["numeric_execution_policy"] == "spec_int8"
+    assert result["spec_int8_passed_count"] == 1
+    changed = grade_core_aten_batch(dict(cases=[record]), [np.array([7.000000000000001], np.float64).tobytes()])
+    assert changed["spec_int8_passed_count"] == 0
