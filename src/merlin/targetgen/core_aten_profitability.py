@@ -2,12 +2,14 @@
 
 import copy
 import json
+import os
 
 
 def prepare(directory, report, implementation, **kwargs):
     from merlin.common.yaml import load_yaml
     from merlin.frontends.linalg_mlir import parse_mlir_text
     from merlin.targetgen.placement_cost import estimate
+    from merlin.targetgen.placement_reference import estimate_reference
 
     selected = kwargs.get("software_spec")
     declaration = load_yaml(selected).get("placement_cost_model") if selected is not None else None
@@ -18,6 +20,9 @@ def prepare(directory, report, implementation, **kwargs):
     original_files = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
     original_report = copy.deepcopy(report)
     original_cases = list(report["cases"])
+    policy = os.environ.get("MERLIN_PLACEMENT_POLICY", declaration.get("default_policy", "strict_per_shape"))
+    if policy not in {"reference_scale", "strict_per_shape"}:
+        raise ValueError(f"unknown placement profitability policy: {policy}")
     plan = implementation(directory, report, **kwargs)
     if not any(
         plan.get(key, 0)
@@ -28,14 +33,34 @@ def prepare(directory, report, implementation, **kwargs):
             "quantized_non_contraction_sites",
         )
     ):
+        plan["placement_cost"] = dict(
+            policy=policy,
+            status="host",
+            reason_code="no_admitted_device_candidate",
+            strict_policy=dict(
+                policy="strict_per_shape",
+                status="not_applicable",
+                reason_code=plan.get("refusal_code", "no_admitted_device_candidate"),
+            ),
+        )
+        for record in report["cases"]:
+            record["numeric_admission"] = plan
+        (directory / "spec-int8-admission.json").write_text(json.dumps(plan, indent=2) + "\n")
         return plan
-    cost = estimate(
+    strict = estimate(
         parse_mlir_text(original_files["model.mlir"].decode()),
         parse_mlir_text((directory / "model.mlir").read_text()),
         plan,
         declaration,
         kwargs["facts"],
     )
+    strict["policy"] = "strict_per_shape"
+    cost = (
+        estimate_reference(parse_mlir_text(original_files["model.mlir"].decode()), plan, declaration, kwargs["facts"])
+        if policy == "reference_scale"
+        else dict(strict)
+    )
+    cost["strict_policy"] = strict
     plan["placement_cost"] = cost
     if cost["status"] != "device":
         (directory / "unprofitable-device-source.mlir").write_bytes((directory / "model.mlir").read_bytes())

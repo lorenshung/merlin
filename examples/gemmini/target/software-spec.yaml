@@ -4,7 +4,27 @@ target: gemmini
 status: reviewed
 placement_cost_model:
   schema: merlin.placement_cost.v1
+  default_policy: reference_scale
   comparison: strictly_lower_estimated_cycles
+  # Select strict_per_shape with MERLIN_PLACEMENT_POLICY for paper-model runs.
+  # Reference scale qualifies the family, not the tiny test instantiation.
+  reference_scale:
+    scalar_max_elements: 1
+    workloads:
+      contraction: {elements: 65536, operations_per_element: 128, bytes_per_element: 12, row_bytes: 256}
+      reduction: {elements: 65536, operations_per_element: 16, bytes_per_element: 8, row_bytes: 256}
+      elementwise_map: {elements: 65536, operations_per_element: 1, bytes_per_element: 12, row_bytes: 256}
+      movement: {bytes: 1048576, row_bytes: 256, element_bytes: 4}
+    rates:
+      host_scalar_ops_per_cycle: 1
+      host_memcpy_bytes_per_cycle: 8
+      dma_bytes_per_cycle: 16
+      device_mac_per_cycle: 16
+      device_commands_per_cycle: 1
+      host_pre_post_elements_per_cycle: 4
+    evidence:
+      review_status: "authored, pending operator review"
+      provenance: "Family throughput assumptions, not measured timings: scalar host one op/cycle and memcpy eight bytes/cycle; DMA sixteen bytes/cycle, integer MAC sixteen/cycle, one command/cycle, host packing/readout four logical elements/cycle. Reference arithmetic has 65536 output elements, contraction depth 128, reduction window 16; movement uses 1 MiB with 256-byte contiguous logical rows and four-byte elements. Scalar/constant work at at most one materialized element stays host. Element gathers pay one selected RTL row per element; host selector arithmetic counts affine binary operators or strided-merge bounds, congruence, and selection; row-contiguous selectors use reference rows. These workload sizes, rates, and scalar cutoff are authored, pending operator review. Numerical and complete-source gates remain mandatory."
   unknown_cost: retain_original_host
   dma_memory: scratchpad
   dma_count_roles: [mvin, mvout]
