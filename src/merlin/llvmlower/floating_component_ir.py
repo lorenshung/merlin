@@ -119,6 +119,11 @@ def pack_ieee_integer(value, exponent, integer_type, emit):
     nonnegative = emit(arith.CmpiOp(shift, constant(0), "sge"))
     left = emit(arith.SelectOp(nonnegative, shift, constant(0)))
     right = emit(arith.SelectOp(nonnegative, constant(0), binary(arith.SubiOp, constant(0), shift)))
+    # Zero has no grid constraint. Its decoded exponent can be far outside
+    # the chosen coefficient width, where even shifting zero is poison.
+    is_zero = emit(arith.CmpiOp(significand, constant(0), "eq"))
+    left = emit(arith.SelectOp(is_zero, constant(0), left))
+    right = emit(arith.SelectOp(is_zero, constant(0), right))
     magnitude = binary(arith.ShRUIOp, binary(arith.ShLIOp, significand, left), right)
     negative = emit(
         arith.CmpiOp(binary(arith.AndIOp, raw, constant(1 << (fraction_bits + exponent_bits))), constant(0), "ne")
