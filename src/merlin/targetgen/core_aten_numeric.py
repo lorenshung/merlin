@@ -61,6 +61,26 @@ def restore_caller_layouts(module, original, fresh, semantic_path):
             layout["results"][index] = {**(layout["results"][index] or {}), **caller, "alias_inputs": [ordinal]}
             if mutation:
                 layout["results"][index].update(role="user_input_mutation", input_index=ordinal)
+    expected = _tensor_documents(original["case"]["expected"]) if "expected" in original["case"] else []
+    for document, index in zip(expected, fresh["output_indices"] if expected else [], strict=True):
+        # A size-1 dimension's stride addresses nothing. An owned result the recapture lays out with a
+        # different stride only there (a permute's readout) is the same storage as the caller's result,
+        # so it keeps the caller's spelling.
+        record, entry = layout["results"][index], boundary["outputs"][index]
+        if record is None or record.get("alias_inputs") or entry.get("alias_inputs"):
+            continue
+        if (
+            any(record.get(key) != document.get(key) for key in ("dtype", "shape", "storage_offset"))
+            or record.get("stride") == document.get("stride")
+            or len(record.get("stride") or ()) != len(document["shape"])
+            or any(
+                size != 1 and ours != theirs
+                for size, ours, theirs in zip(document["shape"], record["stride"], document["stride"], strict=True)
+            )
+        ):
+            continue
+        record["stride"] = list(document["stride"])
+        entry["stride"] = list(document["stride"])
     module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
     semantic_path.write_text(json.dumps(boundary, sort_keys=True) + "\n")
 
@@ -352,7 +372,24 @@ def prepare_spec_int8(
             from merlin.kernels.shapes import observe_contractions
 
             contractions = [op for op, _ in observe_contractions(module)]
-            for site, contraction in zip(selected, contractions, strict=True):
+            for site, contraction, scale in zip(selected, contractions, reference["scales"], strict=True):
+                keys = declaration_keys(site)
+                if scale.get("readout", ()) is None:
+                    # The reference states this GEMM's accumulator only: it reaches its readout through
+                    # further exact integer work (a convolution_backward's tap accumulation or layout
+                    # change), so there is no direct cast/multiply chain to bind, and the final outputs
+                    # are compared exactly instead.
+                    contraction.attributes["prov.declarations"] = StringAttr(keys["contraction"])
+                    contraction.attributes["prov.region_id"] = StringAttr(
+                        f"spec_int8_contraction_{site['source_operation_ordinal']}"
+                    )
+                    contraction.attributes["prov.operand_load"] = StringAttr("transfer_contracts.operand_load")
+                    contraction.attributes["prov.accumulator_readout"] = StringAttr(
+                        "transfer_contracts.accumulator_readout"
+                    )
+                    site["host_readout_bridge"] = {"status": "composed_integer_readout"}
+                    observations.append((contraction.results[0],))
+                    continue
                 # Readout preserves two separately rounded frontend f32 multiplies.
                 (cast, first_readout, readout), restored_readout, bridge = host_readout_chain(
                     contraction, with_bridge=True
@@ -361,7 +398,6 @@ def prepare_spec_int8(
                 site["host_readout_operation_ordinals"] = [
                     list(module.walk()).index(o) for o in (first_readout, readout)
                 ]
-                keys = declaration_keys(site)
                 for op, key in ((contraction, "contraction"), (cast, "cast"), (first_readout, "mul"), (readout, "mul")):
                     op.attributes["prov.declarations"] = StringAttr(keys[key])
                 contraction.attributes["prov.region_id"] = StringAttr(
@@ -470,10 +506,11 @@ def prepare_spec_int8(
                 for i, v in enumerate(reference["outputs"])
                 if str(originals[i].type.element_type) == "f32"
             }
-            for i, (site, scale) in enumerate(zip(selected, reference["scales"], strict=True)):
-                acc_index = len(originals) + 2 * i
+            acc_index = len(originals)
+            for site, scale, observed in zip(selected, reference["scales"], observations, strict=True):
                 expected_bytes[str(acc_index)] = np.asarray(scale["accumulator"], np.int32).tobytes().hex()
-                expected_bytes[str(acc_index + 1)] = np.asarray(scale["readout"], np.float32).tobytes().hex()
+                if len(observed) == 2:
+                    expected_bytes[str(acc_index + 1)] = np.asarray(scale["readout"], np.float32).tobytes().hex()
                 binding = next(
                     b
                     for b in proof["bindings"]
@@ -498,10 +535,11 @@ def prepare_spec_int8(
                 )
                 site.update(
                     accumulator_output_index=acc_index,
-                    readout_output_index=acc_index + 1,
+                    readout_output_index=acc_index + 1 if len(observed) == 2 else None,
                     actual_dispatch="provider catalog with independently checked WS schedule",
                     scales={k: v for k, v in scale.items() if k not in {"accumulator", "readout"}},
                 )
+                acc_index += len(observed)
             plan["integer_reference"] = dict(
                 status="prepared",
                 engine=reference["engine"],
@@ -516,14 +554,15 @@ def prepare_spec_int8(
             products = {scale["product"] for scale in plan["scales"]}
             if len(products) == 1:
                 record["output_scale"] = next(iter(products))
-            report["output_count"] += 2 * len(observations)
+            observed_count = sum(len(observed) for observed in observations)
+            report["output_count"] += observed_count
             from xdsl.dialects.builtin import StringAttr
 
             from merlin.llvmlower.result_layout import ATTRIBUTE
 
             if ATTRIBUTE in module.attributes:
                 layout = json.loads(module.attributes[ATTRIBUTE].data)
-                layout["results"].extend([None] * (2 * len(observations)))
+                layout["results"].extend([None] * observed_count)
                 module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
             module.verify()
             (directory / "model.mlir").write_text(str(module) + "\n")

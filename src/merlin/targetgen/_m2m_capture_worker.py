@@ -1162,6 +1162,16 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             and isinstance(quant_stats, dict)
             and not quant_stats.get("annotated_contractions")
         )
+        # A core-aten spec_int8 capture (the recipe carries its software admission) always gets its
+        # independent reference file. Its contractions may not have been selected before the capture
+        # (a convolution_backward is generic loops at f32 and becomes GEMMs only when integerized), so
+        # there is no host-readout declaration; under the float readout the declared Q/DQ graph is
+        # still the reference, interpreted with the readout the integerizer emits.
+        declared_graph = recipe is not None and (
+            recipe.get("host_readout_declarations") is not None
+            or contraction_free
+            or (recipe.get("software_admission") is not None and readout_numerics == "float_readout")
+        )
         if selected_engine not in (None, "integer_reference"):
             raise ValueError(f"static int8 capture cannot realize numerical engine {selected_engine!r}")
         with torch.no_grad():
@@ -1181,7 +1191,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 independent, independent_source = selected_pt2e_reference(
                     mdl,
                     tuple(inputs),
-                    declared_readout=recipe.get("host_readout_declarations") is not None or contraction_free,
+                    declared_readout=declared_graph,
                     numerics="float_readout" if contraction_free else readout_numerics,
                 )
                 if not all(
@@ -1193,7 +1203,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 independent_error = f"{type(exc).__name__}: {exc}"[:2000]
                 independent = None
         mdl, integerization_receipt = integerize_static_pt2e(mdl, tuple(inputs), numerics=readout_numerics)
-        if recipe is not None and (recipe.get("host_readout_declarations") is not None or contraction_free):
+        if declared_graph:
             if independent is not None:
                 leaves, _ = _output_abi(independent.output)
                 from merlin.targetgen.core_aten_w8a8_reference import write_pt2e_reference
