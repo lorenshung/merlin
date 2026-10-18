@@ -183,7 +183,14 @@ def prepare_spec_int8(
         module, selection, contract=selection.get("capability_contract"), prospective=True
     )
     plan["prospective_non_contraction_sites"] = prospective
-    non_contraction = not selected and any(site["status"] == "admitted" for site in prospective)
+    # A view result (permute, transpose) aliases its input: it is host metadata, and a recapture would
+    # materialize it as a fresh tensor and break the call's alias contract.
+    views = any(
+        (record.get("case") or {}).get("output_input_aliases")
+        for record in report["cases"]
+        if record["status"] == "bundled"
+    )
+    non_contraction = not selected and not views and any(site["status"] == "admitted" for site in prospective)
     recipes = [
         r
         for r in selection["recipes"]

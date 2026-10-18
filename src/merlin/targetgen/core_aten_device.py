@@ -189,6 +189,7 @@ def run_spike_bundle(
     numeric_policy: str = "fp32",
     software_spec: Path | None = None,
     host_capabilities: Path | None = None,
+    dram_bytes: int | None = None,
 ) -> tuple[dict, dict]:
     from merlin.llvmlower.contraction_quantization import POLICIES
     from merlin.llvmlower.device_offload import load_sidecar
@@ -261,6 +262,13 @@ def run_spike_bundle(
                     report["source_preparation"] = preparation
                     bundled[0]["source_preparation"] = preparation
                 region_offload = getattr(provider, "core_aten_offload", None)
+                # A result that ALIASES an input (a view: permute, a transpose) is host metadata: a device
+                # materialization is a fresh tensor and breaks the call's alias contract.
+                views = [
+                    case.get("overload") for case in bundled if (case.get("case") or {}).get("output_input_aliases")
+                ]
+                if views:
+                    region_offload = None
                 if (
                     numeric_policy == "spec_int8"
                     and not (
@@ -273,6 +281,15 @@ def run_spike_bundle(
                     # Admitted int8 non-contraction sites: the provider binds and lowers its own regions.
                     routing = region_routing_for_bundle(target, device_package, region_offload)
                     reason = "provider region offload of admitted int8 non-contraction sites"
+                elif (
+                    numeric_policy == "spec_int8"
+                    and views
+                    and not (
+                        report["numeric_preparation"]["quantized_contractions"]
+                        or report["numeric_preparation"].get("native_contractions", 0)
+                    )
+                ):
+                    reason = f"view result aliases its input ({views[0]}); host metadata, not device work"
                 elif numeric_policy == "spec_int8" and not (
                     report["numeric_preparation"]["quantized_contractions"]
                     or report["numeric_preparation"].get("native_contractions", 0)
@@ -319,6 +336,9 @@ def run_spike_bundle(
                 dump_all_outputs=True,
                 backend="scalar",
                 device=routing,
+                # A packed map inside the selected DRAM (an RTL simulator's), instead of the functional
+                # simulator's sparse high-address map, so the same ELF can run on the RTL.
+                **({"dram_bytes": dram_bytes} if dram_bytes is not None else {}),
             )
             from merlin.llvmlower.device_build import load_region_offload
 

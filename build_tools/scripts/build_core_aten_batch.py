@@ -131,12 +131,24 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--regrade-existing", action="store_true", help="reapply current comparison policy to retained raw output bytes"
     )
-    parser.add_argument("--numeric-policy", choices=("fp32", "int8_w8a8"), default="fp32")
+    parser.add_argument("--numeric-policy", choices=("fp32", "int8_w8a8", "spec_int8"), default="fp32")
+    parser.add_argument("--software-spec", type=Path, help="spec_int8: the selected software spec")
+    parser.add_argument("--host-capabilities", type=Path, help="spec_int8: the selected host capabilities")
+    parser.add_argument(
+        "--dram-mb",
+        type=int,
+        help="pack the image inside this much DRAM at the default base (an RTL simulator's memory) "
+        "instead of the functional simulator's sparse high-address map",
+    )
     args = parser.parse_args(argv)
     if bool(args.target) != bool(args.device_package):
         parser.error("--target and --device-package must be supplied together")
-    if args.numeric_policy == "int8_w8a8" and not args.target:
-        parser.error("--numeric-policy int8_w8a8 requires --target")
+    if args.numeric_policy in {"int8_w8a8", "spec_int8"} and not args.target:
+        parser.error(f"--numeric-policy {args.numeric_policy} requires --target")
+    if args.numeric_policy == "spec_int8" and not (args.software_spec and args.host_capabilities):
+        parser.error("--numeric-policy spec_int8 requires --software-spec and --host-capabilities")
+    if args.dram_mb is not None and args.dram_mb < 1:
+        parser.error("--dram-mb must be positive")
     if args.target:
         try:
             load_execution_provider(args.target, args.execution_provider)
@@ -151,6 +163,12 @@ def main(argv: list[str] | None = None) -> int:
         device_package=args.device_package,
         execution_provider=args.execution_provider,
         rtl_facts=args.rtl_facts,
+        **(
+            dict(software_spec=args.software_spec, host_capabilities=args.host_capabilities)
+            if args.numeric_policy == "spec_int8"
+            else {}
+        ),
+        **({"dram_bytes": args.dram_mb * 1024 * 1024} if args.dram_mb is not None else {}),
     )
     corpus_path = args.corpus or artifacts_dir() / "verification" / "core-aten" / "core_aten_test_cases.json"
     corpus = json.loads(corpus_path.read_text(encoding="utf-8"))
