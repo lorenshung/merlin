@@ -68,6 +68,9 @@ def test_unavailable_statistics_are_structural_typed_refusals(tmp_path, stride, 
     refusal = caught.value
     assert isinstance(refusal, M2MUnavailable) and not isinstance(refusal, NumericCaptureRefused)
     assert refusal.code == "input_storage_unavailable"
+    assert refusal.details["classification"] == "suite_defect"
+    assert refusal.details["reason_code"] == "recorded_inputs_do_not_define_cpu_reads"
+    assert refusal.details["placement"] == "host" and refusal.details["execution"] == "refused"
     assert refusal.details["row_count"] == 2
     assert [entry["argument"] for entry in refusal.details["unavailable"]] == ["mean", "rstd"]
     assert all(

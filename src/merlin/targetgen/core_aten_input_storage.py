@@ -84,5 +84,13 @@ def require_native_input_storage(overload, arguments):
     if unavailable:
         raise InputStorageUnavailable(
             "CPU layer-norm backward raw statistic reads lack recorded input storage",
-            details={"overload": overload, "row_count": rows, "unavailable": unavailable},
+            details={
+                "overload": overload,
+                "classification": "suite_defect",
+                "reason_code": "recorded_inputs_do_not_define_cpu_reads",
+                "placement": "host",
+                "execution": "refused",
+                "row_count": rows,
+                "unavailable": unavailable,
+            },
         )
