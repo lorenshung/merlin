@@ -212,9 +212,14 @@ def prepare_numeric_fixture(bundle: Path, report: dict, flow: dict) -> None:
             package=Path(flow["device_package"]),
         )
     # A captured W8A8 graph is quantized at preparation (quantized_contractions); a capture that is
-    # already i8 x i8 -> i32 is admitted as is (native_contractions). Either is an admitted
-    # contraction, and both need the independent exact integer reference.
-    admitted = (plan.get("quantized_contractions") or 0) + (plan.get("native_contractions") or 0)
+    # already i8 x i8 -> i32 is admitted as is (native_contractions); a contraction-free program's
+    # int8 sites are admitted as quantized islands (quantized_non_contraction_sites). Each needs the
+    # independent exact integer reference.
+    admitted = (
+        (plan.get("quantized_contractions") or 0)
+        + (plan.get("native_contractions") or 0)
+        + (plan.get("quantized_non_contraction_sites") or 0)
+    )
     if not admitted or (plan.get("integer_reference") or {}).get("status") != "prepared":
         raise ValueError("scored capsule has no admitted contraction with an exact integer reference")
     report["numeric_preparation"] = plan

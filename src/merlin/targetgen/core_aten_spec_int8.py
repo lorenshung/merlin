@@ -668,7 +668,7 @@ def _nested_in_linalg(op) -> bool:
     return False
 
 
-def non_contraction_sites(module, selection, *, contract=None):
+def non_contraction_sites(module, selection, *, contract=None, prospective=False):
     """Screen every top-level non-contraction site of an integer program for device placement.
 
     A site is one elementwise, reduction or movement operation outside the contractions
@@ -678,6 +678,10 @@ def non_contraction_sites(module, selection, *, contract=None):
     HW :func:`eligibility.is_eligible`. Nothing here selects a backend or a lowering: an admitted site
     is a placement candidate only. A float site is screened like any other and refused by precision,
     which is the honest answer until a recipe quantizes it.
+
+    ``prospective`` screens a FLOATING source program as the int8 program its static recipe would
+    make of it (every floating site as int8 work), the way a contraction is screened prospectively
+    before its recapture; it decides whether a recapture is worth making, never what is placed.
     """
     from merlin.common import mlir_query as mq
     from merlin.kernels.shapes import observe_contractions
@@ -751,7 +755,7 @@ def non_contraction_sites(module, selection, *, contract=None):
         kind = cc.reduction_kind(op) if family == "reduction" else None
         in_dtype = precision(tensors[0]) if tensors else (operand_dtypes[0] if operand_dtypes else None)
         out_dtype = result_dtypes[0] if result_dtypes else None
-        quantized = id(op) in islands
+        quantized = id(op) in islands or (prospective and "f32" in result_dtypes)
         if quantized:
             # Int8 work in the frontend's floating spelling (dequantize -> op -> quantize): its codes are
             # int8 on both edges, so it is screened as the int8 operation the island computes.

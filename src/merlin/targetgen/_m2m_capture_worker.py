@@ -1155,6 +1155,13 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         # The recipe states which readout the target executes (quant_recipe.readout_numerics); the
         # frontend default stays the portable float readout.
         readout_numerics = (recipe or {}).get("readout_numerics", "float_readout")
+        from merlin.capture.integerization import non_contraction_annotations
+
+        contraction_free = (
+            non_contraction_annotations(quant_stats) is not None
+            and isinstance(quant_stats, dict)
+            and not quant_stats.get("annotated_contractions")
+        )
         if selected_engine not in (None, "integer_reference"):
             raise ValueError(f"static int8 capture cannot realize numerical engine {selected_engine!r}")
         with torch.no_grad():
@@ -1168,11 +1175,14 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             try:
                 from merlin.targetgen.core_aten_w8a8_reference import selected_pt2e_reference
 
+                # A quantized program with no contraction has no readout to choose: its independent
+                # reference is the Q/DQ graph interpreted as declared, which the host-readout reference
+                # does (and it records the post-call inputs the boundary binds).
                 independent, independent_source = selected_pt2e_reference(
                     mdl,
                     tuple(inputs),
-                    declared_readout=recipe.get("host_readout_declarations") is not None,
-                    numerics=readout_numerics,
+                    declared_readout=recipe.get("host_readout_declarations") is not None or contraction_free,
+                    numerics="float_readout" if contraction_free else readout_numerics,
                 )
                 if not all(
                     hasattr(independent, field)
@@ -1183,7 +1193,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 independent_error = f"{type(exc).__name__}: {exc}"[:2000]
                 independent = None
         mdl, integerization_receipt = integerize_static_pt2e(mdl, tuple(inputs), numerics=readout_numerics)
-        if recipe is not None and recipe.get("host_readout_declarations") is not None:
+        if recipe is not None and (recipe.get("host_readout_declarations") is not None or contraction_free):
             if independent is not None:
                 leaves, _ = _output_abi(independent.output)
                 from merlin.targetgen.core_aten_w8a8_reference import write_pt2e_reference
@@ -1191,6 +1201,12 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 write_pt2e_reference(out / "spec-int8-reference.json", independent, leaves, independent_source)
         from merlin.capture.integerization import contraction_partition
 
+        annotations = non_contraction_annotations(quant_stats)
+        if annotations is not None and integerization_receipt.get("quantized_contractions_seen") == 0:
+            # A quantized program with no contraction: mark it so the contraction-census checks can
+            # tell "nothing to integerize" from "integerization dropped the work".
+            integerization_receipt["integer_program"] = "non_contraction"
+            integerization_receipt["non_contraction_annotations"] = annotations
         try:
             integer_partition = contraction_partition(integerization_receipt)
         except ValueError as exc:

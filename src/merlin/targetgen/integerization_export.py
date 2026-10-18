@@ -9,6 +9,11 @@ def receipt_export_complete(receipt: dict | None, partition: dict | None) -> boo
     """Check worker export evidence, retaining v1's absent-batch default."""
     if receipt is None:
         return True
+    from merlin.capture.integerization import non_contraction_program
+
+    if non_contraction_program(receipt):
+        # No contraction to export: the program's integer work is its annotated non-contraction ops.
+        return bool(partition is not None and receipt["golden_agreement"]["status"] == "passed")
     return bool(
         partition is not None
         and receipt.get("accumulator_bound_checked") is True

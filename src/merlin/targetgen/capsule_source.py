@@ -130,13 +130,37 @@ def _stderr_cause(stderr: str, *, limit: int = 1800) -> str:
     )
 
 
-def _require_integer_contraction(program: str, *, scheme: str | None, recipe: dict | None) -> None:
+def _require_integer_contraction(
+    program: str, *, scheme: str | None, recipe: dict | None, meta: dict | None = None
+) -> None:
     """A W8A8 declaration is not evidence of an integer datapath.
 
     TorchAO may leave an ineligible Linear unchanged (for example, tiny dimensions)
     while model2MLIR still labels the module with the requested scheme. Inspect the
     parsed arithmetic before admitting or caching that capture as an integer test.
+
+    A program whose receipt marks it contraction-free (only affine maps, movements and window sums
+    were quantized) owes no contraction: it must instead carry at least one int8 quantize in the
+    parsed program, so the declaration is still checked against actual arithmetic.
     """
+    from merlin.capture.integerization import non_contraction_program
+
+    if non_contraction_program((meta or {}).get("integerization_receipt")):
+        from merlin.common import mlir_query as query
+
+        try:
+            module = query.parse(program)
+            quantizes = [
+                op
+                for op in query.walk(module)
+                if query.op_name(op) == "quant_ext.quantize_per_tensor"
+                and query.type_shape_dtype(op.results[0].type)[1] == "i8"
+            ]
+        except Exception as exc:
+            raise M2MUnavailable(f"cannot verify W8A8 capture arithmetic: {exc}") from exc
+        if quantizes:
+            return
+        raise M2MUnavailable("contraction-free W8A8 capture carries no int8 quantize")
     integer_recipe = recipe is not None and all(
         (recipe.get(part) or {}).get("dtype") in {"int8", "i8"} for part in ("activation", "weight")
     )
@@ -229,7 +253,12 @@ def _require_pt2e_integerization_receipt(
         raise M2MUnavailable(
             f"integerization receipt census {seen} disagrees with PT2E's {annotated} annotated contractions"
         )
-    if seen < 1 or seen != rewritten + remaining:
+    from merlin.capture.integerization import non_contraction_annotations, non_contraction_program
+
+    contraction_free = non_contraction_program(receipt)
+    if contraction_free and receipt["non_contraction_annotations"] != non_contraction_annotations(quantization_stats):
+        raise M2MUnavailable("integerization receipt's non-contraction census disagrees with PT2E's annotations")
+    if (seen < 1 and not contraction_free) or seen != rewritten + remaining:
         raise M2MUnavailable("integerization receipt has inconsistent quantized contraction census")
     if remaining != 0 or rewritten != seen:
         raise M2MUnavailable(f"integerization receipt has {remaining} quantized contractions remaining")
@@ -254,9 +283,10 @@ def _require_pt2e_integerization_receipt(
         raise M2MUnavailable(f"integerization receipt reports refusal(s): {refusals!r}")
     # Worst case signed-int8 product bound; compare using the *same* arithmetic
     # as the upstream integerizer, without assuming a particular accelerator.
-    max_k = count(receipt.get("max_reduction_k"), "accumulator reduction K")
-    if receipt.get("accumulator_bound_checked") is not True or max_k < 1 or max_k * 128 * 128 > (1 << 31) - 1:
-        raise M2MUnavailable("integerization receipt does not prove a safe i32 accumulator")
+    if not contraction_free:
+        max_k = count(receipt.get("max_reduction_k"), "accumulator reduction K")
+        if receipt.get("accumulator_bound_checked") is not True or max_k < 1 or max_k * 128 * 128 > (1 << 31) - 1:
+            raise M2MUnavailable("integerization receipt does not prove a safe i32 accumulator")
 
     engine = (meta.get("recipe") or {}).get("software_numerical_engine")
     if engine not in (None, "integer_reference"):
@@ -1137,7 +1167,7 @@ class PytorchRefSource:
                     and capture_cache.frontend_trace_matches(cached, cached_slot)
                 ):
                     cached_program = (cached_slot / "linalg.mlir").read_text(encoding="utf-8")
-                    _require_integer_contraction(cached_program, scheme=scheme, recipe=recipe)
+                    _require_integer_contraction(cached_program, scheme=scheme, recipe=recipe, meta=cached)
                     if _static_pt2e_model(op, scheme=scheme, recipe=recipe, already_quantized=already_quantized):
                         _require_pt2e_integerization_receipt(
                             cached_program, cached, agreement_tolerance=agreement_tolerance, capture_root=cached_slot
@@ -1299,7 +1329,7 @@ class PytorchRefSource:
                 f"0-opaque. Opaque ops: {top or '(none reported)'}"
             )
         program = (workdir / "linalg.mlir").read_text(encoding="utf-8")
-        _require_integer_contraction(program, scheme=scheme, recipe=recipe)
+        _require_integer_contraction(program, scheme=scheme, recipe=recipe, meta=meta)
         if _static_pt2e_model(op, scheme=scheme, recipe=recipe, already_quantized=already_quantized):
             _require_pt2e_integerization_receipt(
                 program, meta, agreement_tolerance=agreement_tolerance, capture_root=workdir

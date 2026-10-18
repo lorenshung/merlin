@@ -316,9 +316,12 @@ def verified_static_integerization(projection: dict | None, *, receipt_sha256: s
     exported_bmm = receipt.get("exported_integer_bmm_count", 0)
     if type(emitted_bmm) is not int or type(exported_bmm) is not int or emitted_bmm < 0 or emitted_bmm != exported_bmm:
         return False
+    from merlin.capture.integerization import non_contraction_program
+
+    contraction_free = non_contraction_program(receipt)
     if (
         type(count) is not int
-        or count <= 0
+        or (count <= 0 and not contraction_free)
         or type(receipt.get("quantized_contractions_integerized")) is not int
         or receipt.get("quantized_contractions_integerized") != count
         or type(receipt.get("quantized_contractions_remaining")) is not int
@@ -327,7 +330,7 @@ def verified_static_integerization(projection: dict | None, *, receipt_sha256: s
         or receipt.get("refusals") != []
         or type(receipt.get("exported_integer_mm_count")) is not int
         or receipt["exported_integer_mm_count"] < 0
-        or receipt["exported_integer_mm_count"] + exported_bmm <= 0
+        or (receipt["exported_integer_mm_count"] + exported_bmm <= 0 and not contraction_free)
         or type(receipt.get("integer_mm_emitted")) is not int
         or receipt.get("integer_mm_emitted") != receipt["exported_integer_mm_count"]
     ):

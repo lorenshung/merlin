@@ -106,3 +106,16 @@ def test_reviewed_crossings_admit_the_island_sites(selection):
         row["evidence"]["status"] = "reviewed"
     _module, sites = _sites(reviewed, _NEG)
     assert all(site["status"] == "admitted" for site in sites), [site["reasons"] for site in sites]
+
+
+def test_a_floating_source_is_screened_prospectively_as_its_int8_program(selection):
+    """Before the recapture, a floating source's sites are screened as the int8 work its recipe makes."""
+    import copy
+
+    reviewed = copy.deepcopy(selection)
+    for row in reviewed["spec"]["transfer_contracts"]["declarations"]:
+        row["evidence"]["status"] = "reviewed"
+    with IR_LOCK:
+        module = parse_mlir_text(_FLOAT)
+        (site,) = non_contraction_sites(module, reviewed, contract=reviewed["capability_contract"], prospective=True)
+    assert site["quantized_island"] and site["status"] == "admitted", site["reasons"]

@@ -175,6 +175,15 @@ def prepare_spec_int8(
     plan = admission_plan(module, selection)
     plan["source_sha256_before"] = hashlib.sha256(original).hexdigest()
     selected = [site for site in plan["sites"] if site["status"] == "admitted"]
+    # A program with no admitted contraction is still worth recapturing when its floating sites would
+    # be admitted as int8 work (affine maps, movements, window sums): the static recipe quantizes them.
+    from merlin.targetgen.core_aten_spec_int8 import non_contraction_sites
+
+    prospective = non_contraction_sites(
+        module, selection, contract=selection.get("capability_contract"), prospective=True
+    )
+    plan["prospective_non_contraction_sites"] = prospective
+    non_contraction = not selected and any(site["status"] == "admitted" for site in prospective)
     recipes = [
         r
         for r in selection["recipes"]
@@ -185,6 +194,9 @@ def prepare_spec_int8(
         and r["activation"]["symmetric"]
         and (r["activation"]["quant_min"], r["activation"]["quant_max"]) == (-128, 127)
     ]
+    if non_contraction and len(recipes) != 1:
+        non_contraction = False
+        plan["refusal_code"] = "no_static_recipe"
     if selected and (len(recipes) != 1 or provider is None or not hasattr(provider, "admit_numeric_schedule")):
         for site in selected:
             site.update(
@@ -206,7 +218,7 @@ def prepare_spec_int8(
             fft_refusals=["FFT preflight needs one declared static activation recipe"],
         )
         needs_fft_preflight = False
-    if selected or needs_fft_preflight:
+    if selected or non_contraction or needs_fft_preflight:
         (directory / "model.before_spec_int8.mlir").write_bytes(original)
 
         def declaration_keys(site):
@@ -270,12 +282,13 @@ def prepare_spec_int8(
                     refusal_code=exc.code,
                     reasons=[str(exc)],
                 )
+            non_contraction = False
             plan["refusal_code"] = exc.code
             plan["refusal_details"] = exc.details
             if exc.code == "fft_admission_refused":
                 plan["fft_refusals"] = [str(exc)]
             selected = []
-        if selected:
+        if selected or non_contraction:
             reference_path = Path(artifact.meta["weights_manifest"]).parent / "spec-int8-reference.json"
             reference = json.loads(reference_path.read_text())
             (directory / "spec-int8-reference.json").write_bytes(reference_path.read_bytes())
@@ -296,8 +309,16 @@ def prepare_spec_int8(
                     site["status"] = "refused"
                     site["reasons"].append("exact source operator declaration was not preserved through integerization")
                 captured_plan["status"] = "refused"
-            if continuity["status"] != "preserved" or any(
-                site["status"] != "admitted" for site in captured_plan["sites"]
+            island_sites = [site for site in captured_plan["non_contraction_sites"] if site["quantized_island"]]
+            non_contraction_admitted = (
+                not captured_plan["sites"]
+                and bool(island_sites)
+                and all(site["status"] == "admitted" for site in island_sites)
+            )
+            if (
+                continuity["status"] != "preserved"
+                or any(site["status"] != "admitted" for site in captured_plan["sites"])
+                or (not captured_plan["sites"] and not non_contraction_admitted)
             ):
                 # Refuse the complete capture before replacing the host source.
                 plan = captured_plan
@@ -313,6 +334,8 @@ def prepare_spec_int8(
                 raise ValueError("captured contractions and independent PT2E reference census differ")
             module = prepared_module
             plan = captured_plan
+            if non_contraction_admitted:
+                plan["status"] = "admitted"
             plan["source_sha256_before"] = hashlib.sha256(original).hexdigest()
             plan["capture_recipe"] = recipe
             plan["capture_meta"] = artifact.meta
@@ -349,9 +372,17 @@ def prepare_spec_int8(
                 operations[row["source_operation_ordinal"]].attributes["prov.declarations"] = StringAttr(
                     json.dumps(keys, sort_keys=True)
                 )
-            proof = provider.admit_numeric_schedule(str(module), package=package, numeric_policy=selection["spec"])
+            # The provider proves contraction schedules; a contraction-free program has none to prove.
+            proof = (
+                provider.admit_numeric_schedule(str(module), package=package, numeric_policy=selection["spec"])
+                if selected
+                else None
+            )
             plan["schedule_proof"] = proof
             plan["quantized_contractions"] = len(selected)
+            plan["quantized_non_contraction_sites"] = sum(
+                site["status"] == "admitted" and site["quantized_island"] for site in plan["non_contraction_sites"]
+            )
             plan["calibration"].update(
                 performed=True,
                 recipe=recipe,
@@ -379,9 +410,9 @@ def prepare_spec_int8(
                 if path.exists():
                     (directory / name).write_bytes(path.read_bytes())
             report["output_count"] = prepared_report["output_count"]
-        if not selected:
+        if not selected and not non_contraction:
             plan["status"] = "refused"
-        if selected:
+        if selected or non_contraction:
             records = [r for r in report["cases"] if r["status"] == "bundled"]
             if len(records) != 1:
                 raise ValueError("static int8 needs single-case attribution")
