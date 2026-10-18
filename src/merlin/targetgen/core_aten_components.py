@@ -163,7 +163,12 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         )
         return None
     sign_proofs = []
-    if any(dtype in {"i8", "i16", "i32", "i64", "f16", "bf16", "f64", "complex<f32>"} for dtype in native_types):
+    unquantizable_float_words = any(
+        dtype == "f32" and not np.isfinite(value).all() for dtype, value in zip(native_types, arrays, strict=True)
+    )
+    if unquantizable_float_words or any(
+        dtype in {"i8", "i16", "i32", "i64", "f16", "bf16", "f64", "complex<f32>"} for dtype in native_types
+    ):
         from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
 
         sign_bounds, sign_proofs = rewrite_native_sign_components(module, canonical_bf16_nan=ieee_enabled)

@@ -294,3 +294,28 @@ def test_declared_bfloat_nan_negation_uses_device_words_then_cpu_canonicalizatio
     for payload in range(1, 128):
         words = [0x7F80 | payload, 0xFF80 | payload, 0, 0x8000]
         assert [value & 0xFFFF for value in evaluate(source, [words])] == [0x7FC0, 0x7FC0, 0x8000, 0]
+
+
+def test_binary32_sign_words_preserve_nonfinite_payloads_without_quantization():
+    from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
+
+    source = parse_mlir_text("""module {
+      func.func @forward(%x:tensor<4xf32>) -> tensor<4xf32> {
+        %e=tensor.empty() : tensor<4xf32>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x:tensor<4xf32>) outs(%e:tensor<4xf32>) {
+        ^bb0(%a:f32,%unused:f32):
+          %v=arith.negf %a : f32
+          linalg.yield %v : f32
+        } -> tensor<4xf32>
+        return %r : tensor<4xf32>
+      }}""")
+    bounds, proofs = rewrite_native_sign_components(source)
+    assert proofs[0]["nan_payload"] == "preserved"
+    assert rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
+    for words in [
+        [0, 0x80000000, 0x7F800000, 0xFF800000],
+        [0x7FC00001, 0xFFC00012, 0x7F800001, 0xFF800001],
+        [1, 0x80000001, 0x7F7FFFFF, 0xFF7FFFFF],
+    ]:
+        assert [v & 0xFFFFFFFF for v in evaluate(source, [words])] == [v ^ 0x80000000 for v in words]
