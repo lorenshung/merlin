@@ -17,7 +17,7 @@ pins:
       shift and floor-division decompositions, PT2E integer-contraction capture, and literal
       quantization-parameter lowering; missing any of these leaves supported operations opaque.
     repo_canonical: https://github.com/ucb-bar/model2MLIR.git
-    commit: "e05e614790ad80f24790255d2303b0365c3881a5"
+    commit: "23b0cd5f5d1ff0c052bbc344e196b843b5faf1ea"
     root_env: MERLIN_M2M_DIR
     requires_paths:
       - m2m/ir/decompositions.py
@@ -51,6 +51,7 @@ pins:
       - m2m/ir/cpu_batch_norm.py
       - m2m/ir/cpu_reductions.py
       - m2m/ir/cpu_pointwise.py
+      - m2m/ir/cpu_arithmetic.py
       - m2m/ir/cpu_moments.py
       - m2m/ir/cpu_group_norm.py
       - m2m/ir/cpu_layer_norm_backward.py
@@ -67,4 +68,5 @@ pins:
       direct/nested complex dropout result structures, complete traced tuple selection,
       exact global CPU RNG provenance, full real FFT spectra, shared native embedding
       dispatch, CPU storage rounding, statistics and traversal semantics, and upstream static-cache
-      compatibility with post-export eager execution.
+      compatibility with post-export eager execution, native CPU add/subtract
+      storage bits, and exact asymmetric and unsigned byte contractions.
