@@ -146,6 +146,16 @@ def scalarized_contraction_candidates(module):
 def prepare_spec_int8(
     directory: Path,
     report: dict,
+    **kwargs,
+):
+    from merlin.targetgen.core_aten_profitability import prepare
+
+    return prepare(directory, report, _prepare_spec_int8, **kwargs)
+
+
+def _prepare_spec_int8(
+    directory: Path,
+    report: dict,
     *,
     target: str,
     facts: dict,
@@ -166,6 +176,23 @@ def prepare_spec_int8(
     empty = empty_host_plan(directory, report, selection)
     if empty is not None:
         return empty
+    module = parse_mlir_file(directory / "model.mlir")
+    if any("prov.input_metadata_mutation" in op.attributes for op in module.walk()):
+        # Resizing/restriding caller storage is a host descriptor effect. Device
+        # materialization cannot replace that effect or prove its alias ABI.
+        from merlin.targetgen.core_aten_exact_dtype import retain_native_host
+
+        (directory / "exact-dtype-refusal.json").write_text(
+            json.dumps(
+                dict(
+                    family="movement",
+                    code="input_metadata_mutation_requires_host",
+                    reason="input_metadata_mutation_requires_host",
+                )
+            )
+            + "\n"
+        )
+        return retain_native_host(directory, report, selection)
     original = (directory / "model.mlir").read_bytes()
     prepare = getattr(provider, "prepare_bundle", None)
     preparation = prepare(directory, target=target, facts=facts) if prepare is not None else {}

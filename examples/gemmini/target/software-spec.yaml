@@ -2,6 +2,27 @@
 schema: merlin.software_spec.v1
 target: gemmini
 status: reviewed
+placement_cost_model:
+  schema: merlin.placement_cost.v1
+  comparison: strictly_lower_estimated_cycles
+  unknown_cost: retain_original_host
+  # These scheduling estimates are assumptions, not extracted timing facts.
+  # Array dimensions are read independently from corroborated selected RTL facts.
+  rates:
+    host_word_bits: 64
+    host_arithmetic_cycles: 1
+    host_math_cycles: 32
+    host_index_cycles: 1
+    host_copy_cycles_per_byte: 0.125
+    host_quantize_cycles_per_byte: 8
+    dma_cycles_per_byte: 0.0625
+    instruction_issue_cycles: 1
+    compute_tile_cycles: 16
+    fence_cycles: 32
+    dispatch_cycles: 64
+  evidence:
+    review_status: "authored, pending operator review"
+    provenance: "Static cycle model: scalar one word per cycle, memcpy eight bytes per cycle, DMA sixteen bytes per cycle; tile latency, issue, synchronization and dispatch are provisional engineering estimates, not calibrated measurements"
 # Scope: accelerator contraction and exact-op host declarations below. The
 # dequantization declaration is limited to its stated operand/result types and
 # ranks; it does not declare device execution or arbitrary shapes.
