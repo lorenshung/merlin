@@ -85,8 +85,9 @@ def _convolution(x, w, bias, stride, padding, dilation, groups):
     return output
 
 
-def _pool(x, name, args, kwargs):
-    dims = x.ndim - 2
+def _pool(x, name, args, kwargs, *, gradient=None):
+    dims = int(name.split("pool", 1)[1][0])
+    prefix = x.ndim - dims
     if "adaptive" in name:
         output_size = args[1]
         shape = (output_size,) * dims if isinstance(output_size, int) else tuple(output_size)
@@ -94,7 +95,8 @@ def _pool(x, name, args, kwargs):
         def windows(point):
             return [
                 range(
-                    point[d] * x.shape[2 + d] // shape[d], ((point[d] + 1) * x.shape[2 + d] + shape[d] - 1) // shape[d]
+                    point[d] * x.shape[prefix + d] // shape[d],
+                    ((point[d] + 1) * x.shape[prefix + d] + shape[d] - 1) // shape[d],
                 )
                 for d in range(dims)
             ]
@@ -114,7 +116,7 @@ def _pool(x, name, args, kwargs):
         include = args[5] if len(args) > 5 else kwargs.get("count_include_pad", True)
         divisor_override = args[6] if len(args) > 6 else kwargs.get("divisor_override")
         shape = []
-        for size, k, s, p in zip(x.shape[2:], kernel, stride, pad, strict=True):
+        for size, k, s, p in zip(x.shape[prefix:], kernel, stride, pad, strict=True):
             out = (size + 2 * p - k + (s - 1 if ceil else 0)) // s + 1
             if ceil and (out - 1) * s >= size + p:
                 out -= 1
@@ -124,22 +126,61 @@ def _pool(x, name, args, kwargs):
             return [
                 range(
                     point[d] * stride[d] - pad[d],
-                    min(point[d] * stride[d] - pad[d] + kernel[d], x.shape[2 + d] + pad[d]),
+                    min(point[d] * stride[d] - pad[d] + kernel[d], x.shape[prefix + d] + pad[d]),
                 )
                 for d in range(dims)
             ]
 
-    out = np.empty((*x.shape[:2], *shape), dtype=object)
+    out = np.empty((*x.shape[:prefix], *shape), dtype=object)
+    adjoint = np.full(x.shape, Fraction(0), dtype=object) if gradient is not None else None
+    if gradient is not None and gradient.shape != out.shape:
+        raise ValueError("pool gradient shape does not match forward geometry")
     for index in np.ndindex(out.shape):
-        ranges = windows(index[2:])
-        valid = [p for p in product(*ranges) if all(0 <= p[d] < x.shape[2 + d] for d in range(dims))]
+        ranges = windows(index[prefix:])
+        valid = [p for p in product(*ranges) if all(0 <= p[d] < x.shape[prefix + d] for d in range(dims))]
         count = divisor_override or (
             math.prod(len(r) for r in ranges) if "adaptive" not in name and include else len(valid)
         )
         if not count:
             raise ValueError("exact average pool has an empty divisor")
-        out[index] = sum((x[(*index[:2], *p)] for p in valid), Fraction(0)) / count
-    return out
+        if gradient is None:
+            out[index] = sum((x[(*index[:prefix], *p)] for p in valid), Fraction(0)) / count
+        else:
+            for point in valid:
+                adjoint[(*index[:prefix], *point)] += gradient[index] / count
+    return out if gradient is None else adjoint
+
+
+def _pool_backward(gradient, shape, name, args, kwargs):
+    source = np.empty(shape, dtype=object)
+    dims = int(name.split("pool", 1)[1][0])
+    forward_args = (source, gradient.shape[-dims:]) if "adaptive" in name else (source, *args[2:])
+    return _pool(source, name, forward_args, kwargs, gradient=gradient)
+
+
+def _fold(columns, output_size, kernel_size, dilation, padding, stride):
+    """Adjoint of spatial patch extraction, accumulating rational entries unchanged."""
+    unbatched = columns.ndim == 2
+    if unbatched:
+        columns = columns[None]
+    taps = math.prod(kernel_size)
+    channels, remainder = divmod(columns.shape[1], taps)
+    blocks = tuple(
+        (s + 2 * p - d * (k - 1) - 1) // t + 1
+        for s, p, d, k, t in zip(output_size, padding, dilation, kernel_size, stride, strict=True)
+    )
+    if remainder or math.prod(blocks) != columns.shape[2] or any(b <= 0 for b in blocks):
+        raise ValueError("fold columns do not match spatial geometry")
+    out = np.full((columns.shape[0], channels, *output_size), Fraction(0), dtype=object)
+    for batch, channel in np.ndindex(out.shape[:2]):
+        for tap_index, tap in enumerate(np.ndindex(tuple(kernel_size))):
+            for block_index, block in enumerate(np.ndindex(blocks)):
+                point = tuple(
+                    b * s - p + k * d for b, s, p, k, d in zip(block, stride, padding, tap, dilation, strict=True)
+                )
+                if all(0 <= i < s for i, s in zip(point, output_size, strict=True)):
+                    out[(batch, channel, *point)] += columns[batch, channel * taps + tap_index, block_index]
+    return out[0] if unbatched else out
 
 
 def convolution_backward(operands, args, node_name, sites):
@@ -215,16 +256,17 @@ def evaluate_operation(target, args, kwargs):
 
     name = str(target)
     flat = torch.utils._pytree.tree_leaves((args, kwargs))
-    exact = next(x for x in flat if isinstance(x, ExactTensor))
+    exact = next((x for x in flat if isinstance(x, ExactTensor)), None)
+    source = exact if exact is not None else next((x for x in flat if isinstance(x, torch.Tensor)), None)
     if "out" in kwargs or name.endswith(".out"):
         raise ValueError("exact reference refuses output-buffer mutation")
-    dtype = kwargs.get("dtype") or exact.dtype
+    dtype = kwargs.get("dtype") or getattr(source, "dtype", torch.get_default_dtype())
     if dtype not in {None, torch.float16, torch.float32, torch.float64, torch.bfloat16}:
         raise ValueError("exact reference refuses an implicit integer cast")
     a = [exact_array(x) if isinstance(x, (ExactTensor, torch.Tensor)) else x for x in args]
     op = name.split(".")[1] if name.startswith("aten.") else name
     if op in {"add", "sub", "mul", "div", "true_divide"}:
-        alpha = rational(kwargs.get("alpha", 1))
+        alpha = rational(args[2] if len(args) > 2 and op in {"add", "sub"} else kwargs.get("alpha", 1))
         left, right = exact_array(a[0]), exact_array(a[1])
         if op in {"add", "sub"}:
             right = right * alpha
@@ -273,6 +315,10 @@ def evaluate_operation(target, args, kwargs):
         out = _convolution(a[0], a[1], a[2] if len(a) > 2 else None, stride, pad, dilation, groups)
     elif op.startswith(("avg_pool", "adaptive_avg_pool", "_adaptive_avg_pool")) and "backward" not in op:
         out = _pool(a[0], name, args, kwargs)
+    elif op.startswith(("avg_pool", "adaptive_avg_pool", "_adaptive_avg_pool")) and op.endswith("backward"):
+        out = _pool_backward(a[0], a[1].shape, name, args, kwargs)
+    elif op == "col2im":
+        out = _fold(a[0], *args[1:])
     elif op in {"view", "reshape", "_unsafe_view", "flatten"}:
         if op == "flatten":
             start = (args[1] if len(args) > 1 else 0) % a[0].ndim
@@ -310,6 +356,8 @@ def evaluate_operation(target, args, kwargs):
             for old, new in zip((1,) * (len(args[1]) - a[0].ndim) + a[0].shape, args[1], strict=True)
         )
         out = np.broadcast_to(a[0], shape)
+    elif op == "repeat":
+        out = np.tile(a[0], args[1])
     elif op in {"slice", "select"}:
         indices = [slice(None)] * a[0].ndim
         indices[args[1]] = slice(args[2], args[3], args[4] if len(args) > 4 else 1) if op == "slice" else args[2]
@@ -318,11 +366,19 @@ def evaluate_operation(target, args, kwargs):
         out = (np.concatenate if op == "cat" else np.stack)(
             [exact_array(x) for x in args[0]], axis=args[1] if len(args) > 1 else 0
         )
-    elif op in {"constant_pad_nd"}:
+    elif op == "constant_pad_nd" or op.startswith(("reflection_pad", "replication_pad")):
         widths = [(0, 0)] * a[0].ndim
         for i in range(len(args[1]) // 2):
             widths[-1 - i] = tuple(args[1][2 * i : 2 * i + 2])
-        out = np.pad(a[0], widths, constant_values=rational(args[2] if len(args) > 2 else 0))
+        # Negative padding crops first; NumPy accepts only nonnegative widths.
+        cropped = a[0][
+            tuple(slice(max(-lo, 0), size - max(-hi, 0)) for size, (lo, hi) in zip(a[0].shape, widths, strict=True))
+        ]
+        widths = [(max(lo, 0), max(hi, 0)) for lo, hi in widths]
+        if op == "constant_pad_nd":
+            out = np.pad(cropped, widths, constant_values=rational(args[2] if len(args) > 2 else 0))
+        else:
+            out = np.pad(cropped, widths, mode="reflect" if op.startswith("reflection") else "edge")
     elif op in {"slice_scatter", "select_scatter"}:
         out = a[0].copy()
         indices = [slice(None)] * out.ndim
@@ -330,9 +386,10 @@ def evaluate_operation(target, args, kwargs):
             slice(args[3], args[4], args[5] if len(args) > 5 else 1) if op == "slice_scatter" else args[3]
         )
         out[tuple(indices)] = a[1]
-    elif op in {"fill", "full_like", "zeros_like", "ones_like"}:
-        value = 0 if op == "zeros_like" else 1 if op == "ones_like" else args[1]
-        out = np.full(a[0].shape, rational(value), dtype=object)
+    elif op in {"fill", "full", "full_like", "zeros", "zeros_like", "ones", "ones_like"}:
+        value = 0 if op.startswith("zeros") else 1 if op.startswith("ones") else args[1]
+        shape = args[0] if op in {"full", "zeros", "ones"} else a[0].shape
+        out = np.full(shape, rational(value), dtype=object)
     else:
         raise ValueError(f"exact reference refuses rational operation {name}")
     return ExactTensor(np.asarray(out, dtype=object), dtype)
@@ -372,9 +429,18 @@ def run(model, inputs):
                 codes = quantize(value, scale, zp, low, high, axis=axis)
                 return torch.tensor(codes.tolist(), dtype=dtype).reshape(codes.shape)
             leaves = torch.utils._pytree.tree_leaves((args, kwargs))
-            if not any(isinstance(x, ExactTensor) for x in leaves):
+            constant = name.split(".")[1] if name.startswith("aten.") else None
+            if not any(isinstance(x, ExactTensor) for x in leaves) and constant not in {
+                "fill",
+                "full",
+                "full_like",
+                "zeros",
+                "zeros_like",
+                "ones",
+                "ones_like",
+            }:
                 return super().run_node(node)
-            if node.target == operator.getitem:
+            if node.target == operator.getitem or getattr(node.target, "_m2m_tuple_selection", False):
                 value = args[0]
                 return (
                     ExactTensor(value.values[args[1]], value.dtype)
