@@ -86,6 +86,13 @@ class ExactTensor:
     codes: np.ndarray | None = None
     scale: object = None
 
+    def __post_init__(self):
+        # NumPy object arithmetic can unwrap a rank-zero array to Fraction.
+        # Rank zero is still a tensor, including at Q/DQ and materialization.
+        self.values = np.asarray(self.values, dtype=object)
+        if self.codes is not None:
+            self.codes = np.asarray(self.codes, dtype=object)
+
 
 def dequantize(value, scale, zero_point=0, quant_min=-128, quant_max=127, *, axis=None, dtype=None):
     codes = exact_array(value)
