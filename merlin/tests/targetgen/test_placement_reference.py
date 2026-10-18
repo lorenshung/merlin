@@ -222,3 +222,31 @@ def test_component_k_one_packaging_does_not_change_pointwise_reference_family():
     result = estimate_reference(module, candidate(module, "contraction", "F2"), declaration, facts)
     assert result["family"] == "elementwise_map"
     assert result["workload"]["operations_per_element"] == 1
+
+
+@pytest.mark.parametrize("admitted", [False, True])
+def test_policy_evidence_is_attributed_only_to_the_bundled_case(tmp_path, admitted):
+    import json
+
+    import yaml
+
+    from merlin.targetgen.core_aten_profitability import prepare
+
+    declaration, facts = inputs()
+    module = source(7)
+    (tmp_path / "model.mlir").write_text(str(module))
+    spec = tmp_path / "software.yaml"
+    spec.write_text(yaml.safe_dump(dict(placement_cost_model=declaration)))
+    report = dict(cases=[dict(status="bundled"), dict(status="not_in_shard", case_id="unselected")])
+    inactive = report["cases"][1]
+
+    def implementation(directory, report, **kwargs):
+        for row in report["cases"]:
+            row["numeric_admission"] = dict(candidate(module), exact_dtype_sites=1)
+        return dict(candidate(module), exact_dtype_sites=int(admitted), selection=dict(identities={}))
+
+    prepare(tmp_path, report, implementation, software_spec=spec, facts=facts)
+    assert inactive is report["cases"][1]
+    assert inactive == dict(status="not_in_shard", case_id="unselected")
+    assert "placement_cost" in report["cases"][0]["numeric_admission"]
+    json.dumps(report)

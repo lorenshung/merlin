@@ -24,6 +24,13 @@ def prepare(directory, report, implementation, **kwargs):
     if policy not in {"reference_scale", "strict_per_shape"}:
         raise ValueError(f"unknown placement profitability policy: {policy}")
     plan = implementation(directory, report, **kwargs)
+    # One numeric candidate belongs only to bundled records. Some preparation
+    # paths annotate all retained corpus rows, including not-in-shard metadata;
+    # restore those rows before publishing this candidate's policy evidence.
+    for record, saved in zip(report["cases"], original_report["cases"], strict=True):
+        if saved.get("status") not in {None, "bundled"}:
+            record.clear()
+            record.update(saved)
     if not any(
         plan.get(key, 0)
         for key in (
@@ -44,7 +51,8 @@ def prepare(directory, report, implementation, **kwargs):
             ),
         )
         for record in report["cases"]:
-            record["numeric_admission"] = plan
+            if record.get("status") in {None, "bundled"}:
+                record["numeric_admission"] = plan
         (directory / "spec-int8-admission.json").write_text(json.dumps(plan, indent=2) + "\n")
         return plan
     strict = estimate(
@@ -89,6 +97,7 @@ def prepare(directory, report, implementation, **kwargs):
             placement_cost=cost,
         )
     for record in report["cases"]:
-        record.update(numeric_admission=plan, numeric_selection=plan["selection"]["identities"])
+        if record.get("status") in {None, "bundled"}:
+            record.update(numeric_admission=plan, numeric_selection=plan["selection"]["identities"])
     (directory / "spec-int8-admission.json").write_text(json.dumps(plan, indent=2) + "\n")
     return plan

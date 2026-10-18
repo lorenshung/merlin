@@ -240,7 +240,13 @@ def prepare_numeric_fixture(bundle: Path, report: dict, flow: dict) -> None:
     if not native and (not admitted or (plan.get("integer_reference") or {}).get("status") != "prepared"):
         raise ValueError(
             "scored capsule has no admitted contraction with an exact integer reference: "
-            + str([(r.get("case_id", r.get("overload")), r.get("routing")) for r in report["cases"]])
+            + str(
+                [
+                    (r.get("case_id", r.get("overload")), r.get("routing"))
+                    for r in report["cases"]
+                    if r.get("status") == "bundled"
+                ]
+            )
             + "; numeric refusal: "
             + str(
                 plan.get("refusal_code")
