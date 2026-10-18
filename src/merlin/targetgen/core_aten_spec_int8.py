@@ -707,6 +707,7 @@ def device_readout(op) -> dict | None:
 def closed_integer_mac(op):
     """Only signed i8 extensions and a closed, unflagged i32 multiply/add."""
     from xdsl.dialects import arith
+    from xdsl.dialects.builtin import i8, i32
     from xdsl.dialects.linalg.ops import YieldOp
 
     if len(op.operands) != 3 or len(op.results) != 1 or not hasattr(op, "body"):
@@ -716,8 +717,12 @@ def closed_integer_mac(op):
         return False
     a, b, mul, add, yielded = list(block.ops)
     return (
-        isinstance(a, arith.ExtSIOp)
+        tuple(arg.type for arg in block.args) == (i8, i8, i32)
+        and all(getattr(v.type, "element_type", None) == i8 for v in op.operands[:2])
+        and all(getattr(v.type, "element_type", None) == i32 for v in (*op.operands[2:], *op.results))
+        and isinstance(a, arith.ExtSIOp)
         and isinstance(b, arith.ExtSIOp)
+        and a.result.type == b.result.type == i32
         and tuple(a.operands) == (block.args[0],)
         and tuple(b.operands) == (block.args[1],)
         and isinstance(mul, arith.MuliOp)

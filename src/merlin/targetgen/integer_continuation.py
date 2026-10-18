@@ -77,7 +77,9 @@ def readout_continuation(contraction):
                 raise ValueError("integer continuation MAC requires zero initialization")
             (match,) = observe_contractions(op)
             reduction = math.prod(match[1].reduction)
-            result = (-16384 * reduction, 16384 * reduction)
+            width = op.operands[0].type.element_type.width.data
+            magnitude = (1 << (width - 1)) ** 2
+            result = (-magnitude * reduction, magnitude * reduction)
         elif name in copies:
             shape(value)
             if name == "tensor.extract_slice":
