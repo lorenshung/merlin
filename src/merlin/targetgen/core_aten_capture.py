@@ -38,6 +38,9 @@ def loader_source(case: dict[str, Any], *, rng_seed: int | None = None) -> str:
     """
 
     require_native_input_storage(case["overload"], case["arguments"])
+    from merlin.capture.static_metadata import STATIC_METADATA_QUERIES
+
+    static_metadata_only = case["overload"] in STATIC_METADATA_QUERIES
     seed_statement = "" if rng_seed is None else f"torch.manual_seed({int(rng_seed)})"
     tensors: list[dict[str, Any]] = []
     arguments = _split_tensor_documents(case["arguments"], tensors)
@@ -70,6 +73,7 @@ import torch
 from torch import nn
 
 _DOCUMENT = json.loads({document!r})
+STATIC_METADATA_ONLY = {static_metadata_only!r}
 
 
 def _decode(value, inputs=()):

@@ -918,6 +918,11 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             }
     elif a.already_quantized:
         original_snapshot["reason"] = "loader supplies an already-quantized graph; the original model was not captured"
+    from merlin.capture.static_metadata import specialize_static_metadata
+
+    static_metadata = None
+    if getattr(loader, "STATIC_METADATA_ONLY", False):
+        mdl, static_metadata = specialize_static_metadata(mdl, tuple(inputs))
     _scheme, cast = _SCHEME.get(a.dtype, (None, None))
     # THE FLOAT MODEL'S OWN OUTPUT, before any precision cast or quantization rewrites it. The golden
     # below is the transformed model -- what the compiler must reproduce -- and so can say nothing about
@@ -1382,6 +1387,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         "ok": bool(res.ok) and precision_exact,
         "precision_realization": precision if precision else {"status": "unknown"},
         "precision_conversion": precision_conversion,
+        **({"static_metadata_specialization": static_metadata} if static_metadata is not None else {}),
         **({"fp32_staging": fp32_staging} if fp32_staging is not None else {}),
         "opaque": int(n_opaque),
         "opaque_detail": opaque,

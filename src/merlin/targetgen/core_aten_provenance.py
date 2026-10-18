@@ -41,6 +41,7 @@ def batch_provenance(
         for path in (
             "targetgen/core_aten_batch.py",
             "targetgen/core_aten_capture.py",
+            "capture/static_metadata.py",
             "targetgen/core_aten_input_storage.py",
             "targetgen/capture_refusals.py",
             "targetgen/core_aten_numeric.py",
