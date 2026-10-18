@@ -3,9 +3,23 @@
 import json
 
 import numpy as np
+import pytest
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.targetgen.core_aten_components import prepare_integer_components
+from merlin.targetgen.core_aten_components import prepare_integer_components, unlowered_data_reductions
+
+
+@pytest.mark.parametrize("intrinsic", ["exp", "sin", "cos", "log", "rsqrt"])
+def test_host_math_after_conversion_is_not_device_operation_coverage(intrinsic):
+    module = parse_mlir_text(f'''builtin.module {{
+      func.func @forward(%a: i64) -> f32 {{
+        %c = arith.sitofp %a : i64 to f32
+        %v = math.{intrinsic} %c : f32
+        func.return %v : f32
+      }}
+    }}''')
+    missed = unlowered_data_reductions(module, "test.limb")
+    assert [list(module.walk())[i].name for i in missed] == [f"math.{intrinsic}"]
 
 
 def test_integer_conversion_does_not_admit_a_retained_host_float_sum(tmp_path):

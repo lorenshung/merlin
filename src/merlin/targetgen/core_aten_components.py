@@ -23,6 +23,12 @@ def unlowered_data_reductions(module, limb_attribute):
 
     result = []
     for ordinal, op in enumerate(module.walk()):
+        # Exact component readout uses integer arithmetic. A retained math
+        # intrinsic is source computation, even when a conversion before it
+        # happened to produce an eligible integer device region.
+        if op.name.startswith("math."):
+            result.append(ordinal)
+            continue
         if op.name not in {"linalg.generic", "linalg.reduce", "scf.for"} or limb_attribute in op.attributes:
             continue
         children = list(op.walk())[1:]
@@ -276,16 +282,24 @@ def prepare_integer_components(directory, report, selection, provider, package, 
             (directory / "exact-dtype-refusal.json").write_text(json.dumps(dict(family="F2", reason=str(exc))) + "\n")
             return None
         complex_indices = [i for i, dtype in enumerate(native_types) if dtype == "complex<f32>"]
-        floating_bounds, floating_proofs = rewrite_floating_components(
-            module,
-            grids,
-            complex_inputs=complex_indices,
-            allow_reassociation=order_dependent,
-            known_grids=conversion_grids,
-            input_values=arrays,
-            zero_limbs=zero_limbs,
-            ieee_pointwise=ieee_pointwise,
-        )
+        try:
+            floating_bounds, floating_proofs = rewrite_floating_components(
+                module,
+                grids,
+                complex_inputs=complex_indices,
+                allow_reassociation=order_dependent,
+                known_grids=conversion_grids,
+                input_values=arrays,
+                zero_limbs=zero_limbs,
+                ieee_pointwise=ieee_pointwise,
+            )
+        except ValueError as exc:
+            if str(exc) != "nonfinite source data require an explicit IEEE component policy":
+                raise
+            (directory / "exact-dtype-refusal.json").write_text(
+                json.dumps(dict(family="F2", code="ieee_source_policy_unproved", reason=str(exc))) + "\n"
+            )
+            return None
         known_bounds.update(floating_bounds)
         if not floating_proofs and not boolean_count:
             if conversion_count:
@@ -341,7 +355,7 @@ def prepare_integer_components(directory, report, selection, provider, package, 
                 dict(
                     family="F2",
                     reason=(
-                        "native data reduction remains in host source; partial preludes do not place the operation"
+                        "native arithmetic remains in host source; partial preludes do not place the operation"
                     ),
                     source_operation_ordinals=remaining_products,
                 )
