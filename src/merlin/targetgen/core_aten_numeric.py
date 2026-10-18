@@ -447,6 +447,9 @@ def prepare_spec_int8(
             prepared_dir = directory / "capture-bundle"
             prepared_report = build_core_aten_batch({"cases": [source_case]}, capture_root, prepared_dir)
             prepared_module = parse_mlir_file(prepared_dir / "model.mlir")
+            from merlin.llvmlower.scalar_tensor_carriers import fold_scalar_tensor_roundtrips
+
+            scalar_carriers = fold_scalar_tensor_roundtrips(prepared_module)
             capture_proof = None
             capture_proof_error = None
             if callable(getattr(provider, "admit_numeric_schedule", None)):
@@ -457,6 +460,7 @@ def prepare_spec_int8(
                 except ValueError as exc:
                     capture_proof_error = str(exc)
             captured_plan = admission_plan(prepared_module, selection, captured=True, provider_proof=capture_proof)
+            captured_plan["scalar_tensor_carriers_folded"] = scalar_carriers
             if capture_proof_error:
                 captured_plan["provider_refusal"] = capture_proof_error
             from merlin.targetgen.core_aten_spec_int8 import source_declaration_continuity
