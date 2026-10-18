@@ -93,7 +93,13 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         for op in module.walk()
     )
     known_bounds, boolean_count = rewrite_boolean_components(module)
-    from merlin.llvmlower.integer_float_boundaries import rewrite_integer_float_boundaries
+    from merlin.llvmlower.integer_float_boundaries import has_literal_zero_divisor, rewrite_integer_float_boundaries
+
+    if has_literal_zero_divisor(module):
+        (directory / "exact-dtype-refusal.json").write_text(
+            json.dumps(dict(family="F2", reason="native zero-divisor readout lacks a CPU NaN-payload policy")) + "\n"
+        )
+        return None
 
     conversion_bounds, conversion_count = rewrite_integer_float_boundaries(module, bounds)
     known_bounds.update(conversion_bounds)
@@ -170,7 +176,10 @@ def prepare_integer_components(directory, report, selection, provider, package, 
             json.dumps(
                 dict(
                     family="F2",
-                    reason="native bilinear reduction remains in host source; partial preludes do not place the operation",
+                    reason=(
+                        "native bilinear reduction remains in host source; "
+                        "partial preludes do not place the operation"
+                    ),
                     source_operation_ordinals=remaining_products,
                 )
             )
