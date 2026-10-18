@@ -125,3 +125,25 @@ def test_explicit_special_words_match_native_cpu(typ, operation):
             pair = torch.tensor([v if v < sign else v - (1 << width) for v in [a, b]], dtype=storage).view(dtype)
             expected = int(getattr(torch, operation)(pair[0], pair[1]).view(storage)) & mask
             assert values[result] == expected
+
+
+def test_special_readout_does_not_taint_an_unread_shape_operand():
+    from types import SimpleNamespace
+    from xdsl.dialects import arith
+    from xdsl.dialects.linalg import ops as L
+    from xdsl.ir import Region
+    from merlin.llvmlower.ieee_pointwise import overlay
+
+    scalar = Block(arg_types=[f32] * 4)
+    addition = arith.AddfOp(scalar.args[0], scalar.args[1])
+    scalar.add_ops([addition, L.YieldOp(addition.result)])
+    source = SimpleNamespace(body=Region(scalar), inputs=[None] * 3)
+    readout = Block(arg_types=[f32] * 4)
+
+    def emit(op):
+        readout.add_op(op)
+        return op.results[0]
+
+    overlay(source, readout.args[:3], readout.args[3], emit)
+    assert not readout.args[2].uses
+    assert readout.args[0].uses and readout.args[1].uses

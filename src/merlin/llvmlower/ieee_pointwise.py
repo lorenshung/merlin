@@ -44,7 +44,11 @@ def overlay(op, inputs, fallback, emit):
 
     from merlin.llvmlower.fixed_point_ir import FORMAT
 
-    flags = [special(value, emit) for value in inputs if str(value.type) in FORMAT]
+    flags = [
+        special(value, emit)
+        for argument, value in zip(op.body.block.args[: len(op.inputs)], inputs, strict=True)
+        if argument.uses and str(value.type) in FORMAT
+    ]
     if not flags:
         return fallback
     flag = flags[0]
