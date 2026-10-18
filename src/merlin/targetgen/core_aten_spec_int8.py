@@ -395,10 +395,9 @@ def admission_plan(module, selection, *, captured=False, native=False, provider_
             )
             if not admitted:
                 reasons.append("exact rational host readout requires reviewed API selection and exact host policy")
-            if readout["relu"] and any(sign <= 0 for sign in readout["scale_signs"]):
-                reasons.append(
-                    "step 4 a readout ReLU runs before the scale, so it cannot pair with a nonpositive scale"
-                )
+            # The device returns the full accumulator. The retained source
+            # readout owns coefficient signs and activation order; no device
+            # ReLU or floating scale replaces that host expression.
         if not native and readout is None:
             screen(
                 5,

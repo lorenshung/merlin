@@ -19,7 +19,7 @@ _BASE = repo_root() / "examples/gemmini/target"
 
 
 @pytest.fixture(scope="module")
-def source_text(tmp_path_factory):
+def source_text(tmp_path_factory, request):
     import os
     import subprocess
 
@@ -28,6 +28,7 @@ def source_text(tmp_path_factory):
         pytest.skip("MERLIN_M2M_PYTHON is required for real model2mlir readout capture")
     path = tmp_path_factory.mktemp("device-readout") / "source.mlir"
     script = "import sys,torch,m2m\nfrom m2m.capture import integer_readout\nclass Model(torch.nn.Module):\n def forward(self,a,b,bias):\n  acc=torch.ops.m2m_q.int_mm_seeded.default(a,b,bias)\n  return torch.ops.m2m_q.requantize.default(acc,[0.5],0,-128,127,True)\ninputs=(torch.ones(4,8,dtype=torch.int8),torch.ones(8,16,dtype=torch.int8),torch.arange(16,dtype=torch.int32))\nresult=m2m.convert(Model(),inputs,backend='fx_importer')\nassert result.ok,result\nopen(sys.argv[1],'w').write(result.mlir_text)\n"
+    script = script.replace("[0.5]", repr([getattr(request, "param", 0.5)]))
     result = subprocess.run([python, "-c", script, str(path)], capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     return path.read_text()
@@ -71,6 +72,7 @@ def test_the_device_readout_plan_replaces_the_host_cast_and_its_k_bound(selectio
     assert fused["device_readout"]["relu"] is True
 
 
+@pytest.mark.parametrize("source_text", [0.5, -0.5], indirect=True)
 def test_seeded_admission_requires_selected_provider_coverage(selection, source_text):
     import hashlib
 
@@ -79,6 +81,7 @@ def test_seeded_admission_requires_selected_provider_coverage(selection, source_
         ((op, _shape),) = observe_contractions(module)
         ordinal = list(module.walk()).index(op)
         reader_ordinal = list(module.walk()).index(device_readout(op)["operation"])
+        (ratio,) = device_readout(op)["scale_ratios"]
         proof = dict(
             status="proven",
             source_sha256=hashlib.sha256(str(module).encode()).hexdigest(),
@@ -90,8 +93,8 @@ def test_seeded_admission_requires_selected_provider_coverage(selection, source_
                     schedule=dict(
                         readout="full_i32",
                         requantization="retained_source_exact_integer",
-                        scale_numerator=["1"],
-                        scale_denominator=["2"],
+                        scale_numerator=[ratio["numerator"]],
+                        scale_denominator=[ratio["denominator"]],
                     ),
                 )
             ],
@@ -145,10 +148,16 @@ def test_unknown_quantization_attributes_are_rejected(source_text, key):
             device_readout(op)
 
 
-def test_a_readout_relu_with_a_nonpositive_scale_is_refused(selection, source_text):
-    negative = source_text.replace('prov.quant.scale_numerator = ["1"]', 'prov.quant.scale_numerator = ["-1"]')
-    _op, plan = _plan(selection, negative)
-    assert any("ReLU" in reason for reason in plan["sites"][0]["reasons"])
+@pytest.mark.parametrize("source_text", [-0.5], indirect=True)
+def test_a_retained_host_relu_can_follow_a_negative_coefficient(selection, source_text):
+    _op, plan = _plan(selection, source_text)
+    (site,) = plan["sites"]
+    assert site["readout"] == "int32_host_exact"
+    assert "coverage proof unavailable" in " ".join(site["reasons"])
+    assert not any("ReLU" in reason or "nonpositive" in reason for reason in site["reasons"])
+    host = next(row for row in site["steps"] if row.get("op") == "exact_rational_host_readout")
+    assert host["device_readout"]["relu"] is True
+    assert host["device_readout"]["scale_ratios"] == [{"numerator": "-1", "denominator": "2"}]
 
 
 def test_unknown_readout_numerics_are_refused_before_any_frontend_import():
