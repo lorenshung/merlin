@@ -111,7 +111,16 @@ def prepare_spec_int8(
 
     native = any(shape.dtypes == ("i8", "i8", "i32") for _, shape in observe_contractions(module))
     if native:
-        plan = admission_plan(module, selection, native=True)
+        proof = None
+        proof_error = None
+        if callable(getattr(provider, "admit_numeric_schedule", None)):
+            try:
+                proof = provider.admit_numeric_schedule(str(module), package=package, numeric_policy=selection["spec"])
+            except ValueError as exc:
+                proof_error = str(exc)
+        plan = admission_plan(module, selection, native=True, provider_proof=proof)
+        if proof_error:
+            plan["provider_refusal"] = proof_error
         selected = [site for site in plan["sites"] if site["status"] == "admitted"]
         plan["native_contractions"] = len(selected)
         plan["source_preparation"] = preparation
@@ -136,6 +145,12 @@ def prepare_spec_int8(
                 op.attributes["prov.operand_load"] = StringAttr("transfer_contracts.operand_load")
                 op.attributes["prov.accumulator_readout"] = StringAttr("transfer_contracts.accumulator_readout")
             proof = provider.admit_numeric_schedule(str(module), package=package, numeric_policy=selection["spec"])
+            from merlin.targetgen.core_aten_spec_int8 import provider_coverage
+
+            for site in selected:
+                failure = provider_coverage(module, proof, contractions[site["source_operation_ordinal"]])
+                if failure:
+                    raise ValueError(failure)
             plan["schedule_proof"] = proof
             # Expose raw accumulators as well as every user/post-call result. The
             # oracle interprets source integer arithmetic, independently of lowering
@@ -170,7 +185,17 @@ def prepare_spec_int8(
                 timeout=120,
             )
             if process.returncode:
-                raise RuntimeError("native int8 independent reference failed: " + process.stderr[-4000:])
+                for site in selected:
+                    site.update(
+                        status="refused", reasons=["exact source reference unavailable: " + process.stderr[-4000:]]
+                    )
+                plan.update(status="refused", native_contractions=0)
+                document = {"selection": selection, **plan}
+                (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
+                (directory / "model.mlir").write_bytes(original)
+                for record in report["cases"]:
+                    record.update(numeric_admission=plan, numeric_selection=selection["identities"])
+                return document
             reference = json.loads((directory / "native-int8-reference.json").read_text())
             if len(reference["output_bytes"]) != report["output_count"] + len(accumulators):
                 raise ValueError("native integer reference does not cover the complete exported boundary")
@@ -301,6 +326,17 @@ def prepare_spec_int8(
                     "static int8 recipe does not admit complex tensors or scalar arguments", code="complex_calibration"
                 )
             artifact = PytorchRefSource().capture_loader(loader, "int8", recipe=recipe, workdir=capture_dir / "work")
+            refused_recipes = [
+                row
+                for row in (artifact.meta.get("quantization_stats") or {}).get("integer_recipes", ())
+                if "refused" in row
+            ]
+            if refused_recipes:
+                raise NumericCaptureRefused(
+                    "integer recipes lack an exact-arithmetic proof",
+                    code="exact_recipe_refused",
+                    details={"integer_recipes": refused_recipes},
+                )
         except NumericCaptureRefused as exc:
             # Only explicit frontend refusals grant original host fallback.
             for site in selected:
@@ -326,7 +362,15 @@ def prepare_spec_int8(
             prepared_dir = directory / "capture-bundle"
             prepared_report = build_core_aten_batch({"cases": [source_case]}, capture_root, prepared_dir)
             prepared_module = parse_mlir_file(prepared_dir / "model.mlir")
-            captured_plan = admission_plan(prepared_module, selection, captured=True)
+            capture_proof = None
+            if callable(getattr(provider, "admit_numeric_schedule", None)):
+                try:
+                    capture_proof = provider.admit_numeric_schedule(
+                        str(prepared_module), package=package, numeric_policy=selection["spec"]
+                    )
+                except ValueError:
+                    pass  # the admission plan retains the missing-coverage refusal
+            captured_plan = admission_plan(prepared_module, selection, captured=True, provider_proof=capture_proof)
             from merlin.targetgen.core_aten_spec_int8 import source_declaration_continuity
 
             continuity = source_declaration_continuity(plan, captured_plan)
@@ -422,6 +466,13 @@ def prepare_spec_int8(
                 else None
             )
             plan["schedule_proof"] = proof
+            if selected:
+                from merlin.targetgen.core_aten_spec_int8 import provider_coverage
+
+                for contraction in contractions:
+                    failure = provider_coverage(module, proof, contraction)
+                    if failure:
+                        raise ValueError(failure)
             plan["quantized_contractions"] = len(selected)
             plan["quantized_non_contraction_sites"] = sum(
                 site["status"] == "admitted" and site["quantized_island"] for site in plan["non_contraction_sites"]

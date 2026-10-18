@@ -46,6 +46,8 @@ _SIGNATURE_FIELDS = frozenset(
         "compute_dtypes",
         "quantization_parameters",
         "kinds",
+        "max_tensor_operands",
+        "expressions",
     }
 )
 
@@ -296,6 +298,16 @@ def validate_software_spec(document: dict, target: str | None = None, *, source:
                 raise ValueError(
                     f"{source}: operation {row['id']!r} kinds must be reduction kinds from {sorted(REDUCTION_KINDS)}"
                 )
+        if "max_tensor_operands" in signature and (
+            type(signature["max_tensor_operands"]) is not int or signature["max_tensor_operands"] < 0
+        ):
+            raise ValueError(f"{source}: max_tensor_operands must be a nonnegative integer")
+        if "expressions" in signature and (
+            not isinstance(signature["expressions"], list)
+            or not signature["expressions"]
+            or any(value not in {"affine"} for value in signature["expressions"])
+        ):
+            raise ValueError(f"{source}: expressions must list supported expression classes (affine)")
         if "ranks" in signature and (
             not isinstance(signature["ranks"], list)
             or any(type(value) is not int or value < 1 for value in signature["ranks"])
@@ -572,6 +584,12 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
                         missing.append(f"quantization_parameters.{key}")
                     elif observed != expected:
                         refused.append(f"quantization_parameters.{key}={observed} differs from {expected}")
+        if "max_tensor_operands" in constraints:
+            count = signature.get("tensor_operands")
+            if type(count) is not int:
+                missing.append("tensor_operands")
+            elif count > constraints["max_tensor_operands"]:
+                refused.append(f"tensor_operands {count} exceeds {constraints['max_tensor_operands']}")
         declared_placement = row["placement"]
         if declared_placement == "unknown" or placement == "unknown":
             missing.append("placement")
@@ -594,6 +612,7 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
             ("aliasing", "aliasing"),
             ("scale_granularity", "scale_granularity"),
             ("kinds", "kind"),
+            ("expressions", "expression"),
         ):
             if key not in constraints:
                 continue

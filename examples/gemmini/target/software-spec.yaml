@@ -68,6 +68,9 @@ operations:
     # relu, a difference) as integer weights and an int32 constant, then one readout.
     families: [elementwise_map, operand_sum, affine_map]
     hardware: standalone
+    max_tensor_operands: 2
+    expressions: [affine]
+    broadcasting: [none, outer]
   elementwise_map_after_operand_sum:
     # Only stages the SAME fact-derived operand-sum/readout path carries. This is not the
     # contraction readout declaration, and does not hand-author an epilogue capability.
@@ -79,14 +82,16 @@ operations:
     numerical_contract: operand_sum_exhaustive_i8_v1
     families: [elementwise_map]
     hardware: fused_operand_sum
+    max_tensor_operands: 2
+    expressions: [affine]
+    broadcasting: [none, outer]
   pooling_on_readout:
     # Max pooling fused on the store path (readout stage 'maxpool').
     families: [reduction]
     hardware: fused
   reduction_standalone:
     # Standalone SUM reductions: accumulate-on-load over an outer axis or a window, then one
-    # readout scale. Max reductions stay fused (`pooling_on_readout`). Admission is family-level,
-    # so that limit is stated here, not enforced (see the contract's reduction rows).
+    # readout scale. Max reductions stay fused (`pooling_on_readout`).
     # The row id is not a family name, so it does not shadow `pooling_on_readout` in family
     # queries; window_mean makes avg pools and mean quantization-eligible.
     families: [reduction, window_mean]
@@ -96,9 +101,11 @@ operations:
     # analysis/FINAL_LISTS.md).
     status: reviewed
     hardware: standalone
+    kinds: [sum]
   movement:
     # Forms and their constraints are the contract's: copy, broadcast, zero_fill, permutation.
     hardware: standalone
+    broadcasting: [none, outer]
     layouts: [row_major_contiguous]
     aliasing: [disjoint_inputs_outputs]
   host_only:

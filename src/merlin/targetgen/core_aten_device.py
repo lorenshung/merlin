@@ -26,6 +26,11 @@ def load_execution_provider(target: str, path: Path | None = None):
     selected = Path(explicit)
     if not selected.is_file():
         raise ValueError(f"selected Core ATen execution provider does not exist: {selected}")
+    from merlin.targetgen.target_registry import resolve
+
+    info = resolve(target)
+    if info.contract_path.is_file() or os.environ.get("MERLIN_TARGET_CONTRACT"):
+        info.load_contract()
     identity = hashlib.sha256(str(selected.resolve()).encode()).hexdigest()
     module = load_module(selected.parent, selected.name, package_name=f"core_aten_execution_{identity}")
     if getattr(module, "TARGET", None) != target:
@@ -53,8 +58,9 @@ def selected_facts(target: str, explicit: Path | None):
 def routing_for_bundle(directory: Path, target: str, package: Path, provider, facts: dict, *, compile_products=None):
     """Report structural refusals, then ask the provider to bind supported source operations."""
     from merlin.frontends.linalg_mlir import parse_mlir_file
-    from merlin.kernels.shapes import observe_contractions, zero_initialised
+    from merlin.kernels.shapes import accumulator_init, observe_contractions, zero_initialised
     from merlin.system.offload import device_contraction_ranks, device_dtype_triples, why_not
+    from merlin.targetgen.core_aten_spec_int8 import provider_coverage
 
     module = parse_mlir_file(directory / "model.mlir")
     triples, ranks = device_dtype_triples(target), device_contraction_ranks(target)
@@ -63,6 +69,16 @@ def routing_for_bundle(directory: Path, target: str, package: Path, provider, fa
         reason = why_not(shape, triples=triples, ranks=ranks)
         if reason is None and not zero_initialised(op):
             reason = "contraction destination is not proven zero initialized"
+            admission_path = directory / "spec-int8-admission.json"
+            if accumulator_init(op) == "int32_seed" and admission_path.is_file():
+                admission = json.loads(admission_path.read_text())
+                prove = getattr(provider, "admit_numeric_schedule", None)
+                if callable(prove):
+                    try:
+                        proof = prove(str(module), package=package, numeric_policy=admission["selection"]["spec"])
+                        reason = provider_coverage(module, proof, op)
+                    except (ValueError, KeyError) as exc:
+                        reason = f"selected provider refuses seeded contraction: {exc}"
         if reason:
             declined.append(reason)
         else:

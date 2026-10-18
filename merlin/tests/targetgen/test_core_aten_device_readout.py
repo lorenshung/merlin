@@ -12,8 +12,6 @@ crossing -- and no cast bound.
 
 from __future__ import annotations
 
-import copy
-
 import pytest
 from phase0_fixture_selection import fixture_resolved
 
@@ -28,35 +26,20 @@ from merlin.targetgen.host_capabilities import validate_host_capabilities
 pytestmark = pytest.mark.target("gemmini")
 _BASE = repo_root() / "examples/gemmini/target"
 
-SRC = """
-module {
-  func.func @forward(%a: tensor<4x8xi8>, %b: tensor<8x16xi8>, %bias: tensor<16xi32>) -> tensor<4x16xi8> {
-    %e = tensor.empty() : tensor<4x16xi32>
-    %seed = "linalg.broadcast"(%bias, %e) <{dimensions = array<i64: 0>}> ({
-    ^bb0(%i: i32, %j: i32):
-      linalg.yield %i : i32
-    }) {prov.role = "acc_seed"} : (tensor<16xi32>, tensor<4x16xi32>) -> tensor<4x16xi32>
-    %acc = linalg.generic {indexing_maps = [affine_map<(d0, d1, d2) -> (d0, d2)>, affine_map<(d0, d1, d2) -> (d2, d1)>, affine_map<(d0, d1, d2) -> (d0, d1)>], iterator_types = ["parallel", "parallel", "reduction"]} ins(%a, %b : tensor<4x8xi8>, tensor<8x16xi8>) outs(%seed : tensor<4x16xi32>) attrs = {prov.accumulator_init = "int32_seed", prov.aten = "aten.addmm.default"} {
-    ^bb0(%x: i8, %y: i8, %z: i32):
-      %xe = arith.extsi %x : i8 to i32
-      %ye = arith.extsi %y : i8 to i32
-      %m = arith.muli %xe, %ye : i32
-      %s = arith.addi %z, %m : i32
-      linalg.yield %s : i32
-    } -> tensor<4x16xi32>
-    %o = tensor.empty() : tensor<4x16xi8>
-    %r = linalg.generic {indexing_maps = [affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0, d1)>], iterator_types = ["parallel", "parallel"]} ins(%acc : tensor<4x16xi32>) outs(%o : tensor<4x16xi8>) attrs = {prov.role = "readout", prov.quant.scale = 0.0125 : f32, prov.quant.zero_point = 0 : i64, prov.quant.quant_min = -128 : i64, prov.quant.quant_max = 127 : i64, prov.quant.relu = "true"} {
-    ^bb0(%v: i32, %w: i8):
-      %f = arith.sitofp %v : i32 to f32
-      %c = arith.constant 0.0125 : f32
-      %p = arith.mulf %f, %c : f32
-      %t = arith.fptosi %p : f32 to i8
-      linalg.yield %t : i8
-    } -> tensor<4x16xi8>
-    return %r : tensor<4x16xi8>
-  }
-}
-"""
+
+@pytest.fixture(scope="module")
+def source_text(tmp_path_factory):
+    import os
+    import subprocess
+
+    python = os.environ.get("MERLIN_M2M_PYTHON")
+    if not python:
+        pytest.skip("MERLIN_M2M_PYTHON is required for real model2mlir readout capture")
+    path = tmp_path_factory.mktemp("device-readout") / "source.mlir"
+    script = "import sys,torch,m2m\nfrom m2m.capture import integer_readout\nclass Model(torch.nn.Module):\n def forward(self,a,b,bias):\n  acc=torch.ops.m2m_q.int_mm_seeded.default(a,b,bias)\n  return torch.ops.m2m_q.requantize.default(acc,[0.0125],0,-128,127,True)\ninputs=(torch.ones(4,8,dtype=torch.int8),torch.ones(8,16,dtype=torch.int8),torch.arange(16,dtype=torch.int32))\nresult=m2m.convert(Model(),inputs,backend='fx_importer')\nassert result.ok,result\nopen(sys.argv[1],'w').write(result.mlir_text)\n"
+    result = subprocess.run([python, "-c", script, str(path)], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return path.read_text()
 
 
 @pytest.fixture(scope="module")
@@ -67,24 +50,24 @@ def selection():
     }
 
 
-def _plan(selection, source=SRC):
+def _plan(selection, source, proof=None):
     with IR_LOCK:
         module = mq.parse(source)
         ((op, _shape),) = observe_contractions(module)
-        return op, admission_plan(module, selection, captured=True)
+        return op, admission_plan(module, selection, captured=True, provider_proof=proof)
 
 
-def test_the_seed_and_the_fused_readout_are_read_structurally():
+def test_the_seed_and_the_fused_readout_are_read_structurally(source_text):
     with IR_LOCK:
-        ((op, _shape),) = observe_contractions(mq.parse(SRC))
+        ((op, _shape),) = observe_contractions(mq.parse(source_text))
         assert accumulator_init(op) == "int32_seed" and not zero_initialised(op)
         readout = device_readout(op)
     assert readout["relu"] and readout["quant_min"] == -128 and readout["granularity"] == "tensor"
     assert readout["scales"] == [pytest.approx(0.0125)]
 
 
-def test_the_device_readout_plan_replaces_the_host_cast_and_its_k_bound(selection):
-    _op, plan = _plan(selection)
+def test_the_device_readout_plan_replaces_the_host_cast_and_its_k_bound(selection, source_text):
+    _op, plan = _plan(selection, source_text)
     (site,) = plan["sites"]
     assert site["readout"] == "device_int8" and site["accumulator_init"] == "int32_seed"
     steps = {(row["step"], row.get("declaration") or row.get("op")) for row in site["steps"]}
@@ -96,27 +79,43 @@ def test_the_device_readout_plan_replaces_the_host_cast_and_its_k_bound(selectio
     assert fused["device_readout"]["relu"] is True
 
 
-def test_the_unreviewed_crossings_are_the_only_refusals_and_reviewing_them_admits(selection):
-    _op, plan = _plan(selection)
-    reasons = plan["sites"][0]["reasons"]
-    rows = {row["id"]: row for row in selection["spec"]["transfer_contracts"]["declarations"]}
-    unreviewed = [
-        key for key in ("accumulator_seed_load", "int8_readout") if rows[key]["evidence"].get("status") != "reviewed"
-    ]
-    if not unreviewed:
-        assert plan["sites"][0]["status"] == "admitted", reasons
-        return
-    assert all("accumulator_seed_load" in r or "int8_readout" in r for r in reasons), reasons
-    reviewed = copy.deepcopy(selection)
-    for row in reviewed["spec"]["transfer_contracts"]["declarations"]:
-        if row["id"] in unreviewed:
-            row["evidence"]["status"] = "reviewed"
-    _op, plan = _plan(reviewed)
-    assert plan["sites"][0]["status"] == "admitted", plan["sites"][0]["reasons"]
+def test_seeded_admission_requires_selected_provider_coverage(selection, source_text):
+    import hashlib
+
+    with IR_LOCK:
+        module = mq.parse(source_text)
+        ((op, _shape),) = observe_contractions(module)
+        ordinal = list(module.walk()).index(op)
+        proof = dict(
+            status="proven",
+            source_sha256=hashlib.sha256(str(module).encode()).hexdigest(),
+            kernels=[dict(symbol="seeded", status="proven")],
+            bindings=[dict(source_operation_ordinal=ordinal, symbol="seeded")],
+        )
+    _, absent = _plan(selection, source_text)
+    assert absent["sites"][0]["status"] == "refused"
+    assert "coverage proof unavailable" in " ".join(absent["sites"][0]["reasons"])
+    _, admitted = _plan(selection, source_text, proof)
+    assert admitted["sites"][0]["status"] == "admitted", admitted["sites"][0]["reasons"]
+    for damaged in ({**proof, "bindings": []}, {**proof, "source_sha256": "stale"}, {**proof, "kernels": []}):
+        _, refused = _plan(selection, source_text, damaged)
+        assert refused["sites"][0]["status"] == "refused"
 
 
-def test_a_readout_relu_with_a_nonpositive_scale_is_refused(selection):
-    negative = SRC.replace("prov.quant.scale = 0.0125 : f32", "prov.quant.scale = -0.0125 : f32")
+@pytest.mark.parametrize("key", ["qmin", "qmax", "mystery"])
+def test_unknown_quantization_attributes_are_rejected(source_text, key):
+    from xdsl.dialects.builtin import IntegerAttr, i64
+
+    with IR_LOCK:
+        ((op, _shape),) = observe_contractions(mq.parse(source_text))
+        reader = device_readout(op)["operation"]
+        reader.attributes[f"prov.quant.{key}"] = IntegerAttr(0, i64)
+        with pytest.raises(ValueError, match="unknown readout quantization"):
+            device_readout(op)
+
+
+def test_a_readout_relu_with_a_nonpositive_scale_is_refused(selection, source_text):
+    negative = source_text.replace("prov.quant.scale = ", "prov.quant.scale = -")
     _op, plan = _plan(selection, negative)
     assert any("ReLU" in reason for reason in plan["sites"][0]["reasons"])
 

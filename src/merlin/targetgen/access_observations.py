@@ -131,6 +131,70 @@ def _aliasing(op) -> str | None:
     return "in_place" if any(output is source for output in outputs for source in inputs) else "disjoint_inputs_outputs"
 
 
+def primitive_signature(op) -> dict[str, Any]:
+    """Observe operand arity, affine scalar dependence and outer-only broadcast.
+
+    Output/init operands are destinations, never inputs. Missing or nonprojected
+    indexing maps cannot prove a broadcast restriction.
+    """
+    from merlin.common import mlir_query as mq
+
+    n_in = _n_inputs(op)
+    count = sum(hasattr(value.type, "get_shape") for value in op.operands[:n_in])
+    broadcasting = None
+    positions, kinds = _maps(op)
+    if positions is not None and len(positions) > n_in and all(kind == "parallel" for kind in kinds):
+        result = positions[-1]
+        if result == list(range(len(kinds))):
+            inputs = positions[:n_in]
+            if all(dims == result for dims in inputs):
+                broadcasting = "none"
+            elif all(dims == result[len(result) - len(dims) :] if dims else True for dims in inputs):
+                broadcasting = "outer"
+            else:
+                broadcasting = "inner"
+    expression = None
+    body = getattr(op, "body", None)
+    if body is not None and len(body.blocks) == 1:
+        block = body.block
+        # A scalar expression's degree in tensor inputs; constants have degree 0.
+        degree = {arg: 1 if i < n_in else None for i, arg in enumerate(block.args)}
+        for inner in block.ops:
+            name = mq.op_name(inner)
+            ds = [degree.get(value) for value in inner.operands]
+            if name == "linalg.yield":
+                expression = "affine" if len(ds) == 1 and ds[0] in (0, 1) else "nonlinear"
+                break
+            if name == "arith.constant":
+                d = 0
+            elif name in {
+                "arith.extsi",
+                "arith.extui",
+                "arith.sitofp",
+                "arith.uitofp",
+                "arith.extf",
+                "arith.truncf",
+                "arith.negf",
+            }:
+                d = ds[0]
+            elif name in {"arith.addi", "arith.addf", "arith.subi", "arith.subf"} and None not in ds:
+                d = max(ds)
+            elif name in {"arith.muli", "arith.mulf"} and None not in ds and sum(ds) <= 1:
+                d = sum(ds)
+            elif name == "arith.divf" and ds == [1, 0]:
+                d = 1
+            elif name in {"arith.maximumf", "arith.maxsi", "arith.minimumf", "arith.minsi"} and sorted(ds, key=str) == [
+                0,
+                1,
+            ]:
+                d = 1  # constant-bound clamp / ReLU
+            else:
+                d = None
+            for value in inner.results:
+                degree[value] = d
+    return {"tensor_operands": count, "expression": expression, "broadcasting": broadcasting}
+
+
 def observe(op, family: str | None) -> dict[str, Any]:
     """The four observations for a structured (``linalg.*``) operation; every key ``None`` otherwise."""
     from merlin.common import mlir_query as mq

@@ -148,3 +148,68 @@ def test_the_contraction_plan_carries_the_sites(selection):
         module = mq.parse(_PROGRAM)
         plan = admission_plan(module, selection, native=True)
     assert plan["sites"] == [] and len(plan["non_contraction_sites"]) == 5
+
+
+@pytest.mark.parametrize(
+    "change, expected",
+    [("three_inputs", "tensor_operands"), ("transcendental", "expression"), ("inner", "broadcasting")],
+)
+def test_primitive_limits_are_enforced(selection, change, expected):
+    source = _PROGRAM.split("%wide")[0] + "return %add : tensor<2x8xi8>\n  }\n}\n"
+    if change == "three_inputs":
+        source = source.replace(
+            "ins(%x, %y : tensor<2x8xi8>, tensor<2x8xi8>)",
+            "ins(%x, %y, %x : tensor<2x8xi8>, tensor<2x8xi8>, tensor<2x8xi8>)",
+        )
+        source = source.replace(
+            "affine_map<(d0, d1) -> (d0, d1)>],", "affine_map<(d0, d1) -> (d0, d1)>, affine_map<(d0, d1) -> (d0, d1)>],"
+        )
+        source = source.replace("%b: i8, %o: i8", "%b: i8, %c: i8, %o: i8")
+    elif change == "transcendental":
+        source = source.replace(
+            "%s = arith.addi %a, %b : i8",
+            "%af = arith.sitofp %a : i8 to f32\n      %exp = math.exp %af : f32\n      %s = arith.fptosi %exp : f32 to i8",
+        )
+        source = source.replace("aten.add.Tensor", "aten.sigmoid.default")
+    else:
+        source = source.replace("%y: tensor<2x8xi8>", "%y: tensor<2xi8>")
+        source = source.replace(
+            "ins(%x, %y : tensor<2x8xi8>, tensor<2x8xi8>)", "ins(%x, %y : tensor<2x8xi8>, tensor<2xi8>)"
+        )
+        old = "affine_map<(d0, d1) -> (d0, d1)>,\n                                            affine_map<(d0, d1) -> (d0, d1)>]"
+        source = source.replace(
+            old,
+            "affine_map<(d0, d1) -> (d0)>,\n                                            affine_map<(d0, d1) -> (d0, d1)>]",
+        )
+    with IR_LOCK:
+        (site,) = non_contraction_sites(mq.parse(source), selection, contract=selection["capability_contract"])
+    software = next(step["software"] for step in site["steps"] if "software" in step)
+    assert software["status"] == "unsupported", software
+    from merlin.targetgen.software_spec import admit_operation
+
+    standalone = {**selection["spec"], "operations": [
+        row for row in selection["spec"]["operations"] if row["id"] == "elementwise_map_standalone"
+    ]}
+    decision = admit_operation(standalone, site["source_operator"], site["signature"], "accelerator")
+    assert decision["status"] == "unsupported", decision
+    assert expected in decision["reason"], decision
+
+
+def test_standalone_maximum_is_refused_by_sum_only_declaration(selection):
+    source = _PROGRAM.replace("arith.addi %o, %v", "arith.maxsi %o, %v").replace(
+        "aten.sum.dim_IntList", "aten.amax.default"
+    )
+    with IR_LOCK:
+        sites = non_contraction_sites(mq.parse(source), selection, contract=selection["capability_contract"])
+    maximum = next(site for site in sites if site["source_operator"] == "aten.amax.default")
+    decision = next(step["software"] for step in maximum["steps"] if "software" in step)
+    assert decision["status"] == "unsupported"
+    from merlin.targetgen.software_spec import admit_operation
+
+    only_sum = {
+        **selection["spec"],
+        "operations": [row for row in selection["spec"]["operations"] if row["id"] == "reduction_standalone"],
+    }
+    decision = admit_operation(only_sum, "aten.amax.default", maximum["signature"], "accelerator")
+    assert decision["status"] != "admitted"
+    assert "kind" in decision["reason"] or decision["status"] == "unknown"

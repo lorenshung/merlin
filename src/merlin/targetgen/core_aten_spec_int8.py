@@ -16,6 +16,37 @@ from merlin.targetgen.software_spec import admit_operation, load_software_spec
 QUANTIZE = "quantized_decomposed.quantize_per_tensor.default"
 DEQUANTIZE = "quantized_decomposed.dequantize_per_tensor.default"
 
+_QUANTIZATION_KEYS = frozenset(
+    {
+        "scale",
+        "zero_point",
+        "quant_min",
+        "quant_max",
+        "relu",
+        "rounding",
+        "granularity",
+        "saturate",
+        "accumulator",
+        "arithmetic",
+        "lhs_scale",
+        "rhs_scale",
+        "output_scale",
+        "alpha",
+        "beta",
+        "acc_scale",
+        "numerics",
+    }
+)
+
+
+def validate_quantization_attributes(op):
+    """Quantization metadata is a closed vocabulary, including on MACs and seeds."""
+    unknown = sorted(
+        key for key in op.attributes if key.startswith("prov.quant.") and key[11:] not in _QUANTIZATION_KEYS
+    )
+    if unknown:
+        raise ValueError(f"unknown readout quantization attributes: {unknown}")
+
 
 def host_signature(op: str, rank: int, parameters: dict) -> dict:
     return {
@@ -136,7 +167,24 @@ def readout_refusals(selection, decision):
     return reasons
 
 
-def admission_plan(module, selection, *, captured=False, native=False):
+def provider_coverage(module, proof, op) -> str | None:
+    """A source-bound, proven catalog binding for this precise contraction."""
+    if not isinstance(proof, dict) or proof.get("status") != "proven":
+        return "selected provider coverage proof unavailable"
+    if proof.get("source_sha256") != hashlib.sha256(str(module).encode()).hexdigest():
+        return "selected provider coverage proof is for different source bytes"
+    ordinal = list(module.walk()).index(op)
+    bindings = [row for row in proof.get("bindings", ()) if row.get("source_operation_ordinal") == ordinal]
+    if len(bindings) != 1:
+        return "selected provider must prove exactly one binding for the proposed contraction"
+    binding = bindings[0]
+    kernels = [row for row in proof.get("kernels", ()) if row.get("symbol") == binding.get("symbol")]
+    if len(kernels) != 1 or kernels[0].get("status") != "proven":
+        return "selected provider binding lacks a proven kernel"
+    return None
+
+
+def admission_plan(module, selection, *, captured=False, native=False, provider_proof=None):
     """Independently screen all six steps at each source contraction's actual ranks."""
     from merlin.kernels.shapes import accumulator_init, observe_contractions, zero_initialised
     from merlin.llvmlower.contraction_quantization import closed_float_mac
@@ -144,16 +192,32 @@ def admission_plan(module, selection, *, captured=False, native=False):
     from merlin.targetgen.operation_numerics import integer_split_k_limit
 
     spec, host = selection["spec"], selection["host"]
+    quantization_errors = []
+    for operation in module.walk():
+        try:
+            validate_quantization_attributes(operation)
+        except ValueError as exc:
+            quantization_errors.append(str(exc))
     ordinals = {op: i for i, op in enumerate(module.walk())}
     sites = []
     for op, shape in observe_contractions(module):
         rank = len(op.results[0].type.get_shape())
-        steps, reasons = [], pipeline_refusals(selection)
+        steps, reasons = [], pipeline_refusals(selection) + quantization_errors
         # A capture in the integer_readout numerics reads the accumulator out ON THE DEVICE: one fused
         # requantization to int8, the bias an int32 accumulator seed. Then there is no host cast, no
         # host multiply and no cast exactness bound on K; the readout is a fused contraction stage.
-        readout = device_readout(op) if (captured or native) else None
+        try:
+            readout = device_readout(op) if (captured or native) else None
+        except ValueError as exc:
+            readout = None
+            reasons.append(str(exc))
+        if captured and not native and readout is None:
+            reasons.append("captured floating readout lacks a full-domain exact-arithmetic proof")
         seeded = accumulator_init(op) == "int32_seed"
+        if seeded or readout is not None:
+            failure = provider_coverage(module, provider_proof, op)
+            if failure:
+                reasons.append(failure)
         geometry = planned_readout_geometry(op) if not native and readout is None else None
         readout_proof = None
         readout_rank = rank
@@ -476,16 +540,39 @@ def device_readout(op) -> dict | None:
     """
     from merlin.common import mlir_query as mq
 
+    validate_quantization_attributes(op)
+
     result = op.results[0] if len(op.results) == 1 else None
     users = list(result.uses) if result is not None else []
     if len(users) != 1:
         return None
     reader = users[0].operation
+    validate_quantization_attributes(reader)
     if mq.op_name(reader) != "linalg.generic" or mq.attr_str(reader, "prov.role") != "readout":
         return None
     if str(getattr(reader.results[0].type, "element_type", "")) != "i8":
         return None  # an f32 acc_readout leaves the multiply to the host
     attributes = reader.attributes
+    allowed = {
+        "scale",
+        "zero_point",
+        "quant_min",
+        "quant_max",
+        "relu",
+        "rounding",
+        "granularity",
+        "saturate",
+        "accumulator",
+        "arithmetic",
+        "lhs_scale",
+        "rhs_scale",
+        "output_scale",
+        "alpha",
+        "beta",
+    }
+    unknown = sorted(key for key in attributes if key.startswith("prov.quant.") and key[11:] not in allowed)
+    if unknown:
+        raise ValueError(f"unknown readout quantization attributes: {unknown}")
 
     def number(key):
         value = attributes.get(key)
@@ -500,16 +587,41 @@ def device_readout(op) -> dict | None:
     parameters = {key: number(f"prov.quant.{key}") for key in ("zero_point", "quant_min", "quant_max")}
     relu = mq.attr_str(reader, "prov.quant.relu")
     if (
-        any(not isinstance(v, (int, float)) for v in scales)
-        or None in parameters.values()
+        not scales
+        or any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in scales)
+        or any(type(value) is not int for value in parameters.values())
         or relu not in {"true", "false"}
     ):
-        return None
+        raise ValueError("readout requires finite scales and canonical integer zero_point/quant_min/quant_max")
+    if not -128 <= parameters["quant_min"] <= parameters["zero_point"] <= parameters["quant_max"] <= 127:
+        raise ValueError("readout quantization bounds do not fit signed i8")
+    rounding = mq.attr_str(reader, "prov.quant.rounding")
+    if rounding not in {None, "", "half_to_even"}:
+        raise ValueError(f"unsupported readout rounding {rounding!r}")
+    for key, expected in (("saturate", "true"), ("accumulator", "i32")):
+        value = mq.attr_str(reader, f"prov.quant.{key}")
+        if value not in {None, "", expected}:
+            raise ValueError(f"unsupported readout {key} {value!r}")
+    arithmetic = mq.attr_str(reader, "prov.quant.arithmetic")
+    if arithmetic not in {None, "", "exact"}:
+        raise ValueError(f"unsupported readout arithmetic {arithmetic!r}")
+    exact_parameters = {}
+    for key in ("lhs_scale", "rhs_scale", "output_scale", "alpha", "beta"):
+        value = attributes.get(f"prov.quant.{key}")
+        if value is None:
+            continue
+        values = list(value.data) if hasattr(value, "data") and isinstance(value.data, tuple) else [value]
+        numbers = [getattr(getattr(item, "value", None), "data", None) for item in values]
+        if any(not isinstance(n, (int, float)) or not math.isfinite(n) for n in numbers):
+            raise ValueError(f"readout {key} requires finite numeric parameters")
+        exact_parameters[key] = numbers
     return {
         "scales": [float(v) for v in scales],
         "granularity": "tensor" if len(scales) == 1 else "channel",
         **{key: int(value) for key, value in parameters.items()},
         "relu": relu == "true",
+        "arithmetic": arithmetic or "unspecified",
+        "exact_parameters": exact_parameters,
         "operation": reader,
     }
 
@@ -706,6 +818,12 @@ def non_contraction_sites(module, selection, *, contract=None, prospective=False
     contractions = {id(op) for op, _shape in observe_contractions(module)}
     ordinals = {id(op): i for i, op in enumerate(module.walk())}
     islands = quantized_islands(module)
+    quantization_errors = []
+    for operation in module.walk():
+        try:
+            validate_quantization_attributes(operation)
+        except ValueError as exc:
+            quantization_errors.append(str(exc))
 
     def precision(value) -> str | None:
         dtype = mq.type_shape_dtype(value.type)[1]
@@ -781,11 +899,17 @@ def non_contraction_sites(module, selection, *, contract=None, prospective=False
             "scale_granularity": "tensor",
             **{key: value for key, value in observations.items() if value is not None},
         }
+        if family == "elementwise_map":
+            signature.update(access_observations.primitive_signature(op))
+        elif family == "movement":
+            signature["broadcasting"] = (
+                access_observations.primitive_signature(op)["broadcasting"] if form == "broadcast" else "none"
+            )
         if form is not None:
             signature["form"] = form
         if kind is not None:
             signature["kind"] = kind
-        steps, reasons = [], list(pipeline_refusals(selection))
+        steps, reasons = [], list(pipeline_refusals(selection)) + quantization_errors
         for step, key, origin, destination, dtype in (
             (2, "operand_load", "host", "accelerator", in_dtype),
             (4, "readout", "accelerator", "host", out_dtype),

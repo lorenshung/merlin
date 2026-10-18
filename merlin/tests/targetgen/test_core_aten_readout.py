@@ -63,7 +63,8 @@ def test_captured_bridge_retains_batch_and_restores_output(module, selection):
     assert first.inputs[0] is cast.results[0] and second.inputs[0] is first.results[0]
     assert restored.type.get_shape() == (3, 5, 4)
     (site,) = admission_plan(module, selection, captured=True)["sites"]
-    assert site["status"] == "admitted", site
+    assert site["status"] == "refused", site
+    assert "full-domain exact-arithmetic proof" in " ".join(site["reasons"])
     assert site["host_readout_bridge"]["status"] == "verified_captured_ssa"
     assert site["cast_exact_range_obligation"]["max_abs_bound"] == 7 * 128 * 128
     assert site["cast_exact_range_obligation"]["exact_limit"] == 1 << 24
