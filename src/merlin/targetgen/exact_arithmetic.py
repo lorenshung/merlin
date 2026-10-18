@@ -31,16 +31,20 @@ def exact_array(value):
     return np.vectorize(rational, otypes=[object])(np.asarray(value, dtype=object))
 
 
-def round_binary(value, bits=32):
-    """Correct RNE to IEEE binary32/64, without a double rounding via binary64."""
+def round_binary(value, bits=32, *, bfloat16=False):
+    """Correct RNE to IEEE storage, without a double rounding via binary64."""
     value = rational(value)
+    if bfloat16 and bits != 16:
+        raise ValueError("bfloat16 requires 16 storage bits")
     if bits == 64:
         return float(value)
     if bits not in (16, 32):
         raise ValueError("unsupported floating boundary precision")
     if not value:
         return 0.0
-    fraction_bits, minimum_exp, maximum_exp = (23, -126, 127) if bits == 32 else (10, -14, 15)
+    fraction_bits, minimum_exp, maximum_exp = (
+        (7, -126, 127) if bfloat16 else (23, -126, 127) if bits == 32 else (10, -14, 15)
+    )
     magnitude = abs(value)
     exponent = magnitude.numerator.bit_length() - magnitude.denominator.bit_length()
     if magnitude < Fraction(2) ** exponent:

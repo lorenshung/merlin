@@ -250,3 +250,32 @@ def test_i1_integer_arithmetic_wraps(operation):
 def test_i1_ordering_uses_the_predicate_signedness(predicate, expected):
     module = source(["i1", "i1"], "i1", f"%v=arith.cmpi {predicate},%a0,%a1 : i1")
     assert run(module, [np.array([True], np.bool_), np.array([False], np.bool_)]).item() is expected
+
+
+@pytest.mark.parametrize("token,p", [("f16", 11), ("bf16", 8)])
+def test_direct_reduced_cast_rounds_once_and_explicit_f32_bridge_twice(token, p):
+    direct = source(["f64"], token, f"%v=arith.truncf %a0 : f64 to {token}")
+    bridge = source(["f64"], token, f"%f=arith.truncf %a0 : f64 to f32\n%v=arith.truncf %f : f32 to {token}")
+    value = np.array([1.0 + 2.0**-p + 2.0**-30], np.float64)
+    assert run(direct, [value]).item() == 1.0 + 2.0 ** (1 - p)
+    assert run(bridge, [value]).item() == 1.0
+
+
+@pytest.mark.parametrize("token,p,exponent", [("f16", 11, 15), ("bf16", 8, 63)])
+def test_unsigned_integer_to_reduced_storage_has_one_rounding(token, p, exponent):
+    module = source(["i64"], token, f"%v=arith.uitofp %a0 : i64 to {token}")
+    midpoint = (1 << exponent) + (1 << (exponent - p))
+    for value in [midpoint - 1, midpoint, midpoint + 1]:
+        word = value - (1 << 64) if value >= (1 << 63) else value
+        expected = (1 << exponent) if value <= midpoint else (1 << exponent) + (1 << (exponent + 1 - p))
+        assert run(module, [np.array([word], np.int64)]).item() == float(expected)
+
+
+@pytest.mark.parametrize("token", ["f16", "bf16", "f32", "f64"])
+def test_ieee_conversion_keeps_zero_sign(token):
+    torch = pytest.importorskip("torch")
+    module = source(
+        ["f64"], token, f"%v=arith.truncf %a0 : f64 to {token}" if token != "f64" else "%v=arith.negf %a0 : f64"
+    )
+    value = np.array([-0.0 if token != "f64" else 0.0], np.float64)
+    assert torch.signbit(run(module, [value])).item() is True

@@ -113,7 +113,12 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
         block, operands, point=(), operand_taints=None, operand_nan_only=None,
         captured=None, captured_taints=None, captured_nan_only=None, single_operation=False,
     ):
-        from merlin.targetgen.source_scalar import fused_multiply_add, logical_shift, unsigned_to_float
+        from merlin.targetgen.source_scalar import (
+            convert_to_float,
+            fused_multiply_add,
+            logical_shift,
+            unsigned_to_float,
+        )
 
         local = dict(captured or {})
         local.update(zip(block.args, operands, strict=True))
@@ -181,6 +186,8 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                     y = -xs[0].to(target)
                 elif name == "arith.trunci" and target == torch.bool:
                     y = (xs[0] & 1).to(target)
+                elif name in {"arith.extf", "arith.truncf", "arith.sitofp"}:
+                    y = convert_to_float(xs[0], target)
                 else:
                     y = xs[0].to(target)
                 if name in {"arith.extf", "arith.truncf"}:

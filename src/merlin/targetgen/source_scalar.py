@@ -37,13 +37,44 @@ def fused_multiply_add(a, b, c):
 def unsigned_to_float(value, width, target):
     import torch
 
+    if width not in (1, 8, 16, 32, 64):
+        raise ValueError("source unsigned conversion requires a supported integer width")
+    values = [_round_float(int(x) & ((1 << width) - 1), target) for x in value.flatten().tolist()]
+    return torch.tensor(values, dtype=target).reshape(value.shape)
+
+
+def _round_float(value, target):
+    import math
+
+    import torch
+
     from merlin.targetgen.exact_arithmetic import round_binary
 
-    if width not in (1, 8, 16, 32, 64) or target not in (torch.float32, torch.float64):
-        raise ValueError("source unsigned conversion requires a supported integer width and f32/f64 result")
-    bits = 32 if target == torch.float32 else 64
-    values = [round_binary(int(x) & ((1 << width) - 1), bits) for x in value.flatten().tolist()]
-    return torch.tensor(values, dtype=target).reshape(value.shape)
+    bits = {torch.float16: 16, torch.bfloat16: 16, torch.float32: 32, torch.float64: 64}.get(target)
+    if bits is None:
+        raise ValueError("source floating conversion requires an IEEE storage format")
+    if value == 0:
+        return float(value)  # Retain an IEEE input zero's sign.
+    try:
+        return round_binary(value, bits, bfloat16=target == torch.bfloat16)
+    except (ValueError, OverflowError):
+        return math.copysign(math.inf, value)
+
+
+def convert_to_float(value, target):
+    """One typed RNE, including direct f64/int64 to reduced storage.
+
+    Torch's CPU reduced-storage cast passes through f32. That extra rounding
+    belongs only where the source explicitly carries the f32 conversion.
+    """
+    import math
+
+    result = value.to(target).clone()
+    flat = result.reshape(-1)
+    for index, original in enumerate(value.flatten().tolist()):
+        if math.isfinite(original):
+            flat[index] = _round_float(original, target)
+    return result
 
 
 def logical_shift(value, amount, width, *, left=False):

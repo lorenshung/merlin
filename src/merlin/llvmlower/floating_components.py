@@ -136,11 +136,7 @@ def rewrite_floating_components(
         if name == "arith.uitofp":
             original = int(original) & ((1 << owner.operands[0].type.width.data) - 1)
         if str(value.type) == "bf16":
-            # The frontend expresses the CPU reduced-storage bridge explicitly.
-            # xDSL's bf16 encoder rounds an already-binary32 value correctly.
-            if str(owner.operands[0].type) != "f32":
-                return None
-            return value.type.unpack(value.type.pack([float(original)]), 1)[0]
+            return round_binary(original, 16, bfloat16=True)
         return round_binary(original, {"f16": 16, "f32": 32, "f64": 64}[str(value.type)])
 
     def grid(value):
