@@ -7,6 +7,10 @@ target implementation for that floating operation.
 
 from __future__ import annotations
 
+#: Identity shared by capture receipts and both independent-reference admission checks.
+INTEGER_REFERENCE = "pt2e_integer"
+
+
 #: Recipe families whose quantized work is not a contraction (merlin.targetgen.quant_recipe).
 NON_CONTRACTION_ANNOTATIONS = ("annotated_sums", "annotated_means", "annotated_affine_maps", "annotated_movements")
 

@@ -31,8 +31,23 @@ def integerized_agreement(before, after, *, atol: float, rtol: float, output_abi
         else:
             max_abs = max_rel = 0.0
             within = False
+        byte_equal = (
+            same_shape
+            and original.dtype == rewritten.dtype
+            and torch.equal(
+                original.detach().cpu().contiguous().reshape(-1).view(torch.uint8),
+                rewritten.detach().cpu().contiguous().reshape(-1).view(torch.uint8),
+            )
+        )
+        zero_signs = (
+            int(((lhs == 0) & (rhs == 0) & (torch.signbit(lhs) != torch.signbit(rhs))).sum()) if same_shape else 0
+        )
         rows.append(
             {
+                "dtype_before": str(original.dtype),
+                "dtype_after": str(rewritten.dtype),
+                "byte_equal": byte_equal,
+                "signed_zero_differences": zero_signs,
                 "max_abs": max_abs,
                 "max_rel": max_rel,
                 "within_tolerance": within,

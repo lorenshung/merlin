@@ -12,6 +12,7 @@ import math
 from collections import Counter
 from pathlib import Path
 
+from merlin.capture.integerization import INTEGER_REFERENCE
 from merlin.common.digest import is_sha256
 
 # A separate, versioned addition preserves existing frozen v1 inventory bytes.
@@ -366,7 +367,7 @@ def verified_static_integerization(projection: dict | None, *, receipt_sha256: s
         executed = agreement.get("executed_contractions") or {}
         by_kind = receipt.get("quantized_by_kind") or {}
         if (
-            agreement.get("reference") != "pt2e_integer"
+            agreement.get("reference") != INTEGER_REFERENCE
             or any(row.get(key) != 0.0 for row in [agreement, *outputs] for key in ("atol", "rtol", "max_abs"))
             or not isinstance(source, dict)
             or not is_sha256(source.get("sha256"))

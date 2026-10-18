@@ -253,7 +253,7 @@ def _require_pt2e_integerization_receipt(
         raise M2MUnavailable(
             f"integerization receipt census {seen} disagrees with PT2E's {annotated} annotated contractions"
         )
-    from merlin.capture.integerization import non_contraction_annotations, non_contraction_program
+    from merlin.capture.integerization import INTEGER_REFERENCE, non_contraction_annotations, non_contraction_program
 
     contraction_free = non_contraction_program(receipt)
     if contraction_free and receipt["non_contraction_annotations"] != non_contraction_annotations(quantization_stats):
@@ -318,7 +318,7 @@ def _require_pt2e_integerization_receipt(
     if any(row.get("atol") != expected[0] or row.get("rtol") != expected[1] for row in outputs):
         raise M2MUnavailable("integerization receipt has a golden agreement output with different tolerance")
     if engine == "integer_reference":
-        if agreement.get("reference") != "pt2e_integer":
+        if agreement.get("reference") != INTEGER_REFERENCE:
             raise M2MUnavailable("integerization receipt did not use the selected independent integer reference")
         source = agreement.get("source")
         if (

@@ -1107,7 +1107,11 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
     integerization_receipt = None
     if q is not None and q.scheme == "int8_static_act_int8_weight" and not a.already_quantized:
         # Independently account for integer and preserved-float contractions.
-        from merlin.capture.integerization import accelerator_readout_numerics, integerize_static_pt2e
+        from merlin.capture.integerization import (
+            INTEGER_REFERENCE,
+            accelerator_readout_numerics,
+            integerize_static_pt2e,
+        )
 
         selected_engine = (recipe or {}).get("software_numerical_engine", "integer_reference")
         # Accelerator captures retain exact integer math and one rational quantize boundary.
@@ -1192,7 +1196,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             if independent is None:
                 golden_agreement = {
                     "status": "failed",
-                    "reference": "pt2e_integer",
+                    "reference": INTEGER_REFERENCE,
                     "reason": independent_error or "selected integer reference returned no result",
                 }
             else:
@@ -1222,7 +1226,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 reference_path = out / "integer-reference.json"
                 reference_path.write_bytes(reference_bytes)
                 golden_agreement.update(
-                    reference="pt2e_exact_rational",
+                    reference=INTEGER_REFERENCE,
                     arithmetic="exact_rational",
                     eager_float_divergence=independent.eager_float_divergence,
                     source=independent_source,
