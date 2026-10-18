@@ -129,9 +129,11 @@ def test_explicit_special_words_match_native_cpu(typ, operation):
 
 def test_special_readout_does_not_taint_an_unread_shape_operand():
     from types import SimpleNamespace
+
     from xdsl.dialects import arith
     from xdsl.dialects.linalg import ops as L
     from xdsl.ir import Region
+
     from merlin.llvmlower.ieee_pointwise import overlay
 
     scalar = Block(arg_types=[f32] * 4)
