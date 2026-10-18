@@ -143,3 +143,9 @@ def test_aggregate_finite_overflow_requires_host_instruction_order():
     op = next(op for op in source.walk() if op.name == "linalg.generic")
     with pytest.raises(ValueError, match="host instruction order"):
         propagation_source(op, lambda value: (127, (1 << 24) - 1))
+
+
+def test_input_special_overlay_cannot_cover_finite_intermediate_overflow():
+    source = module("f32", "addf")
+    with pytest.raises(ValueError, match="finite dependence can overflow"):
+        rewrite_floating_components(source, [(127, 1), (127, 1)], ieee_pointwise=True)

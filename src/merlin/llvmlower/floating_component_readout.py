@@ -33,6 +33,14 @@ def component_readout(
     def publish(op, integer, exponent, integer_bound, operations, compute_type=None, denominator=1):
         compute_type = compute_type or op.results[0].type.element_type
         output_type = op.results[0].type.element_type
+        if ieee_pointwise:
+            f, _, bias = FORMAT[str(output_type)]
+            finite_limit = Fraction((1 << (f + 1)) - 1) * Fraction(2) ** (bias - f)
+            finite_bound = Fraction(integer_bound, denominator) * Fraction(2) ** exponent
+            if finite_bound > finite_limit:
+                raise ValueError(
+                    "sanitized finite dependence can overflow; input-only IEEE overlay cannot change those outputs"
+                )
         aggregate = (
             op in contractions
             or any(it.data == L.IteratorType.REDUCTION for it in op.get_iterator_types())

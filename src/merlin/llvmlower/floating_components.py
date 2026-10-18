@@ -286,6 +286,23 @@ def rewrite_floating_components(
                             digits += 1
                             capacity = 256 * capacity + 127
                         bound = (1 << 31) * sum(1 << (8 * j) for j in range(digits))
+                        from merlin.llvmlower.static_polynomials import PolynomialRefusal, analyze_static_polynomial
+
+                        try:
+                            atoms, rows = analyze_static_polynomial(op, require_bilinear=False)
+                            magnitudes = dict(zip(sources, (b for _, b in packed), strict=True))
+                            indexed_bound = max(
+                                (
+                                    sum(abs(c) * prod(magnitudes[atoms[i][0]] for i in key) for key, c in row.items())
+                                    for row in rows
+                                ),
+                                default=0,
+                            )
+                            if Fraction(indexed_bound).denominator != 1:
+                                raise PolynomialRefusal("additive component bound is not integral")
+                            bound = min(bound, int(indexed_bound))
+                        except (PolynomialRefusal, KeyError):
+                            pass
                         if bound.bit_length() < reconstruction_limit:
                             integer.attributes["merlin.exact_additive"] = StringAttr("closed_zero_seed_sum")
                             operations.extend(additive_ops)
