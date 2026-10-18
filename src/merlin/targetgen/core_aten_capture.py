@@ -209,7 +209,12 @@ def capture_case_corpus(
             artifact = source.capture_loader(loader, "fp32", workdir=destination / "capture-work")
             mlir.write_text(apply_native_input_storage(artifact.linalg_mlir, case), encoding="utf-8")
             actual = sorted(_provenance_ops(mlir))
-            exact = overload in actual
+            specialization = artifact.meta.get("static_metadata_specialization") or {}
+            metadata_exact = (
+                specialization.get("authority") == "static_capture_input_descriptors"
+                and any(query.get("operator") == overload for query in specialization.get("queries", []))
+            )
+            exact = overload in actual or metadata_exact
             record = {
                 "schema_version": 1,
                 "status": "captured_exact" if exact else "captured_lost_exact_provenance",
@@ -219,6 +224,7 @@ def capture_case_corpus(
                 "pytorch_version": artifact.meta.get("torch_version"),
                 "model2mlir_revision": _git_revision(source.m2m_dir),
                 "capture_meta": artifact.meta,
+                "exact_provenance_kind": "static_metadata_specialization" if metadata_exact else "source_operator",
                 "input_storage_convention": native_input_storage_plan(overload, case["arguments"]),
             }
             (destination / "inputs.json").write_text(json.dumps(artifact.inputs, indent=2) + "\n", encoding="utf-8")

@@ -73,3 +73,26 @@ def test_no_admitted_contraction_or_reference_still_refuses(prepared, tmp_path, 
     prepared.append(plan)
     with pytest.raises(ValueError, match="no admitted contraction"):
         C.prepare_numeric_fixture(tmp_path, {"cases": [{}]}, _flow(tmp_path))
+
+
+@pytest.mark.parametrize("family", ["F1", "F2", "F4", "F5"])
+def test_native_preparation_packages_with_its_own_boundary_gate(prepared, tmp_path, family):
+    plan = dict(
+        status="admitted",
+        numerical_family=family,
+        exact_dtype_sites=1,
+        sites=[dict(status="admitted")],
+        host_floor=dict(status="required", comparison="native_eager_bits_every_boundary_result"),
+    )
+    prepared.append(plan)
+    report = {"cases": [{}]}
+    C.prepare_numeric_fixture(tmp_path, report, _flow(tmp_path))
+    assert report["numeric_preparation"] == plan
+
+
+def test_native_fixture_cannot_skip_native_grading(prepared, tmp_path):
+    prepared.append(
+        dict(status="admitted", numerical_family="F1", exact_dtype_sites=1, sites=[dict(status="admitted")])
+    )
+    with pytest.raises(ValueError, match="no admitted contraction"):
+        C.prepare_numeric_fixture(tmp_path, {"cases": [{}]}, _flow(tmp_path))

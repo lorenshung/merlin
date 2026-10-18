@@ -220,7 +220,16 @@ def prepare_numeric_fixture(bundle: Path, report: dict, flow: dict) -> None:
         + (plan.get("native_contractions") or 0)
         + (plan.get("quantized_non_contraction_sites") or 0)
     )
-    if not admitted or (plan.get("integer_reference") or {}).get("status") != "prepared":
+    native = (
+        plan.get("numerical_family") in {"F1", "F2", "F4", "F5"}
+        and plan.get("status") == "admitted"
+        and plan.get("exact_dtype_sites", 0) > 0
+        and (plan.get("host_floor") or {}).get("status") == "required"
+        and (plan.get("host_floor") or {}).get("comparison") == "native_eager_bits_every_boundary_result"
+        and all(site.get("status") == "admitted" for site in plan.get("sites", []))
+        and len(plan.get("sites", [])) == plan.get("exact_dtype_sites")
+    )
+    if not native and (not admitted or (plan.get("integer_reference") or {}).get("status") != "prepared"):
         raise ValueError("scored capsule has no admitted contraction with an exact integer reference")
     report["numeric_preparation"] = plan
     for record in report["cases"]:
