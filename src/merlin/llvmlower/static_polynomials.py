@@ -46,7 +46,10 @@ def analyze_static_polynomial(op, *, work_limit=1_000_000, require_bilinear=True
 
         uniform = _constant_of(source)
         if uniform is not None:
-            value = Fraction.from_float(float(uniform))
+            try:
+                value = Fraction.from_float(float(uniform))
+            except (ValueError, OverflowError) as exc:
+                raise PolynomialRefusal("nonfinite tensor literal") from exc
             return {(): value} if value else {}
         key = source, tuple(index)
         if key not in atom_ids:

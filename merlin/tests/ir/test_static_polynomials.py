@@ -115,3 +115,22 @@ def test_wide_polynomial_gathers_retain_full_fixed_point_width():
     marked = [op for op in module.walk() if "test.limb" in op.attributes]
     assert any(any(it.data.value == "reduction" for it in op.get_iterator_types()) for op in marked)
     module.verify()
+
+
+@pytest.mark.parametrize("word", ["0x7F800000", "0xFF800000", "0x7FC00000"])
+def test_nonfinite_tensor_seed_refuses_rational_polynomial(word):
+    module = parse_mlir_text(f"""module {{
+      func.func @forward(%x:tensor<1xf32>) -> tensor<f32> {{
+        %c=arith.constant {word} : f32
+        %seed=tensor.splat %c : tensor<f32>
+        %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->()>],
+          iterator_types=["reduction"]}} ins(%x:tensor<1xf32>) outs(%seed:tensor<f32>) {{
+          ^bb0(%a:f32,%acc:f32):
+            %v=arith.addf %acc,%a : f32
+            linalg.yield %v : f32
+        }} -> tensor<f32>
+        return %r : tensor<f32>
+      }} }}""")
+    op = next(op for op in module.walk() if op.name == "linalg.generic")
+    with pytest.raises(PolynomialRefusal, match="nonfinite tensor literal"):
+        analyze_static_polynomial(op, require_bilinear=False)
