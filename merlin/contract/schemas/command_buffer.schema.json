@@ -202,7 +202,8 @@
               "CONCAT",
               "INSERT_SLICE",
               "FILL",
-              "FENCE"
+              "FENCE",
+              "WINDOW_SUM"
             ]
           },
           "operands": {

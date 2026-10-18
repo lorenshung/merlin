@@ -267,7 +267,7 @@ def fill(shape: list[int], attrs: dict[str, Any], *, op: str = "FILL") -> Tensor
 
 
 #: The opcodes :func:`execute` defines (``MOVEMENT`` forms go through :func:`move`).
-OPCODES = ("AFFINE_MAP", "CONCAT", "INSERT_SLICE", "FILL")
+OPCODES = ("AFFINE_MAP", "CONCAT", "INSERT_SLICE", "FILL", "WINDOW_SUM")
 
 
 def declared_shape(cb: dict[str, Any], name: str) -> list[int] | None:
@@ -294,8 +294,208 @@ def execute(op: str, ops: dict[str, Any], attrs: dict[str, Any], env: dict[str, 
             return insert_slice(env[ops["dest"]], env[ops["src"]], attrs, op=where)
     except KeyError as exc:
         raise IntegerOpError(f"{where}: operand {exc} is missing or undefined") from exc
+    if op == "WINDOW_SUM":
+        if "src" not in ops or ops["src"] not in env:
+            raise IntegerOpError(f"{where}: operand src is missing or undefined")
+        return window_sum(env[ops["src"]], attrs, shape, op=where)
     if op != "FILL":
         raise IntegerOpError(f"{op} is not an integer-op opcode")
     if shape is None:
         raise IntegerOpError(f"{where}: a fill needs its declared destination shape")
     return fill(shape, attrs, op=where)
+
+
+# --- WINDOW_SUM -----------------------------------------------------------------------------------
+_WINDOW_MODES = {
+    "window": frozenset({"kernel", "stride", "padding", "count_include_pad"}),
+    "adaptive": frozenset(),
+    "reduce": frozenset({"dims", "average"}),
+    "window_transpose": frozenset({"kernel", "stride", "padding", "count_include_pad"}),
+    "adaptive_transpose": frozenset(),
+    "fold": frozenset({"kernel", "stride", "padding", "dilation"}),
+}
+_WINDOW_OPTIONAL = frozenset({"ceil_mode", "divisor_override", "layout", "quant_min", "quant_max", "name"})
+_WINDOW_COMMON = frozenset({"mode", "readout_scale", "output_dtype"})
+
+
+def _spatial_axes(rank: int, spatial: int, layout: str, *, op: str) -> list[int]:
+    if layout == "nhwc":
+        axes = list(range(rank - 1 - spatial, rank - 1))
+    elif layout == "nchw":
+        axes = list(range(rank - spatial, rank))
+    else:
+        raise IntegerOpError(f"{op}: layout must be nhwc (channels-last) or nchw, got {layout!r}")
+    if not axes or axes[0] < 1:
+        raise IntegerOpError(f"{op}: a rank-{rank} tensor has no {spatial} spatial dims under {layout}")
+    return axes
+
+
+def _pool_windows(size: int, kernel: int, stride: int, pad: int, ceil_mode: bool, include_pad: bool):
+    """``[(start, end, count)]`` per output position of one pooled dim, in torch's avg-pool semantics."""
+    span = size + 2 * pad - kernel
+    if span < 0 or stride < 1 or kernel < 1 or pad < 0 or 2 * pad > kernel:
+        raise IntegerOpError("pool geometry is invalid (kernel, stride or padding)")
+    out = (-(-span // stride) if ceil_mode else span // stride) + 1
+    if ceil_mode and (out - 1) * stride >= size + pad:
+        out -= 1
+    windows = []
+    for index in range(out):
+        start = index * stride - pad
+        end = min(start + kernel, size + pad)
+        padded = end - start
+        lo, hi = max(start, 0), min(end, size)
+        windows.append((lo, hi, padded if include_pad else hi - lo))
+    return windows
+
+
+def _adaptive_windows(size: int, out: int):
+    if out < 1:
+        raise IntegerOpError("adaptive output size must be positive")
+    return [
+        ((i * size) // out, -(-((i + 1) * size) // out), -(-((i + 1) * size) // out) - (i * size) // out)
+        for i in range(out)
+    ]
+
+
+def _readout(acc: np.ndarray, scale: np.ndarray, qmin: int, qmax: int) -> np.ndarray:
+    if np.any(np.abs(acc) >= 2**24):
+        raise IntegerOpError("WINDOW_SUM accumulator values at or beyond 2^24 are not exact in binary32")
+    product = acc.astype(np.float32) * scale.astype(np.float32)
+    return np.clip(np.rint(product), qmin, qmax).astype(np.int64)
+
+
+def window_sum(src: Tensor, attrs: dict[str, Any], dst_shape: list[int] | None, *, op: str = "WINDOW_SUM") -> Tensor:
+    """Exact integer window sums with one readout per output; see the ABI's WINDOW_SUM entry."""
+    mode = attrs.get("mode")
+    if mode not in _WINDOW_MODES:
+        raise IntegerOpError(f"{op}: mode must be one of {sorted(_WINDOW_MODES)}, got {mode!r}")
+    allowed = _WINDOW_MODES[mode] | _WINDOW_COMMON | _WINDOW_OPTIONAL
+    unknown = sorted(set(attrs) - allowed)
+    if unknown:
+        raise IntegerOpError(f"{op}: attribute(s) {unknown} do not belong to mode {mode!r}")
+    missing = sorted((_WINDOW_MODES[mode] | _WINDOW_COMMON) - set(attrs))
+    if missing:
+        raise IntegerOpError(f"{op}: mode {mode!r} requires {missing}; no default is applied")
+    dtype = str(attrs["output_dtype"])
+    qmin, qmax = _range(attrs, dtype, op=op)
+    scale = attrs["readout_scale"]
+    if not isinstance(scale, (int, float)) or not np.isfinite(scale) or scale <= 0:
+        raise IntegerOpError(f"{op}: readout_scale must be a finite positive number")
+    if dst_shape is None:
+        raise IntegerOpError(f"{op}: the destination shape must be declared")
+    a = _array(src)
+    target = tuple(int(d) for d in dst_shape)
+    layout = str(attrs.get("layout", "nhwc"))
+    divisor = attrs.get("divisor_override")
+    if divisor is not None and (type(divisor) is not int or divisor < 1):
+        raise IntegerOpError(f"{op}: divisor_override must be a positive integer")
+
+    if mode == "reduce":
+        dims = _int_list(attrs, "dims", op=op)
+        if type(attrs["average"]) is not bool:
+            raise IntegerOpError(f"{op}: average must be a boolean")
+        axes = sorted({d % a.ndim for d in dims})
+        acc = a.sum(axis=tuple(axes), keepdims=True)
+        count = int(np.prod([a.shape[d] for d in axes])) if attrs["average"] else 1
+        acc = acc.reshape(target) if acc.size == int(np.prod(target)) else None
+        if acc is None:
+            raise IntegerOpError(f"{op}: the reduced shape does not match the declared {list(target)}")
+        counts = np.full(acc.shape, divisor or count, dtype=np.float64)
+        return _finish(acc, counts, float(scale), dtype, qmin, qmax, op=op)
+
+    if mode == "fold":
+        kernel = _int_list(attrs, "kernel", op=op)
+        spatial = len(kernel)
+        stride = _int_list(attrs, "stride", op=op, length=spatial)
+        padding = _int_list(attrs, "padding", op=op, length=spatial)
+        dilation = _int_list(attrs, "dilation", op=op, length=spatial)
+        if len(target) != spatial + 2 or a.ndim != 3:
+            raise IntegerOpError(f"{op}: fold reads [N, C*prod(kernel), L] and writes [N, C, *spatial]")
+        n, c = target[0], target[1]
+        out_sizes = target[2:]
+        blocks = [
+            (size + 2 * p - d * (k - 1) - 1) // s + 1
+            for size, p, d, k, s in zip(out_sizes, padding, dilation, kernel, stride, strict=True)
+        ]
+        if a.shape != (n, c * int(np.prod(kernel)), int(np.prod(blocks))):
+            raise IntegerOpError(f"{op}: fold input {list(a.shape)} does not match kernel/blocks of {list(target)}")
+        acc = np.zeros(target, dtype=np.int64)
+        columns = a.reshape((n, c, *kernel, *blocks))
+        for tap in np.ndindex(*kernel):
+            for block in np.ndindex(*blocks):
+                position = [
+                    b * s - p + t * d for b, s, p, t, d in zip(block, stride, padding, tap, dilation, strict=True)
+                ]
+                if all(0 <= q < size for q, size in zip(position, out_sizes, strict=True)):
+                    acc[(slice(None), slice(None), *position)] += columns[(slice(None), slice(None), *tap, *block)]
+        return _finish(acc, np.ones(acc.shape), float(scale), dtype, qmin, qmax, op=op)
+
+    transpose = mode.endswith("_transpose")
+    source_shape = target if transpose else a.shape
+    window_shape = a.shape if transpose else target
+    if mode.startswith("adaptive"):
+        spatial = a.ndim - 2
+        axes = _spatial_axes(a.ndim, spatial, layout, op=op)
+        per_dim = [_adaptive_windows(source_shape[ax], window_shape[ax]) for ax in axes]
+    else:
+        kernel = _int_list(attrs, "kernel", op=op)
+        spatial = len(kernel)
+        axes = _spatial_axes(a.ndim, spatial, layout, op=op)
+        stride = _int_list(attrs, "stride", op=op, length=spatial)
+        padding = _int_list(attrs, "padding", op=op, length=spatial)
+        if type(attrs["count_include_pad"]) is not bool:
+            raise IntegerOpError(f"{op}: count_include_pad must be a boolean")
+        per_dim = [
+            _pool_windows(source_shape[ax], k, s, p, bool(attrs.get("ceil_mode", False)), attrs["count_include_pad"])
+            for ax, k, s, p in zip(axes, kernel, stride, padding, strict=True)
+        ]
+    if tuple(len(windows) for windows in per_dim) != tuple(window_shape[ax] for ax in axes):
+        raise IntegerOpError(f"{op}: the pooled extent differs from the declared one")
+    if any(d != t for i, (d, t) in enumerate(zip(source_shape, window_shape, strict=True)) if i not in axes):
+        raise IntegerOpError(f"{op}: batch and channel extents must be preserved")
+
+    def region(window_index):
+        index = [slice(None)] * a.ndim
+        for ax, windows, w in zip(axes, per_dim, window_index, strict=True):
+            index[ax] = slice(windows[w][0], windows[w][1])
+        return tuple(index)
+
+    def window_count(window_index):
+        if divisor is not None:
+            return divisor
+        return int(np.prod([windows[w][2] for windows, w in zip(per_dim, window_index, strict=True)]))
+
+    grid = [range(len(windows)) for windows in per_dim]
+    if not transpose:
+        acc = np.zeros(target, dtype=np.int64)
+        counts = np.ones(target, dtype=np.float64)
+        for window_index in np.ndindex(*[len(g) for g in grid]):
+            out_index = [slice(None)] * a.ndim
+            for ax, w in zip(axes, window_index, strict=True):
+                out_index[ax] = slice(w, w + 1)
+            total = a[region(window_index)].sum(axis=tuple(axes), keepdims=True)
+            acc[tuple(out_index)] = total
+            counts[tuple(out_index)] = window_count(window_index)
+        return _finish(acc, counts, float(scale), dtype, qmin, qmax, op=op)
+    # Transposed (a pool backward): each window's value spreads over the positions it covers, divided by
+    # that window's count. Stated with integer weights L/count_w (L the least common multiple of every
+    # count) into one int32 accumulator and the single readout readout_scale/L.
+    windows = list(np.ndindex(*[len(g) for g in grid]))
+    lcm = int(np.lcm.reduce([window_count(w) for w in windows])) if windows else 1
+    acc = np.zeros(target, dtype=np.int64)
+    for window_index in windows:
+        source_index = [slice(None)] * a.ndim
+        for ax, w in zip(axes, window_index, strict=True):
+            source_index[ax] = slice(w, w + 1)
+        acc[region(window_index)] += a[tuple(source_index)] * (lcm // window_count(window_index))
+    return _finish(acc, np.full(target, lcm, dtype=np.float64), float(scale), dtype, qmin, qmax, op=op)
+
+
+def _finish(acc, counts, scale, dtype, qmin, qmax, *, op) -> Tensor:
+    if dtype == "i32":
+        if scale != 1.0 or np.any(counts != 1):
+            raise IntegerOpError(f"{op}: an i32 result has no readout; it needs readout_scale 1.0 and no divisor")
+        return _tensor(acc, dtype)
+    # One binary32 scale per output: readout_scale / count, rounded once to binary32.
+    per_output = (np.float64(scale) / counts).astype(np.float32)
+    return _tensor(_readout(acc, per_output, qmin, qmax), dtype)

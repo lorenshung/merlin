@@ -151,6 +151,32 @@ opcodes:
       integer weights), add/sub.Scalar (integer gain and int32 constant), mul/div.Scalar and neg
       (readout scale, negative for neg), standalone relu and int8 -> int32 widening; parameters come from
       merlin.targetgen.recipe_numerics and the definition is merlin.runtime.integer_ops.affine_map.
+  WINDOW_SUM:
+    operands: {src: tensor, dst: output_tensor}
+    attributes:
+      mode: >-
+        "REQUIRED. window {kernel, stride, padding, count_include_pad} | adaptive {} (output extents from
+        dst) | reduce {dims, average} | window_transpose / adaptive_transpose (the pool backwards; same
+        attributes as window / adaptive, dst is the pooled op's INPUT shape) | fold {kernel, stride,
+        padding, dilation} (col2im: src [N, C*prod(kernel), L] -> dst [N, C, *spatial])"
+      readout_scale: "f32 > 0 -- REQUIRED; s_in / s_out (the count is applied per output, see semantics)"
+      output_dtype: "i8 (one readout per output) | i32 (no readout: readout_scale 1.0 and no divisor) -- REQUIRED"
+      layout: "nhwc (default; spatial dims are dims[1:-1]) | nchw (spatial dims are the trailing ones) -- window/adaptive modes"
+      ceil_mode: "bool, optional (window modes); torch's ceil_mode output extent"
+      divisor_override: "int > 0, optional (window modes); replaces every window's count"
+      quant_min: "int, optional"
+      quant_max: "int, optional"
+    semantics: >-
+      Exact int32 sums, then ONE readout per output: dst[o] = clamp(round_half_even(f32(acc[o]) *
+      f32(readout_scale / count[o])), quant_min, quant_max), the per-output scale rounded to binary32 once.
+      window: acc[o] = sum of src over o's window (torch avg-pool geometry with symmetric padding; padded
+      cells contribute nothing), count[o] = the window's in-bounds size, its padded size when
+      count_include_pad, or divisor_override. adaptive: torch adaptive windows [floor(o*In/Out),
+      ceil((o+1)*In/Out)). reduce: the sum over dims, count = their product when average else 1 (a mean or
+      a sum). window_transpose / adaptive_transpose: each window w spreads its value over the positions it
+      covers divided by its count, stated exactly as integer weights L/count[w] (L = the least common
+      multiple of every count) into one accumulator with the readout readout_scale / L. fold: the sum of
+      overlapping patches (torch col2im), count 1. Defined in merlin.runtime.integer_ops.window_sum.
   FENCE:
     operands: {}
     semantics: >-

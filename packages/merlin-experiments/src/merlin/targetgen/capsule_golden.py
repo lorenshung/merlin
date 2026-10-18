@@ -565,7 +565,7 @@ def _recompute_golden(capsule: dict) -> dict[str, list]:
             batches.append(_apply_epilogue(a_i.matmul(w_i), attrs, env).to_list())
         return {out_name: batches}
 
-    if op in ("movement", "affine_map", "concat", "insert_slice", "fill"):
+    if op in ("movement", "affine_map", "concat", "insert_slice", "fill", "window_sum"):
         # The movement forms and the integer affine/movement ops are defined ONCE, in
         # runtime.integer_ops, and the reference engine and the simulator call the same functions.
         from merlin.runtime import integer_ops
@@ -584,6 +584,8 @@ def _recompute_golden(capsule: dict) -> dict[str, list]:
             )
         elif op == "concat":
             t = integer_ops.concat([env[name] for name in attrs["sources"]], operation, op=f"concat {out_name!r}")
+        elif op == "window_sum":
+            t = integer_ops.window_sum(env[attrs["src"]], operation, shape, op=f"window_sum {out_name!r}")
         elif op == "insert_slice":
             t = integer_ops.insert_slice(
                 env[attrs["dest"]], env[attrs["src"]], operation, op=f"insert_slice {out_name!r}"

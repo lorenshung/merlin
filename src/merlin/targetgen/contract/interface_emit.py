@@ -101,6 +101,9 @@ _NAMED_OP_OPERAND_KEYS = {
     "concat": ["src0", "src1", *[f"src{i}?" for i in range(2, 8)]],
     "insert_slice": ["dest", "src"],
     "fill": [],
+    # Exact integer window sums with one readout per output: average and adaptive pools, a mean over
+    # dims, their transposes (pool backwards) and fold (col2im). See command_buffer_abi WINDOW_SUM.
+    "window_sum": ["src"],
 }
 # Most mnemonics map to their upper-case opcode; a few need an explicit target opcode because the emitter /
 # harness / simulator spell it differently (``matmul_batched`` -> the ``BATCHED_MATMUL`` those consume, not

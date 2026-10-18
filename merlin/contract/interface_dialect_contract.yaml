@@ -98,6 +98,25 @@ dialect:
       result: "tensor<...xDT2>"
       attrs: {name: string, value_code: "int (required; the quantized code)", output_dtype: "string (required)"}
       maps_to: FILL
+    - name: merlin_iface.window_sum
+      operands: ["tensor<...xDT>"]
+      result: "tensor<...xDT2>"
+      attrs:
+        name: string
+        mode: "window | adaptive | reduce | window_transpose | adaptive_transpose | fold (required)"
+        readout_scale: "f32 > 0 (required)"
+        output_dtype: "i8 | i32 (required)"
+        kernel: "[int] (window, window_transpose, fold)"
+        stride: "[int] (window, window_transpose, fold)"
+        padding: "[int] (window, window_transpose, fold)"
+        count_include_pad: "bool (window, window_transpose)"
+        dims: "[int] (reduce)"
+        average: "bool (reduce)"
+        dilation: "[int] (fold)"
+        layout: "nhwc (default) | nchw"
+        ceil_mode: "bool (optional)"
+        divisor_override: "int (optional)"
+      maps_to: WINDOW_SUM
     - name: merlin_iface.fence
       operands: []
       result: "()"

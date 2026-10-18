@@ -49,6 +49,7 @@ MODELED_OPCODES = frozenset(
         "CONCAT",
         "INSERT_SLICE",
         "FILL",
+        "WINDOW_SUM",
     }
 )
 
@@ -462,7 +463,7 @@ def reference_outputs(cb: dict[str, Any], inputs: dict[str, Any] | None = None) 
                 moved = Tensor(value.shape, list(value.data), str(attrs.get("output_dtype", value.dtype)))
             env[dst] = moved
             outputs[dst] = moved.to_list()
-        elif op in ("AFFINE_MAP", "CONCAT", "INSERT_SLICE", "FILL"):
+        elif op in integer_ops.OPCODES:
             dst = ops["dst"]
             env[dst] = integer_ops.execute(op, ops, attrs, env, integer_ops.declared_shape(cb, dst))
             outputs[dst] = env[dst].to_list()

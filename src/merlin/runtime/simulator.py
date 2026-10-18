@@ -602,7 +602,7 @@ def simulate(cb: dict[str, Any], inputs: dict[str, Any] | None = None) -> dict[s
             metrics.cycles += len(src.data)
             trace.append({"name": "vector_reduce", "object": dst, "count": len(src.data)})
 
-        elif op in ("AFFINE_MAP", "CONCAT", "INSERT_SLICE", "FILL"):
+        elif op in integer_ops.OPCODES:
             # Defined once (runtime.integer_ops) and shared with the reference and the golden, so the
             # engines cannot disagree on where the one rounding happens. Costed as one pass over the
             # result plus the bytes each operand moves.

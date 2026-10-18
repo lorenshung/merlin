@@ -79,6 +79,7 @@ the prose sections below, `interface_dialect_contract.yaml` and the registered d
 | `rope` | `ROPE` | `src` | no |
 | `softmax` | `SOFTMAX` | `src` | no |
 | `tensor` | — (declares a leaf, issues no command) | — | yes |
+| `window_sum` | `WINDOW_SUM` | `src` | no |
 
 Positional operands are given in the order the op takes them; the parser refuses a count that does not
 match (truncating either side would change the ABI). An operand written `k?` is an optional TRAILING
@@ -270,6 +271,18 @@ Maps to `INSERT_SLICE` (`operands: {dest, src, dst}`): `dst` is `dest` with
 ```
 Maps to `FILL` (`operands: {dst}`). `value_code` is the already-quantized code `sat(RNE(v/s_out))`;
 fill, full, full_like and zero_fill (code 0) are all this op.
+
+### `merlin_iface.window_sum` — exact window sums, one readout per output
+```mlir
+%P = merlin_iface.window_sum %X {name = "P", mode = "window", kernel = [2, 2], stride = [2, 2], padding = [0, 0],
+       count_include_pad = true, readout_scale = 0.8 : f32, output_dtype = "i8"} :
+     (tensor<1x8x8x16xi8>) -> tensor<1x4x4x16xi8>
+```
+Maps to `WINDOW_SUM` (`operands: {src, dst}`). `mode` is `window` (average pools), `adaptive`, `reduce`
+{`dims`, `average`} (mean.dim / sum), `window_transpose` / `adaptive_transpose` (the pool backwards) or
+`fold` (col2im). Sums are exact int32; each output reads out once at `readout_scale / count`. Spatial dims
+are channels-last by default (`layout = "nchw"` for trailing). Full rules: `command_buffer_abi.yaml` →
+`WINDOW_SUM`.
 
 ### `merlin_iface.fence` — a completion barrier between commands
 ```mlir
