@@ -63,8 +63,22 @@ def prepare(directory, report, implementation, **kwargs):
         kwargs["facts"],
     )
     strict["policy"] = "strict_per_shape"
+    boundary_shapes = [
+        entry["shape"]
+        for record in original_report["cases"]
+        if record.get("status") in {None, "bundled"}
+        for key in ("input_abi", "output_abi")
+        for entry in record.get(key, [])
+        if "shape" in entry
+    ]
     cost = (
-        estimate_reference(parse_mlir_text(original_files["model.mlir"].decode()), plan, declaration, kwargs["facts"])
+        estimate_reference(
+            parse_mlir_text(original_files["model.mlir"].decode()),
+            plan,
+            declaration,
+            kwargs["facts"],
+            logical_boundary_shapes=boundary_shapes,
+        )
         if policy == "reference_scale"
         else dict(strict)
     )

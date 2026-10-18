@@ -49,6 +49,50 @@ def test_scalar_work_is_still_host():
     )
 
 
+def test_logical_scalar_cutoff_does_not_count_complex_representation_components():
+    declaration, facts = inputs()
+    module = source(2)
+    plan = candidate(module)
+    assert estimate_reference(module, plan, declaration, facts)["status"] == "device"
+    result = estimate_reference(module, plan, declaration, facts, logical_boundary_shapes=[[], []])
+    assert result["reason_code"] == "scalar_work_retained_host"
+    assert result["scalar_basis"] == "logical_boundary_elements"
+    assert (
+        estimate_reference(module, plan, declaration, facts, logical_boundary_shapes=[[2], []])["status"]
+        == "device"
+    )
+
+
+def test_policy_uses_only_bundled_logical_boundary_shapes(tmp_path):
+    import yaml
+
+    from merlin.targetgen.core_aten_profitability import prepare
+
+    declaration, facts = inputs()
+    module = source(2)
+    (tmp_path / "model.mlir").write_text(str(module))
+    spec = tmp_path / "software.yaml"
+    spec.write_text(yaml.safe_dump(dict(placement_cost_model=declaration)))
+    scalar = dict(dtype="complex<f32>", shape=[])
+    report = dict(
+        cases=[
+            dict(status="bundled", input_abi=[scalar], output_abi=[scalar]),
+            dict(status="not_in_shard", input_abi=[dict(dtype="f32", shape=[99])]),
+        ]
+    )
+    plan = prepare(
+        tmp_path,
+        report,
+        lambda *a, **k: dict(candidate(module), exact_dtype_sites=1, selection=dict(identities={})),
+        software_spec=spec,
+        facts=facts,
+    )
+    assert plan["placement_cost"]["reason_code"] == "scalar_work_retained_host"
+    assert plan["placement_cost"]["strict_policy"]["status"] == "host"
+    assert report["cases"][0]["numeric_admission"] == plan
+    assert "numeric_admission" not in report["cases"][1]
+
+
 def test_rates_can_evict_a_reference_family_without_roster_exceptions():
     declaration, facts = inputs()
     declaration["reference_scale"]["rates"]["dma_bytes_per_cycle"] = 0.001

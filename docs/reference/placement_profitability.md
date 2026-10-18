@@ -27,6 +27,9 @@ pointwise streams, or materialized movement bytes. They contain no overload list
 A source whose reachable tensor data work has at most one element remains host
 according to the declared scalar cutoff; a reduction of multiple elements to one
 scalar still qualifies its arithmetic family.
+Logical scalar boundaries also stay host when export exposes their storage
+components as multiple real elements, as for a complex scalar. Representation
+width is not independent tensor work.
 Empty boundaries retain `empty_tensor_no_device_work`.
 
 Movement inspects typed index maps and slice strides. Contiguous selectors use

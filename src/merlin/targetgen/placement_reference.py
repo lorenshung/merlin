@@ -58,7 +58,7 @@ def movement_pattern(module):
     return ("element_gather" if evidence else "row_contiguous"), evidence, index_operations
 
 
-def estimate_reference(original, plan, declaration, facts):
+def estimate_reference(original, plan, declaration, facts, *, logical_boundary_shapes=()):
     """Compare declared family reference work; never use an overload roster."""
     result = dict(schema="merlin.placement_reference.v1", status="host", policy="reference_scale")
     try:
@@ -69,6 +69,17 @@ def estimate_reference(original, plan, declaration, facts):
         outputs = _outputs(original)
         if not outputs:
             result.update(reason_code="no_materialized_output_work")
+            return result
+        # Export can represent a complex scalar as a pair of real components.
+        # Count logical boundary elements before treating representation width
+        # as independent work. Multiple input elements reduced to a scalar do
+        # not satisfy this cutoff.
+        if logical_boundary_shapes and all(
+            all(type(d) is int and d >= 0 for d in shape)
+            and math.prod(shape) <= reference["scalar_max_elements"]
+            for shape in logical_boundary_shapes
+        ):
+            result.update(reason_code="scalar_work_retained_host", scalar_basis="logical_boundary_elements")
             return result
         # A reduction to one scalar can still read a large tensor. Follow
         # source dependencies rather than mistaking its result extent for work.
