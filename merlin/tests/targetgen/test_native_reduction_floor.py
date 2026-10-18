@@ -141,3 +141,18 @@ def test_empty_mean_dimension_list_reduces_all_axes():
     )
     result = rational_outputs(case)[0]
     assert result.shape == () and result.item() == Fraction(7, 2)
+
+
+@pytest.mark.parametrize("axes", [0, -1, [0], [-1]])
+def test_scalar_mean_accepts_torch_scalar_axis_conventions(axes):
+    from fractions import Fraction
+
+    case = dict(
+        overload="aten.mean.dim",
+        arguments=dict(
+            args=dict(kind="tuple", items=[dict(kind="tensor", dtype="float32", shape=[], values=1.25), axes, True]),
+            kwargs={},
+        ),
+    )
+    result = rational_outputs(case)[0]
+    assert result.shape == () and result.item() == Fraction(5, 4)

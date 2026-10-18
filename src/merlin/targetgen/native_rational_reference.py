@@ -98,6 +98,8 @@ def rational_outputs(case):
     elif op == "mean":
         axes = a[1] if len(a) > 1 else kwargs.get("dim")
         axis = None if axes is None or axes == [] else tuple(axes) if isinstance(axes, (list, tuple)) else axes
+        if a[0].ndim == 0 and axis in (0, -1, (0,), (-1,)):
+            axis = None
         result = np.mean(a[0], axis=axis, keepdims=a[2] if len(a) > 2 else kwargs.get("keepdim", False))
     elif op.startswith(("avg_pool", "adaptive_avg_pool", "_adaptive_avg_pool")) and "backward" not in op:
         result = _pool(a[0], name, a, kwargs)
