@@ -257,13 +257,13 @@ def test_a_scaled_load_into_an_addressable_accumulator_licenses_an_operand_sum()
     assert facet.operand_sum["operands"] == 2 and facet.rungs_for("operand_sum") == ("scalar_abi",)
     assert not facet.unknown  # a licence, or its absence, is never an unknown of the readout
     # The bound is computed: two per-operand roundings against one, then a factor the readout carries.
-    assert facet.operand_sum_bound() == 1 and facet.operand_sum_bound((0.4, 1.0)) == 1
-    assert facet.operand_sum_bound((1.5, 0.5)) == 2 and facet.operand_sum_bound((2.5, 0.5)) == 3
-    assert facet.operand_sum_refusal((0.5, 0.25)) is None
-    assert facet.operand_sum_refusal((1.5, 0.25)) is None  # the readout's derived scale carries 1.5
+    assert facet.operand_sum_bound() == 0 and facet.operand_sum_bound((0.4, 1.0)) is None
+    assert facet.operand_sum_bound((1.5, 0.5)) is None and facet.operand_sum_bound((2.5, 0.5)) is None
+    assert "round before" in facet.operand_sum_refusal((0.5, 0.25))
+    assert "round before" in facet.operand_sum_refusal((1.5, 0.25))
     assert "negative" in facet.operand_sum_refusal((-0.5, 0.25))
     assert "sums 2 operands" in facet.operand_sum_refusal((0.5, 0.25, 0.1))
-    assert facet.to_dict()["operand_sum"]["bound_lsb"] == 1
+    assert facet.to_dict()["operand_sum"]["bound_lsb"] == 0
 
 
 def test_a_scaled_load_with_nowhere_to_meet_is_not_an_operand_sum() -> None:
@@ -281,8 +281,10 @@ def test_a_scaled_load_with_nowhere_to_meet_is_not_an_operand_sum() -> None:
 
 def test_a_multiplier_above_one_needs_a_readout_scale_to_carry_it() -> None:
     bare = RF.ReadoutFacet(target="t", unit="u", accumulator_kind="addressable", operand_sum=dict(_SUM))
-    assert "exceed one" in bare.operand_sum_refusal((1.5, 0.5))
-    assert bare.operand_sum_refusal((1.0, 0.5)) is None
+    assert "round before" in bare.operand_sum_refusal((1.5, 0.5))
+    assert "round before" in bare.operand_sum_refusal((1.0, 0.5))
+    assert bare.operand_sum_refusal((1.0, 1.0)) is None
+    assert all(p["status"] == "proven" for p in bare.operand_sum_product_proofs((1.0, 1.0)))
 
 
 def test_the_readout_applies_relu_before_the_scale() -> None:

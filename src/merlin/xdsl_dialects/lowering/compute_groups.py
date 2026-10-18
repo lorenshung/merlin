@@ -892,7 +892,9 @@ def _host_regions(ops, stage_of, taken: dict[int, Group], oracle: TargetOracle) 
                 group.placement = oracle.unit_for(wsum_dtype, wsum_dtype, 2, wsum["units"])
                 group.root = wsum["reduce"]
                 group.scale_granularity = "tensor"
-                group.window_mean = {k: wsum[k] for k in ("rows", "window", "multiplier", "bound_lsb", "exactness")}
+                group.window_mean = {
+                    k: wsum[k] for k in ("rows", "window", "multiplier", "bound_lsb", "exactness", "product_proof")
+                }
                 out.append(group)
                 continue
             if wsum is None or wsum.get("asked"):
@@ -918,6 +920,7 @@ def _host_regions(ops, stage_of, taken: dict[int, Group], oracle: TargetOracle) 
                     "lhs_scale": summed["multipliers"][0],
                     "rhs_scale": summed["multipliers"][1],
                     "bound_lsb": facet.operand_sum_bound(summed["multipliers"]),
+                    "product_proofs": facet.operand_sum_product_proofs(summed["multipliers"]),
                     # The factor the readout's scale carries when a multiplier exceeds what a
                     # saturating load can take; one when both go through the load as they are.
                     "readout_factor": max(1.0, *summed["multipliers"]),
@@ -1062,36 +1065,9 @@ def _window_mean_of(working: Sequence[Any], stage_of: Mapping[int, Stage | None]
 
 
 def _window_mean_refusal(mean: dict[str, Any], oracle: TargetOracle, dtype: str | None) -> str | None:
-    """Why no unit takes the mean as a contraction, or ``None`` with ``mean['units']`` set.
+    from .window_sum import window_mean_refusal
 
-    Two questions, both the ones a fake-quantized layer is asked: can a unit contract these
-    integers, and does its readout hold the one scale the mean needs. ``mean['asked']`` records
-    whether a contracting unit exists at all, so a target with none plans the region as before.
-    """
-    contraction = oracle.ask(
-        op=CONTRACTION, family="contraction", in_dtype=dtype, weight_dtype=dtype, rank=2, attached=False
-    )
-    if not contraction.admitted:
-        mean["asked"], mean["refusal"] = False, contraction.refusal
-        return contraction.reason or "no unit contracts these operands"
-    mean["asked"] = True
-    scaled = oracle.ask(
-        op=QUANTIZE, family=FAMILY_OF_STAGE[QUANTIZE], in_dtype=dtype, attached=True, granularity="tensor"
-    )
-    if not scaled.admitted:
-        mean["refusal"] = scaled.refusal
-        return scaled.reason or "the readout does not hold the scale a mean needs"
-    readout = getattr(oracle, "readout", None)
-    for facet in getattr(readout, "facets", ()) or ():
-        fits = getattr(facet, "sum_fits_accumulator", None)
-        if callable(fits) and fits(mean["window"]) is False:
-            mean["refusal"] = "scale_granularity"
-            return (
-                f"a window of {mean['window']} elements of {facet.element_dtype} can exceed the "
-                f"{facet.accumulator_dtype} accumulator"
-            )
-    mean["units"] = contraction.units
-    return None
+    return window_mean_refusal(mean, oracle, dtype)
 
 
 def _operand_sum_of(working: Sequence[Any], stage_of: Mapping[int, Stage | None]) -> tuple[dict | None, str | None]:

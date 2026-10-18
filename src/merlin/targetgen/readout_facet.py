@@ -218,23 +218,22 @@ class ReadoutFacet:
         return int(count) * (1 << (widths[0] - 1)) <= (1 << (widths[1] - 1)) - 1
 
     def operand_sum_bound(self, multipliers: Sequence[float] = ()) -> int | None:
-        """How many output steps this unit's sum may lie from the single-rounding reference.
-
-        Computed, never declared. Each of ``n`` operands is rounded on its way in, so the integer
-        sum carries up to ``n/2`` of error, and the reference rounds its own sum by up to a half:
-        with every multiplier at or below one the two integers differ by at most ``(n+1)//2``.
-        A multiplier above one cannot go through the load (see :meth:`operand_sum_refusal`), so
-        the common factor ``m`` is divided out of every operand and applied by the readout's own
-        scale instead. The operands' rounding error is then multiplied by ``m`` and the readout
-        rounds once more, which gives ``floor(m*n/2 + 1)``.
-        """
-        if not self.operand_sum:
+        """An exact integer sum has zero error; scaled loads need another implementation."""
+        if not self.operand_sum or any(float(value) != 1 for value in multipliers):
             return None
-        import math
+        return 0
 
-        n = int(self.operand_sum["operands"])
-        m = max([1.0, *(float(value) for value in multipliers)])
-        return (n + 1) // 2 if m == 1.0 else math.floor(m * n / 2 + 1)
+    def operand_sum_product_proofs(self, multipliers: Sequence[float]) -> list[dict]:
+        """Record full-storage-domain conversion/product proofs for identity loads."""
+        from merlin.common.quant_formats import get
+        from merlin.runtime.exact_readout import prove_fp32_products
+
+        fmt = get(self.operand_sum["operand_dtype"])
+        if fmt.kind != "int_affine" or any(float(value) != 1 for value in multipliers):
+            raise ValueError("scaled loads would round before the required final quantization")
+        bits = fmt.element_bits
+        low, high = (-(2 ** (bits - 1)), 2 ** (bits - 1) - 1) if fmt.signed else (0, 2**bits - 1)
+        return [prove_fp32_products(1, low, high) for _ in multipliers]
 
     def operand_sum_refusal(self, multipliers: Sequence[float]) -> str | None:
         """Why this unit cannot sum operands under these multipliers, or ``None`` when it can."""
@@ -244,17 +243,10 @@ class ReadoutFacet:
             return f"the unit sums {self.operand_sum['operands']} operands, not {len(multipliers)}"
         if any(float(m) < 0.0 for m in multipliers):
             return f"multiplier(s) {[m for m in multipliers if float(m) < 0.0]} are negative"
-        wide = [m for m in multipliers if float(m) > 1.0]
-        if wide and self.operand_sum.get("operand_saturates") and not self.scale_granularities:
-            # A scaled operand is saturated to the element type BEFORE it is added, so a multiplier
-            # above one can clip an operand whose share of the sum the other would have cancelled:
-            # an error no bound covers. The way out is to divide the common factor out of the
-            # loads and give it to the readout's scale, and this readout is not derived to have one.
-            return (
-                f"multiplier(s) {wide} exceed one: each operand saturates to "
-                f"{self.operand_sum.get('operand_dtype')} before the add, and no readout scale is "
-                f"derived to carry the common factor instead"
-            )
+        try:
+            self.operand_sum_product_proofs(multipliers)
+        except (KeyError, ValueError) as exc:
+            return f"exact integer operand sum refused: {exc}; use full int32 readout and exact host requantization"
         return None
 
     def admits_granularity(self, granularity: str) -> bool | None:
@@ -453,7 +445,7 @@ def _from_registers(facet: ReadoutFacet, facts: Mapping[str, Any]) -> None:
             "register_layout",
             "a command-register field carries a zero point"
             if facet.zero_point_carried
-            else f"no command-register field carries a zero point"
+            else "no command-register field carries a zero point"
             + (f" (layouts not derived for {sorted(unresolved)})" if unresolved else ""),
         )
     if facet.scale_granularities is not None:
