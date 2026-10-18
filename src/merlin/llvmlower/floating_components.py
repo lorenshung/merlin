@@ -450,9 +450,24 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
             args.append(original.args.index(operand))
         if len(args) != len(arithmetic.operands) or any(grid(op.inputs[i]) is None for i in args):
             continue
+        denominator, divisor_exponent, divisor_negative = 1, 0, False
         if arithmetic.name == "arith.divf":
-            # General rational divisors need a separately proved literal source.
-            continue
+            from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
+
+            literal = _constant_of(op.inputs[args[1]])
+            if literal is None or not literal:
+                continue
+            divisor = Fraction.from_float(float(literal))
+            divisor_negative = divisor < 0
+            divisor = abs(divisor)
+            divisor_exponent = -(divisor.denominator.bit_length() - 1)
+            denominator = divisor.numerator
+            while denominator % 2 == 0:
+                divisor_exponent += 1
+                denominator //= 2
+            if denominator >= 1 << 31:
+                continue
+            args = args[:1]
         input_values = [op.inputs[i] for i in args]
         input_grids_here = [grid(v) for v in input_values]
         exponent = (
@@ -463,6 +478,9 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
         packing_exponents = (
             [e for e, b in input_grids_here] if arithmetic.name == "arith.mulf" else [exponent] * len(args)
         )
+        if arithmetic.name == "arith.divf":
+            packing_exponents = [input_grids_here[0][0]]
+            exponent = packing_exponents[0] - divisor_exponent
         operations = []
         try:
             packed = [pack(value, e, operations) for value, e in zip(input_values, packing_exponents, strict=True)]
@@ -534,11 +552,11 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
             extended = arith.ExtSIOp(value, i128)
             body.add_op(extended)
             values.append(extended.result)
-        if arithmetic.name == "arith.negf":
+        if arithmetic.name == "arith.negf" or (arithmetic.name == "arith.divf" and divisor_negative):
             constant = arith.ConstantOp(IntegerAttr(0, i128))
             body.add_op(constant)
             computed = arith.SubiOp(constant.result, values[0])
-        elif arithmetic.name in {"arith.extf", "arith.truncf"}:
+        elif arithmetic.name in {"arith.extf", "arith.truncf", "arith.divf"}:
             computed = None
         else:
             cls = arith.AddiOp if arithmetic.name == "arith.addf" else arith.SubiOp
@@ -562,6 +580,9 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
             integer.attributes["merlin.exact_component"] = StringAttr(tag)
         operations.append(integer)
         bounds[integer.results[0]] = integer_bound
-        publish(op, integer.results[0], exponent, integer_bound, operations, arithmetic.results[0].type)
+        publish(
+            op, integer.results[0], exponent, integer_bound, operations,
+            arithmetic.results[0].type, denominator=denominator,
+        )
     module.verify()
     return bounds, proofs
