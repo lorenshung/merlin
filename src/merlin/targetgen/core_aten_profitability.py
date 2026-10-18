@@ -17,6 +17,7 @@ def prepare(directory, report, implementation, **kwargs):
     # placement must restore the original host program and all of its sidecars.
     original_files = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
     original_report = copy.deepcopy(report)
+    original_cases = list(report["cases"])
     plan = implementation(directory, report, **kwargs)
     if not any(
         plan.get(key, 0)
@@ -41,6 +42,13 @@ def prepare(directory, report, implementation, **kwargs):
         (directory / "unprofitable-device-admission.json").write_text(json.dumps(plan, indent=2) + "\n")
         for name, data in original_files.items():
             (directory / name).write_bytes(data)
+        # The runner retains references to these records across preparation.
+        # Preserve their identities so later routing/build updates reach the
+        # restored report rather than abandoned candidate dictionaries.
+        for record, saved in zip(original_cases, original_report["cases"], strict=True):
+            record.clear()
+            record.update(saved)
+        original_report["cases"] = original_cases
         report.clear()
         report.update(original_report)
         plan = dict(

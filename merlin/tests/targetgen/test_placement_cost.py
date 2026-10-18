@@ -99,6 +99,7 @@ def test_unprofitable_candidate_restores_original_host_boundary(tmp_path):
     specification.write_text(yaml.safe_dump(dict(placement_cost_model=DECLARATION)))
     report = dict(cases=[dict(case_id="independent", input_abi=[dict(shape=[1])])])
     before = copy.deepcopy(report)
+    retained_record = report["cases"][0]
 
     def preparation(directory, report, **kwargs):
         module = source(1)
@@ -115,6 +116,9 @@ def test_unprofitable_candidate_restores_original_host_boundary(tmp_path):
     assert (tmp_path / "inputs.npz").read_bytes() == b"original input bytes"
     assert (tmp_path / "semantic_io.json").read_text() == "original ABI"
     assert report["cases"][0]["input_abi"] == before["cases"][0]["input_abi"]
+    assert report["cases"][0] is retained_record
+    retained_record["routing"] = dict(reason="device_cost_not_profitable")
+    assert report["cases"][0]["routing"]["reason"] == "device_cost_not_profitable"
     stored = json.loads((tmp_path / "spec-int8-admission.json").read_text())
     assert stored["placement_cost"]["status"] == "host"
 
