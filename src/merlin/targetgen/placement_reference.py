@@ -32,6 +32,14 @@ def movement_pattern(module):
                 if inner != output_inner:
                     index_operations += expression_cost(inner)
                     evidence.append(dict(operation=op.name, input_map=str(mapping), reason="nonunit_inner_selector"))
+        elif op.name == "linalg.transpose":
+            permutation = list(op.permutation.get_values())
+            if permutation and permutation[-1] != len(permutation) - 1:
+                evidence.append(dict(operation=op.name, reason="permuted_innermost_axis"))
+        elif op.name == "linalg.broadcast":
+            dimensions = list(op.dimensions.get_values())
+            if len(op.results[0].type.get_shape()) - 1 in dimensions:
+                evidence.append(dict(operation=op.name, reason="broadcast_innermost_axis"))
         elif op.name in {"tensor.extract_slice", "tensor.insert_slice"}:
             strides = op.properties.get("static_strides")
             if strides is None or any(s != 1 for s in strides.get_values()):

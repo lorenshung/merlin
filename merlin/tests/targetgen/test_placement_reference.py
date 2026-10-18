@@ -174,3 +174,26 @@ def test_unknown_policy_is_not_silently_replaced(tmp_path, monkeypatch):
         prepare(
             tmp_path, dict(cases=[]), lambda *a, **k: pytest.fail("must not prepare"), software_spec=spec, facts=facts
         )
+
+
+@pytest.mark.parametrize(
+    "text,reason",
+    [
+        (
+            """module { func.func @forward(%x: tensor<3x7xf32>, %e: tensor<7x3xf32>) -> tensor<7x3xf32> {
+      %v=linalg.transpose ins(%x : tensor<3x7xf32>) outs(%e : tensor<7x3xf32>) permutation=[1,0]
+      func.return %v : tensor<7x3xf32> }}""",
+            "permuted_innermost_axis",
+        ),
+        (
+            """module { func.func @forward(%x: tensor<3xf32>, %e: tensor<3x7xf32>) -> tensor<3x7xf32> {
+      %v=linalg.broadcast ins(%x : tensor<3xf32>) outs(%e : tensor<3x7xf32>) dimensions=[1]
+      func.return %v : tensor<3x7xf32> }}""",
+            "broadcast_innermost_axis",
+        ),
+    ],
+)
+def test_named_inner_axis_selectors_are_not_contiguous_dma(text, reason):
+    pattern, evidence, _ = movement_pattern(parse_mlir_text(text))
+    assert pattern == "element_gather"
+    assert evidence[0]["reason"] == reason
