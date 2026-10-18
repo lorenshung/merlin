@@ -11,13 +11,13 @@ from merlin.targetgen.core_aten_components import prepare_integer_components, un
 
 @pytest.mark.parametrize("intrinsic", ["exp", "sin", "cos", "log", "rsqrt"])
 def test_host_math_after_conversion_is_not_device_operation_coverage(intrinsic):
-    module = parse_mlir_text(f'''builtin.module {{
+    module = parse_mlir_text(f"""builtin.module {{
       func.func @forward(%a: i64) -> f32 {{
         %c = arith.sitofp %a : i64 to f32
         %v = math.{intrinsic} %c : f32
         func.return %v : f32
       }}
-    }}''')
+    }}""")
     missed = unlowered_data_reductions(module, "test.limb")
     assert [list(module.walk())[i].name for i in missed] == [f"math.{intrinsic}"]
 
@@ -125,3 +125,28 @@ def test_device_pointwise_prelude_does_not_hide_a_host_bilinear_loop(tmp_path):
     assert (tmp_path / "model.mlir").read_text() == original
     refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
     assert "partial preludes" in refusal["reason"] and refusal["source_operation_ordinals"]
+
+
+@pytest.mark.parametrize("predicate", ["cmpf", "maximumf", "minimumf"])
+def test_a_host_predicate_after_an_integer_conversion_is_not_device_arithmetic(predicate):
+    result_type = "i1" if predicate == "cmpf" else "f32"
+    expression = "arith.cmpf oeq, %c, %zero : f32" if predicate == "cmpf" else f"arith.{predicate} %c, %zero : f32"
+    module = parse_mlir_text(f"""module {{
+      func.func @forward(%x: i64) -> {result_type} {{
+        %c=arith.sitofp %x : i64 to f32
+        %zero=arith.constant 0.0 : f32
+        %v={expression}
+        func.return %v : {result_type}
+      }} }}""")
+    missed = unlowered_data_reductions(module, "test.limb")
+    assert [list(module.walk())[i].name for i in missed] == ["arith." + predicate]
+
+
+def test_an_unqualified_integer_comparison_remains_host():
+    module = parse_mlir_text("""module {
+      func.func @forward(%x: i32) -> i1 {
+        %zero=arith.constant 0 : i32
+        %v=arith.cmpi eq, %x, %zero : i32
+        func.return %v : i1
+      }}""")
+    assert unlowered_data_reductions(module, "test.limb")

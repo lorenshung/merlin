@@ -11,6 +11,7 @@ def rewrite_boolean_components(module):
         DenseIntOrFPElementsAttr,
         IntegerAttr,
         TensorType,
+        UnitAttr,
         i8,
         i32,
         i64,
@@ -130,6 +131,8 @@ def rewrite_boolean_components(module):
         final = point(
             [result], op.results[0].type, truth, ArrayAttr([identity] * 2), op.get_iterator_types(), operations
         )
+        # This predicate decodes the complete device-computed OR/AND numerator.
+        final.owner.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
         Rewriter.replace_op(op, operations, [final])
         changed += 1
     module.verify()

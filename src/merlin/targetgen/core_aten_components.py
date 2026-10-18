@@ -29,7 +29,23 @@ def unlowered_data_reductions(module, limb_attribute):
         if op.name.startswith("math."):
             result.append(ordinal)
             continue
-        if op.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "arith.negf"}:
+        if op.name in {
+            "arith.addf",
+            "arith.subf",
+            "arith.mulf",
+            "arith.divf",
+            "arith.negf",
+            "arith.cmpf",
+            "arith.cmpi",
+            "arith.maximumf",
+            "arith.minimumf",
+            "arith.maxnumf",
+            "arith.minnumf",
+            "arith.maxsi",
+            "arith.maxui",
+            "arith.minsi",
+            "arith.minui",
+        }:
             parent = op.parent_op()
             while parent is not None and "merlin.exact_host_arithmetic" not in parent.attributes:
                 parent = parent.parent_op()

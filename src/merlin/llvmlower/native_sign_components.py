@@ -8,7 +8,7 @@ explicit modular host recombination. No floating conversion is involved.
 
 def rewrite_native_sign_components(module, *, canonical_bf16_nan=False):
     from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, IntegerAttr, IntegerType, TensorType
+    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, IntegerAttr, IntegerType, TensorType, UnitAttr
     from xdsl.dialects.linalg import ops as L
     from xdsl.ir import Block, Region
     from xdsl.ir.affine import AffineMap
@@ -110,6 +110,9 @@ def rewrite_native_sign_components(module, *, canonical_bf16_nan=False):
             retained = op.clone(value_mapper={source: result.results[0]})
             operations.append(retained)
             result = retained
+        # The closed sign/clamp proof licenses this host readout, including
+        # BF16 NaN canonicalization and the original literal compare/select.
+        result.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
         Rewriter.replace_op(op, operations, [result.results[0]])
         proofs.append(
             dict(
