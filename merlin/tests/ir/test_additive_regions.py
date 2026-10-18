@@ -56,3 +56,34 @@ def test_unknown_data_operation_refuses():
     m = reduction(operation="divf")
     op = next(op for op in m.walk() if op.name == "linalg.generic")
     assert retype_additive(op, {}, i128, floating=True) is None
+
+
+def test_used_integer_loop_controls_remain_the_original_values():
+    source = parse_mlir_text("""builtin.module {
+      func.func @forward(%x: tensor<2xf32>, %limits: tensor<2xi64>, %packed: tensor<2xi128>) -> tensor<2xf32> {
+        %e = tensor.empty() : tensor<2xf32>
+        %r = linalg.generic {
+          indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
+          iterator_types=["parallel"]
+        } ins(%x,%limits : tensor<2xf32>,tensor<2xi64>) outs(%e : tensor<2xf32>) {
+        ^bb0(%a: f32,%limit: i64,%unused: f32):
+          %n = arith.index_cast %limit : i64 to index
+          %lo = arith.constant 0 : index
+          %step = arith.constant 1 : index
+          %zero = arith.constant 0.0 : f32
+          %sum = scf.for %i = %lo to %n step %step iter_args(%s = %zero) -> (f32) {
+            %v = arith.addf %s,%a : f32
+            scf.yield %v : f32
+          }
+          linalg.yield %sum : f32
+        } -> tensor<2xf32>
+        func.return %r : tensor<2xf32>
+      }}""")
+    op = next(op for op in source.walk() if op.name == "linalg.generic")
+    function = next(op for op in source.walk() if op.name == "func.func")
+    lifted = retype_additive(op, {op.inputs[0]: function.body.block.args[2]}, i128, floating=True)
+    assert lifted is not None
+    integer = lifted[1]
+    assert integer.inputs[1] is function.body.block.args[1]
+    assert str(integer.body.block.args[1].type) == "i64"
+    integer.verify()

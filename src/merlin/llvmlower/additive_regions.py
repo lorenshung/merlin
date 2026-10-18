@@ -77,6 +77,16 @@ def retype_additive(op, replacements, element, *, floating):
     # that original data seeds are zero; unused tensor.empty is never read.
     for value in op.operands:
         if value not in mapper:
+            if value in op.inputs:
+                index = list(op.inputs).index(value)
+                if op.body.block.args[index].uses:
+                    if data_type(value.type.element_type):
+                        return None
+                    # A used index/control tensor is neither a data seed nor
+                    # a shape placeholder. Retain it; the provider must still
+                    # prove that every gather address is closed and static.
+                    mapper[value] = value
+                    continue
             constant = arith.ConstantOp(IntegerAttr(0, element))
             splat = tensor.SplatOp(constant.result, [], TensorType(element, value.type.get_shape()))
             operations.extend([constant, splat])
