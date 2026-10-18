@@ -258,18 +258,28 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         return True
 
     def sum_reduction(op):
-        if op.name != "linalg.generic" or len(op.operands) != 2:
+        if op.name != "linalg.generic" or len(op.results) != 1 or len(op.outputs) != 1:
             return False
         if not any(it.data == L.IteratorType.REDUCTION for it in op.get_iterator_types()):
             return False
         block = op.body.block
         if len(list(block.ops)) != 2 or block.first_op.name != "arith.addi":
             return False
-        if set(block.first_op.operands) != set(block.args) or list(block.last_op.operands) != list(
-            block.first_op.results
-        ):
+        if list(block.last_op.operands) != list(block.first_op.results):
             return False
-        source, seed = op.operands
+        accumulator = block.args[-1]
+        used = list(block.first_op.operands)
+        if accumulator not in used:
+            return False
+        data = used[1] if used[0] is accumulator else used[0]
+        if data not in block.args[:-1]:
+            return False
+        source_index = list(block.args).index(data)
+        # Window dimensions may be supplied by unused shape-only operands.
+        # Their maps determine the iteration domain but their values are unread.
+        source, seed = op.inputs[source_index], op.outputs[0]
+        maps = list(op.get_indexing_maps())
+        selected_maps = ArrayAttr([maps[source_index], maps[-1]])
         if width(source) not in (8, 16, 32, 64):
             return False
         bits = width(op.results[0])
@@ -290,7 +300,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
                 inputs=[limb],
                 outputs=[zero],
                 body=Region(body),
-                indexing_maps=op.get_indexing_maps(),
+                indexing_maps=selected_maps,
                 iterator_types=op.get_iterator_types(),
                 result_types=[zero.type],
             )
