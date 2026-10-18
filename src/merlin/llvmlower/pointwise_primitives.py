@@ -45,6 +45,27 @@ def expose_pointwise_primitives(module):
         arithmetic = [child for child in body.ops if child.name not in {"arith.constant", "linalg.yield"}]
         if len(arithmetic) <= 1:
             continue
+        # A closed word predicate has no floating arithmetic boundary to expose.
+        # In particular, literal casts belong to that predicate, not its data path.
+        dependent = set(body.args)
+        numeric = {
+            "arith.addf",
+            "arith.subf",
+            "arith.mulf",
+            "arith.divf",
+            "arith.negf",
+            "arith.extf",
+            "arith.truncf",
+            "arith.sitofp",
+            "arith.uitofp",
+        }
+        has_numeric_data = False
+        for child in body.ops:
+            if any(value in dependent for value in child.operands):
+                dependent.update(child.results)
+                has_numeric_data |= child.name in numeric
+        if not has_numeric_data:
+            continue
         shape = op.results[0].type.get_shape()
         identity = AffineMapAttr(AffineMap.identity(len(shape)))
         maps = list(op.get_indexing_maps())

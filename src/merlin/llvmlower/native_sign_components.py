@@ -25,17 +25,31 @@ def rewrite_native_sign_components(module, *, canonical_bf16_nan=False):
         body = list(op.body.block.ops)
         argument = op.body.block.args[0]
         negate = len(body) == 2 and body[0].name == "arith.negf" and body[0].operands[0] is argument
-        clamp = (
-            len(body) == 4
-            and body[0].name == "arith.constant"
-            and body[1].name in {"arith.cmpi", "arith.cmpf"}
-            and body[2].name == "arith.select"
-            and body[3].name == "linalg.yield"
-            and set(body[1].operands) == {argument, body[0].results[0]}
-            and body[2].operands[0] is body[1].results[0]
-            and set(body[2].operands[1:]) == {argument, body[0].results[0]}
-            and list(body[3].operands) == list(body[2].results)
-        )
+        literals = set()
+        literal_casts = {"arith.sitofp", "arith.uitofp", "arith.extf", "arith.truncf"}
+        for child in body[:-3]:
+            if child.name == "arith.constant" or (
+                child.name in literal_casts and all(value in literals for value in child.operands)
+            ):
+                literals.update(child.results)
+            else:
+                break
+        clamp = False
+        if len(body) >= 4:
+            compare, select, terminator = body[-3:]
+            choices = set(compare.operands)
+            clamp = (
+                sum(len(child.results) for child in body[:-3]) == len(literals)
+                and compare.name in {"arith.cmpi", "arith.cmpf"}
+                and argument in choices
+                and len(choices) == 2
+                and (choices - {argument}) <= literals
+                and select.name == "arith.select"
+                and select.operands[0] is compare.results[0]
+                and set(select.operands[1:]) == choices
+                and terminator.name == "linalg.yield"
+                and list(terminator.operands) == list(select.results)
+            )
         if not (negate or clamp):
             continue
         source = op.inputs[0]

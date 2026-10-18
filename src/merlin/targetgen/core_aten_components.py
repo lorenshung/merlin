@@ -296,7 +296,7 @@ def prepare_integer_components(
     unquantizable_float_words = any(
         dtype == "f32" and not np.isfinite(value).all() for dtype, value in zip(native_types, arrays, strict=True)
     )
-    if unquantizable_float_words or any(
+    if unquantizable_float_words or (native_f32 and "f32" in native_types) or any(
         dtype in {"i8", "i16", "i32", "i64", "f16", "bf16", "f64", "complex<f32>"} for dtype in native_types
     ):
         from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
