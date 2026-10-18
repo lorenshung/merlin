@@ -1,3 +1,4 @@
+# ruff: noqa: E501 -- MLIR fixtures retain one operation per line
 """lower_quant_ext is granularity-general: per_tensor / per_channel / per_group dequant all lower to a
 generic dequant linalg.generic (target-agnostic → f32), not just per_channel."""
 

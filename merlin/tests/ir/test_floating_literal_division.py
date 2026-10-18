@@ -1,3 +1,4 @@
+# ruff: noqa: E501 -- MLIR fixtures retain one operation per line
 """Literal division retains an exact integer numerator and a rational readout."""
 
 import pytest

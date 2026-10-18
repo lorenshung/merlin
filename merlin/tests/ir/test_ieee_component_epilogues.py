@@ -1,3 +1,4 @@
+# ruff: noqa: E501 -- MLIR fixtures retain one operation per line
 """Exact bit checks for signed-zero and separable invalid-result epilogues."""
 
 import struct

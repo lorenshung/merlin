@@ -1,3 +1,4 @@
+# ruff: noqa: E501 -- MLIR fixtures retain one operation per line
 """A private scalar extraction/pack must retain the closed quantized island."""
 
 import pytest
