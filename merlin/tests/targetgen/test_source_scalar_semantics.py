@@ -155,3 +155,31 @@ def test_nan_payload_bits_cannot_become_an_unaudited_float_predicate():
     audit = {}
     run(module, words, audit)
     assert audit["ambiguous_nan_payload"] is True
+
+
+def test_nan_payload_audit_follows_masks_across_tensor_regions():
+    module = parse_mlir_text("""module {
+      func.func @forward(%x:tensor<1xf32>,%y:tensor<1xf32>) -> tensor<1xf32> {
+        %e=tensor.empty() : tensor<1xf32>
+        %sum=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,
+          affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x,%y:tensor<1xf32>,tensor<1xf32>) outs(%e:tensor<1xf32>) {
+          ^bb0(%a:f32,%b:f32,%unused:f32):
+            %s=arith.addf %a,%b : f32
+            linalg.yield %s : f32
+        } -> tensor<1xf32>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,
+          affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%sum,%x:tensor<1xf32>,tensor<1xf32>) outs(%e:tensor<1xf32>) {
+          ^bb1(%s:f32,%a:f32,%unused:f32):
+            %nan=arith.cmpf uno,%s,%s : f32
+            %v=arith.select %nan,%a,%s : f32
+            linalg.yield %v : f32
+        } -> tensor<1xf32>
+        return %r : tensor<1xf32>
+      }}""")
+    words = [np.array([word], np.uint32).view(np.float32) for word in [0x7FC00001, 0xFFC00002]]
+    audit = {}
+    result = run(module, words, audit)
+    assert audit["ambiguous_nan_payload"] is False
+    assert result.view(__import__("torch").int32).item() == 0x7FC00001

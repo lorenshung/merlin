@@ -90,6 +90,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
         for arg, array in zip(function.body.block.args, arrays, strict=True)
     }
     taints = {arg: torch.zeros_like(value, dtype=torch.bool) for arg, value in env.items()}
+    nan_taints = {arg: torch.zeros_like(value, dtype=torch.bool) for arg, value in env.items()}
     scales = []
     selected = set(selected)
     selected_order = {op: i for i, op in enumerate(op for op in module.walk() if op in selected)}
@@ -108,7 +109,10 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
             )
         return torch.tensor(value.value.data, dtype=dtype(op.results[0].type))
 
-    def scalar_body(block, operands, point=(), operand_taints=None, captured=None, captured_taints=None):
+    def scalar_body(
+        block, operands, point=(), operand_taints=None, operand_nan_only=None,
+        captured=None, captured_taints=None, captured_nan_only=None,
+    ):
         from merlin.targetgen.source_scalar import fused_multiply_add, logical_shift, unsigned_to_float
 
         local = dict(captured or {})
@@ -120,12 +124,15 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
         # Only payload variation is invisible to cmpf. Integer manipulation can
         # turn those words into different numeric classes, so a generic taint
         # must not be discarded by a floating predicate.
-        nan_only = {arg: torch.zeros_like(value, dtype=torch.bool) for arg, value in local.items()}
+        nan_only = dict(captured_nan_only or {})
+        nan_only.update(
+            zip(block.args, operand_nan_only or [torch.zeros_like(x, dtype=torch.bool) for x in operands], strict=True)
+        )
         for inner in block.ops:
             name = inner.name
             xs = [local[v] if v in local else env[v] for v in inner.operands]
             ts = [local_taints[v] if v in local_taints else taints[v] for v in inner.operands]
-            ns = [nan_only.get(v, torch.zeros_like(t)) for v, t in zip(inner.operands, ts, strict=True)]
+            ns = [nan_only[v] if v in nan_only else nan_taints[v] for v in inner.operands]
             uncertain = torch.tensor(False)
             payload_only = torch.tensor(False)
             for t in ts:
@@ -146,9 +153,9 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                 for t, n in zip(ts, ns, strict=True):
                     payload_only = payload_only & (~t | n)
             if name == "linalg.yield":
-                return xs[0], ts[0]
+                return xs[0], ts[0], ns[0]
             if name == "scf.yield":
-                return tuple(xs), tuple(ts)
+                return tuple(xs), tuple(ts), tuple(ns)
             if name == "arith.constant":
                 y = constant(inner)
             elif name == "arith.bitcast":
@@ -180,6 +187,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                 y = xs[0] / xs[1]
             elif name == "arith.negf":
                 y = -xs[0]
+                payload_only = ns[0]
             elif name == "math.fma":
                 y = fused_multiply_add(*xs)
             elif name in {"arith.andi", "arith.ori", "arith.xori"}:
@@ -195,6 +203,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                 y = logical_shift(*xs, width, left=name == "arith.shli")
             elif name == "math.absf":
                 y = torch.abs(xs[0])
+                payload_only = ns[0]
             elif name == "linalg.index":
                 y = torch.tensor(point[inner.dim.value.data], dtype=torch.int64)
             elif name == "tensor.extract":
@@ -207,23 +216,30 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                 lower, upper, step = map(int, xs[:3])
                 if step <= 0 or len(range(lower, upper, step)) > 1_000_000:
                     raise ValueError("source IEEE loop exceeds the closed static work budget")
-                carried, carried_taints = tuple(xs[3:]), tuple(ts[3:])
+                carried, carried_taints, carried_nan = tuple(xs[3:]), tuple(ts[3:]), tuple(ns[3:])
                 control_taint = ts[0] | ts[1] | ts[2]
                 for index in range(lower, upper, step):
-                    carried, carried_taints = scalar_body(
+                    carried, carried_taints, carried_nan = scalar_body(
                         inner.body.block, (torch.tensor(index), *carried), point,
-                        (control_taint, *carried_taints), local, local_taints,
+                        (control_taint, *carried_taints), (torch.zeros_like(control_taint), *carried_nan),
+                        local, local_taints, nan_only,
                     )
                 local.update(zip(inner.results, carried, strict=True))
                 local_taints.update(
                     (v, t | control_taint) for v, t in zip(inner.results, carried_taints, strict=True)
                 )
+                nan_only.update(
+                    (v, n & ~control_taint) for v, n in zip(inner.results, carried_nan, strict=True)
+                )
                 continue
             elif name == "scf.if":
                 region = inner.regions[0 if bool(xs[0]) else 1]
-                results, result_taints = scalar_body(region.block, (), point, (), local, local_taints)
+                results, result_taints, result_nan = scalar_body(
+                    region.block, (), point, (), (), local, local_taints, nan_only
+                )
                 local.update(zip(inner.results, results, strict=True))
                 local_taints.update((v, t | ts[0]) for v, t in zip(inner.results, result_taints, strict=True))
+                nan_only.update((v, n & ~ts[0]) for v, n in zip(inner.results, result_nan, strict=True))
                 continue
             elif name == "arith.cmpi":
                 predicate = inner.predicate.value.data
@@ -289,7 +305,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
             nan_only[inner.results[0]] = payload_only.expand(y.shape)
         raise ValueError("source region lacks yield")
 
-    def generic(op, xs, ts):
+    def generic(op, xs, ts, ns):
         maps = [a.data for a in op.get_indexing_maps()]
         if op in selected:
             q, ss, valid, operands = [], [], [], []
@@ -383,7 +399,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                     ),
                 )
             )
-            return restored, torch.zeros_like(restored, dtype=torch.bool)
+            return restored, torch.zeros_like(restored, dtype=torch.bool), torch.zeros_like(restored, dtype=torch.bool)
         extents = [None] * maps[0].num_dims
         for amap, x in zip(maps, xs, strict=True):
             for expr, size in zip(amap.results, x.shape, strict=True):
@@ -396,21 +412,27 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
             raise ValueError("source loop extent is underivable")
         result = xs[-1].clone()
         result_taint = ts[-1].clone()
+        result_nan_only = ns[-1].clone()
         for point in itertools.product(*(range(n) for n in extents)):
             indices = [amap.eval(point, ()) for amap in maps]
             values = [x[index] for x, index in zip(xs[:-1], indices[:-1], strict=True)]
             values.append(result[indices[-1]])
             value_taints = [t[index] for t, index in zip(ts[:-1], indices[:-1], strict=True)]
             value_taints.append(result_taint[indices[-1]])
-            value, uncertain = scalar_body(op.body.block, values, point, value_taints)
+            value_nan_only = [n[index] for n, index in zip(ns[:-1], indices[:-1], strict=True)]
+            value_nan_only.append(result_nan_only[indices[-1]])
+            value, uncertain, payload_only = scalar_body(op.body.block, values, point, value_taints, value_nan_only)
             result[indices[-1]] = value
             result_taint[indices[-1]] = uncertain
-        return result, result_taint
+            result_nan_only[indices[-1]] = payload_only
+        return result, result_taint, result_nan_only
 
     for op in function.body.block.ops:
         xs = [env[v] for v in op.operands]
         ts = [taints[v] for v in op.operands]
+        ns = [nan_taints[v] for v in op.operands]
         uncertain = None
+        payload_only = None
         name = op.name
         if name == "func.return":
             if ieee_audit is not None:
@@ -427,15 +449,19 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
         elif name in {"tensor.expand_shape", "tensor.collapse_shape", "tensor.reshape"}:
             y = xs[0].reshape(op.results[0].type.get_shape())
             uncertain = ts[0].reshape(y.shape)
+            payload_only = ns[0].reshape(y.shape)
         elif name == "tensor.splat":
             y = xs[0].expand(op.results[0].type.get_shape()).clone()
             uncertain = ts[0].expand(y.shape).clone()
+            payload_only = ns[0].expand(y.shape).clone()
         elif name == "linalg.fill":
             y = xs[0].expand(xs[1].shape).clone()
             uncertain = ts[0].expand(y.shape).clone()
+            payload_only = ns[0].expand(y.shape).clone()
         elif name == "linalg.transpose":
             y = xs[0].permute(tuple(attr(op, "permutation").get_values())).contiguous()
             uncertain = ts[0].permute(tuple(attr(op, "permutation").get_values())).contiguous()
+            payload_only = ns[0].permute(tuple(attr(op, "permutation").get_values())).contiguous()
         elif name in {"tensor.extract_slice", "tensor.insert_slice"}:
             offsets, sizes, strides = [
                 list(attr(op, k).get_values()) for k in ("static_offsets", "static_sizes", "static_strides")
@@ -446,30 +472,39 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
             if name == "tensor.extract_slice":
                 y = xs[0][indices].reshape(op.results[0].type.get_shape())
                 uncertain = ts[0][indices].reshape(y.shape)
+                payload_only = ns[0][indices].reshape(y.shape)
             else:
                 y = xs[1].clone()
                 y[indices] = xs[0].reshape(y[indices].shape)
                 uncertain = ts[1].clone()
                 uncertain[indices] = ts[0].reshape(uncertain[indices].shape)
+                payload_only = ns[1].clone()
+                payload_only[indices] = ns[0].reshape(payload_only[indices].shape)
         elif name in {"linalg.generic", "linalg.matmul", "linalg.batch_matmul"}:
-            y, uncertain = generic(op, xs, ts)
+            y, uncertain, payload_only = generic(op, xs, ts, ns)
         elif name == "linalg.reduce":
             # Keep source reduction order, instead of Torch's tree-sum order.
             dimensions = tuple(attr(op, "dimensions").get_values())
             y = xs[1].clone()
             uncertain = ts[1].clone()
+            payload_only = ns[1].clone()
             for point in itertools.product(*(range(n) for n in xs[0].shape)):
                 index = tuple(v for i, v in enumerate(point) if i not in dimensions)
-                value, value_taint = scalar_body(
-                    op.regions[0].block, [xs[0][point], y[index]], operand_taints=[ts[0][point], uncertain[index]]
+                value, value_taint, value_nan_only = scalar_body(
+                    op.regions[0].block,
+                    [xs[0][point], y[index]],
+                    operand_taints=[ts[0][point], uncertain[index]],
+                    operand_nan_only=[ns[0][point], payload_only[index]],
                 )
                 y[index], uncertain[index] = value, value_taint
+                payload_only[index] = value_nan_only
         else:
             raise ValueError(f"W8A8 reference refuses source op {name}")
         if len(op.results) != 1:
             raise ValueError("reference requires single-result source operations")
         env[op.results[0]] = y
         taints[op.results[0]] = uncertain if uncertain is not None else torch.zeros_like(y, dtype=torch.bool)
+        nan_taints[op.results[0]] = payload_only if payload_only is not None else torch.zeros_like(y, dtype=torch.bool)
     raise ValueError("source function lacks return")
 
 
