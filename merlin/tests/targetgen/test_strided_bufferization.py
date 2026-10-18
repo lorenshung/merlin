@@ -30,3 +30,15 @@ def test_to_buffer_still_checks_shape_and_element_type(result):
     }}''')
     with pytest.raises(VerifyException, match="matching tensor/memref"):
         module.verify()
+
+
+def test_unranked_buffer_correspondence_is_preserved():
+    source = '''builtin.module {
+      func.func @forward(%x: tensor<*xf32>) {
+        %b = "bufferization.to_buffer"(%x) : (tensor<*xf32>) -> memref<*xf32>
+        func.return
+      }
+    }'''
+    module = parse_mlir_text(source)
+    module.verify()
+    parse_mlir_text(str(module)).verify()
