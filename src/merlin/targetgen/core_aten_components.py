@@ -71,6 +71,16 @@ def prepare_integer_components(directory, report, selection, provider, package, 
     if not functions:
         return None
     native_types = [abi["dtype"] for record in report["cases"] for abi in record.get("input_abi", [])]
+    if any(dtype == "bf16" and np.isnan(value).any() for dtype, value in zip(native_types, arrays)) and any(
+        op.name == "arith.negf" and str(op.results[0].type) == "bf16" for op in module.walk()
+    ):
+        (directory / "exact-dtype-refusal.json").write_text(
+            json.dumps(
+                dict(family="F2", reason="native bf16 negation lacks an explicit CPU NaN-canonicalization policy")
+            )
+            + "\n"
+        )
+        return None
     from merlin.llvmlower.boolean_components import rewrite_boolean_components
 
     native_arithmetic = any(
