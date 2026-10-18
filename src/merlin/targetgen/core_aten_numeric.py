@@ -181,7 +181,7 @@ def prepare_spec_int8(
             accumulators = [
                 contractions[site["source_operation_ordinal"]].results[0]
                 for site in selected
-                if site.get("readout") != "device_int8"
+                if site.get("readout") != "int32_host_exact"
             ]
             returned.operands = [*returned.operands, *accumulators]
             function.properties["function_type"] = FunctionType.from_lists(
@@ -464,7 +464,7 @@ def prepare_spec_int8(
                         "transfer_contracts.accumulator_readout"
                     )
                     site["host_readout_bridge"] = {"status": "composed_integer_readout"}
-                    observations.append(() if site.get("readout") == "device_int8" else (contraction.results[0],))
+                    observations.append(() if site.get("readout") == "int32_host_exact" else (contraction.results[0],))
                     continue
                 # Readout preserves two separately rounded frontend f32 multiplies.
                 (cast, first_readout, readout), restored_readout, bridge = host_readout_chain(

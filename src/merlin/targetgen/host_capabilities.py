@@ -28,6 +28,15 @@ def validate_host_capabilities(
         raise ValueError(f"host capability spec must declare schema {SCHEMA}")
     if document.get("status") not in {"reviewed", "unreviewed"}:
         raise ValueError("host capability spec must declare review status")
+    readout = document.get("exact_readout")
+    if readout is not None and (
+        not isinstance(readout, dict)
+        or set(readout) != {"status", "api", "rounding"}
+        or readout.get("status") not in {"reviewed", "unreviewed"}
+        or readout.get("api") != "merlin.runtime.exact_readout.requantize_int32"
+        or readout.get("rounding") != "half_to_even"
+    ):
+        raise ValueError("exact_readout requires explicit API, review status and half_to_even rounding")
     compiler = document.get("compiler")
     if not isinstance(compiler, dict) or (
         not is_sha256(compiler.get("package_sha256"))

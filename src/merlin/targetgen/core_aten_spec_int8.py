@@ -16,36 +16,27 @@ from merlin.targetgen.software_spec import admit_operation, load_software_spec
 QUANTIZE = "quantized_decomposed.quantize_per_tensor.default"
 DEQUANTIZE = "quantized_decomposed.dequantize_per_tensor.default"
 
-_QUANTIZATION_KEYS = frozenset(
-    {
-        "scale",
-        "zero_point",
-        "quant_min",
-        "quant_max",
-        "relu",
-        "rounding",
-        "granularity",
-        "saturate",
-        "accumulator",
-        "arithmetic",
-        "lhs_scale",
-        "rhs_scale",
-        "output_scale",
-        "alpha",
-        "beta",
-        "acc_scale",
-        "numerics",
-        "scale_numerator",
-        "scale_denominator",
-        "storage_dtype",
-    }
-)
+
+def quantization_schema():
+    """The versioned frontend-owned vocabulary, also available in installed packages."""
+    import json
+
+    from merlin.common.paths import contract_dir
+
+    schema = json.loads((contract_dir() / "quant_schema.json").read_text())
+    if schema.get("schema_version") != 1 or schema.get("unknown_keys") != "reject":
+        raise ValueError("unsupported frontend quantization schema")
+    return schema
 
 
-def validate_quantization_attributes(op):
+def validate_quantization_attributes(op, op_kind=None):
     """Quantization metadata is a closed vocabulary, including on MACs and seeds."""
+    allowed = quantization_schema()["attributes"]
     unknown = sorted(
-        key for key in op.attributes if key.startswith("prov.quant.") and key[11:] not in _QUANTIZATION_KEYS
+        key
+        for key in op.attributes
+        if key.startswith("prov.quant.")
+        and (key not in allowed or (op_kind is not None and op_kind not in allowed[key]["op_kinds"]))
     )
     if unknown:
         raise ValueError(f"unknown readout quantization attributes: {unknown}")
@@ -190,14 +181,36 @@ def provider_coverage(module, proof, op) -> str | None:
         readout = device_readout(op)
     except ValueError as exc:
         return str(exc)
+    kernel = kernels[0]
+    schedule = kernel.get("schedule", {})
+    if any(
+        getattr(row.attributes.get("prov.quant.host_only"), "data", None) == "true"
+        or getattr(row.attributes.get("prov.quant.numerics"), "data", None) == "float_readout"
+        for row in (op, readout["operation"] if readout else op)
+    ):
+        return "host-only float_readout cannot feed the device"
+    if readout is not None:
+        if schedule.get("readout") != "full_i32" or schedule.get("requantization") != "retained_source_exact_integer":
+            return "selected provider must prove full int32 readout with exact host requantization"
+        for field, name in (("scale_numerator", "numerator"), ("scale_denominator", "denominator")):
+            if schedule.get(field) != [v[name] for v in readout["scale_ratios"]]:
+                return "selected provider readout scale differs from the exact source contract"
     if readout is not None or accumulator_init(op) == "int32_seed":
         if kernels[0].get("exact_arithmetic") is not True:
             return "selected provider has no exact-arithmetic proof for seeded/readout semantics"
-        if readout is not None and list(module.walk()).index(readout["operation"]) not in binding.get(
+        if readout is not None and list(module.walk()).index(readout["operation"]) in binding.get(
             "replaced_ordinals", ()
         ):
-            return "selected provider coverage does not include the fused readout"
+            return "selected provider must retain the exact source readout on the host"
     return None
+
+
+def mq_host_only(op):
+    """A host-only marker is a refusal even on an unseeded native contraction."""
+    return (
+        getattr(op.attributes.get("prov.quant.host_only"), "data", None) == "true"
+        or getattr(op.attributes.get("prov.quant.numerics"), "data", None) == "float_readout"
+    )
 
 
 def admission_plan(module, selection, *, captured=False, native=False, provider_proof=None):
@@ -219,9 +232,8 @@ def admission_plan(module, selection, *, captured=False, native=False, provider_
     for op, shape in observe_contractions(module):
         rank = len(op.results[0].type.get_shape())
         steps, reasons = [], pipeline_refusals(selection) + quantization_errors
-        # A capture in the integer_readout numerics reads the accumulator out ON THE DEVICE: one fused
-        # requantization to int8, the bias an int32 accumulator seed. Then there is no host cast, no
-        # host multiply and no cast exactness bound on K; the readout is a fused contraction stage.
+        # Exact integer capture retains the source quantize boundary on the host.
+        # The device only returns full int32 tiles; no cast or product can round.
         try:
             readout = device_readout(op) if (captured or native) else None
         except ValueError as exc:
@@ -229,6 +241,8 @@ def admission_plan(module, selection, *, captured=False, native=False, provider_
             reasons.append(str(exc))
         if captured and not native and readout is None:
             reasons.append("captured floating readout lacks a full-domain exact-arithmetic proof")
+        if mq_host_only(op):
+            reasons.append("host-only float_readout cannot feed the device")
         seeded = accumulator_init(op) == "int32_seed"
         if seeded or readout is not None:
             failure = provider_coverage(module, provider_proof, op)
@@ -289,9 +303,7 @@ def admission_plan(module, selection, *, captured=False, native=False, provider_
         transfers = spec.get("transfer_contracts", {})
         crossings = [
             (2, "operand_load", "host", "accelerator", "int8", [len(v.type.get_shape()) for v in op.operands[:2]]),
-            (4, "int8_readout", "accelerator", "host", "int8", [rank])
-            if readout is not None
-            else (4, "accumulator_readout", "accelerator", "host", "i32", [rank]),
+            (4, "accumulator_readout", "accelerator", "host", "i32", [rank]),
         ]
         if seeded:
             crossings.insert(1, (2, "accumulator_seed_load", "host", "accelerator", "i32", [rank]))
@@ -345,23 +357,26 @@ def admission_plan(module, selection, *, captured=False, native=False, provider_
         screen(3, "contraction", signature, "accelerator")
         cast_obligation = None
         if readout is not None:
-            # The fused readout stage: acc_scale (and a ReLU before it) on the contraction's accumulator.
-            stages = ["relu", "acc_scale"] if readout["relu"] else ["acc_scale"]
-            screen(
-                4,
-                "elementwise_map",
-                dict(
-                    family="elementwise_map",
-                    operand_dtype="i32",
-                    readout_dtype="i8",
-                    rank=rank,
-                    epilogues=stages,
-                    composed_with=["contraction"],
-                    scale_granularity=readout["granularity"],
-                ),
-                "fused_accelerator",
+            policy = (spec.get("numerical_semantics") or {}).get("readout") or {}
+            declared = host.get("exact_readout") or {}
+            admitted = (
+                policy.get("strategy") == "exact_rational_host"
+                and declared.get("status") == "reviewed"
+                and declared.get("api") == "merlin.runtime.exact_readout.requantize_int32"
+                and declared.get("rounding") == "half_to_even"
             )
-            steps[-1]["device_readout"] = {key: value for key, value in readout.items() if key != "operation"}
+            steps.append(
+                dict(
+                    step=5,
+                    op="exact_rational_host_readout",
+                    placement="host",
+                    status="admitted" if admitted else "refused",
+                    device_readout={key: value for key, value in readout.items() if key != "operation"},
+                    source=declared,
+                )
+            )
+            if not admitted:
+                reasons.append("exact rational host readout requires reviewed API selection and exact host policy")
             if readout["relu"] and any(sign <= 0 for sign in readout["scale_signs"]):
                 reasons.append(
                     "step 4 a readout ReLU runs before the scale, so it cannot pair with a nonpositive scale"
@@ -454,7 +469,7 @@ def admission_plan(module, selection, *, captured=False, native=False, provider_
                 source_dtypes=list(shape.dtypes),
                 result_rank=rank,
                 host_readout_bridge=readout_proof,
-                readout="device_int8" if readout is not None else "host",
+                readout="int32_host_exact" if readout is not None else "host",
                 accumulator_init="int32_seed" if seeded else "zero",
                 steps=sorted(steps, key=lambda s: s["step"]),
                 partial_sum_obligation=bound,
@@ -556,42 +571,19 @@ def device_readout(op) -> dict | None:
     """
     from merlin.common import mlir_query as mq
 
-    validate_quantization_attributes(op)
+    validate_quantization_attributes(op, "contraction")
 
     result = op.results[0] if len(op.results) == 1 else None
     users = list(result.uses) if result is not None else []
     if len(users) != 1:
         return None
     reader = users[0].operation
-    validate_quantization_attributes(reader)
+    validate_quantization_attributes(reader, "integer_readout")
     if mq.op_name(reader) != "linalg.generic" or mq.attr_str(reader, "prov.role") != "readout":
         return None
     if str(getattr(reader.results[0].type, "element_type", "")) != "i8":
         return None  # an f32 acc_readout leaves the multiply to the host
     attributes = reader.attributes
-    allowed = {
-        "scale",
-        "zero_point",
-        "quant_min",
-        "quant_max",
-        "relu",
-        "rounding",
-        "granularity",
-        "saturate",
-        "accumulator",
-        "arithmetic",
-        "lhs_scale",
-        "rhs_scale",
-        "output_scale",
-        "alpha",
-        "beta",
-        "scale_numerator",
-        "scale_denominator",
-        "storage_dtype",
-    }
-    unknown = sorted(key for key in attributes if key.startswith("prov.quant.") and key[11:] not in allowed)
-    if unknown:
-        raise ValueError(f"unknown readout quantization attributes: {unknown}")
 
     def number(key):
         value = attributes.get(key)
@@ -607,8 +599,6 @@ def device_readout(op) -> dict | None:
 
     ratios = []
     if "prov.quant.scale_numerator" in attributes or "prov.quant.scale_denominator" in attributes:
-        if scale is not None:
-            raise ValueError("readout cannot declare both a floating scale and a rational scale")
         try:
             numerators = [int(item.data) for item in attributes["prov.quant.scale_numerator"].data]
             denominators = [int(item.data) for item in attributes["prov.quant.scale_denominator"].data]
@@ -618,6 +608,12 @@ def device_readout(op) -> dict | None:
         except (KeyError, AttributeError, TypeError, ValueError) as exc:
             raise ValueError("readout requires paired integer scale numerators and positive denominators") from exc
         scales = []
+    if not ratios:
+        raise ValueError("device readout requires exact scale_numerator/scale_denominator")
+    if mq.attr_str(reader, "prov.quant.host_only") == "true" or mq.attr_str(op, "prov.quant.host_only") == "true":
+        raise ValueError("host-only quantization cannot feed the device")
+    if mq.attr_str(reader, "prov.quant.numerics") != "integer_readout":
+        raise ValueError("device readout requires integer_readout numerics")
     parameters = {key: number(f"prov.quant.{key}") for key in ("zero_point", "quant_min", "quant_max")}
     relu = mq.attr_str(reader, "prov.quant.relu")
     if (

@@ -26,6 +26,7 @@ numerical_semantics:
     mac_result_overflow: wrap_to_20_bits
     full_operation_overflow_policy: bounded_exact_requires_each_partial_sum
   readout:
+    strategy: exact_rational_host
     acc_scale_rounding: half_even
     narrowing: saturate_to_declared_dtype
     # Portable host-side integer shift; not a Gemmini fused readout stage.

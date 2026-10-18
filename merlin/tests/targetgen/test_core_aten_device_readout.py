@@ -1,14 +1,5 @@
 # ruff: noqa: E501 -- the captured module is printed one op per line
-"""A capture in the integer_readout numerics is admitted with its readout ON THE DEVICE.
-
-WHY THIS EXISTS. The core-aten int8 pipeline read every contraction's int32 accumulator back to the
-host, cast it to f32 and multiplied twice. That host cast is exact only for |acc| <= 2^24, which bounded K
-to 1024 at int8 (TinyLlama's K = 2048/5632 and addmm's K = 3072 were refused), and the f32 bias stayed a
-host add. The frontend's integer_readout numerics instead seed the accumulator with an int32 bias and
-read it out once, fused, as int8 (``prov.role = "readout"`` with ``prov.quant.*``). This plan admits that
-form: an accumulator-seed load, the contraction, the fused acc_scale/ReLU stage and an int8 readout
-crossing -- and no cast bound.
-"""
+"""Real frontend metadata with full int32 device tiles and exact host quantization."""
 
 from __future__ import annotations
 
@@ -63,19 +54,20 @@ def test_the_seed_and_the_fused_readout_are_read_structurally(source_text):
         assert accumulator_init(op) == "int32_seed" and not zero_initialised(op)
         readout = device_readout(op)
     assert readout["relu"] and readout["quant_min"] == -128 and readout["granularity"] == "tensor"
-    assert readout["scales"] == [0.5]
+    assert readout["scales"] == []
+    assert readout["scale_ratios"] == [dict(numerator="1", denominator="2")]
 
 
 def test_the_device_readout_plan_replaces_the_host_cast_and_its_k_bound(selection, source_text):
     _op, plan = _plan(selection, source_text)
     (site,) = plan["sites"]
-    assert site["readout"] == "device_int8" and site["accumulator_init"] == "int32_seed"
+    assert site["readout"] == "int32_host_exact" and site["accumulator_init"] == "int32_seed"
     steps = {(row["step"], row.get("declaration") or row.get("op")) for row in site["steps"]}
     assert (2, "transfer_contracts.accumulator_seed_load") in steps
-    assert (4, "transfer_contracts.int8_readout") in steps and (4, "elementwise_map") in steps
-    assert not any(step for step, _ in steps if step in (5, 6)) and site["cast_exact_range_obligation"] is None
-    fused = next(row for row in site["steps"] if row.get("op") == "elementwise_map")
-    assert fused["software"]["status"] == "admitted"
+    assert (4, "transfer_contracts.accumulator_readout") in steps and (5, "exact_rational_host_readout") in steps
+    assert not any(step for step, _ in steps if step == 6) and site["cast_exact_range_obligation"] is None
+    fused = next(row for row in site["steps"] if row.get("op") == "exact_rational_host_readout")
+    assert fused["status"] == "admitted" and fused["placement"] == "host"
     assert fused["device_readout"]["relu"] is True
 
 
@@ -86,15 +78,28 @@ def test_seeded_admission_requires_selected_provider_coverage(selection, source_
         module = mq.parse(source_text)
         ((op, _shape),) = observe_contractions(module)
         ordinal = list(module.walk()).index(op)
+        reader_ordinal = list(module.walk()).index(device_readout(op)["operation"])
         proof = dict(
             status="proven",
             source_sha256=hashlib.sha256(str(module).encode()).hexdigest(),
-            kernels=[dict(symbol="seeded", status="proven", exact_arithmetic=True)],
+            kernels=[
+                dict(
+                    symbol="seeded",
+                    status="proven",
+                    exact_arithmetic=True,
+                    schedule=dict(
+                        readout="full_i32",
+                        requantization="retained_source_exact_integer",
+                        scale_numerator=["1"],
+                        scale_denominator=["2"],
+                    ),
+                )
+            ],
             bindings=[
                 dict(
                     source_operation_ordinal=ordinal,
                     symbol="seeded",
-                    replaced_ordinals=[ordinal, list(module.walk()).index(device_readout(op)["operation"])],
+                    replaced_ordinals=[ordinal],
                 )
             ],
         )
@@ -107,8 +112,22 @@ def test_seeded_admission_requires_selected_provider_coverage(selection, source_
         {**proof, "bindings": []},
         {**proof, "source_sha256": "stale"},
         {**proof, "kernels": []},
+        {**proof, "kernels": [dict(symbol="seeded", status="proven", exact_arithmetic=True)]},
+        {
+            **proof,
+            "kernels": [
+                {
+                    **proof["kernels"][0],
+                    "schedule": {
+                        **proof["kernels"][0]["schedule"],
+                        "readout": "fp32_scaled",
+                        "readout_equivalence": {"status": "proven"},
+                    },
+                }
+            ],
+        },
         {**proof, "kernels": [dict(symbol="seeded", status="proven")]},
-        {**proof, "bindings": [{**proof["bindings"][0], "replaced_ordinals": [ordinal]}]},
+        {**proof, "bindings": [{**proof["bindings"][0], "replaced_ordinals": [ordinal, reader_ordinal]}]},
     ):
         _, refused = _plan(selection, source_text, damaged)
         assert refused["sites"][0]["status"] == "refused"
@@ -127,7 +146,7 @@ def test_unknown_quantization_attributes_are_rejected(source_text, key):
 
 
 def test_a_readout_relu_with_a_nonpositive_scale_is_refused(selection, source_text):
-    negative = source_text.replace("prov.quant.scale = ", "prov.quant.scale = -")
+    negative = source_text.replace('prov.quant.scale_numerator = ["1"]', 'prov.quant.scale_numerator = ["-1"]')
     _op, plan = _plan(selection, negative)
     assert any("ReLU" in reason for reason in plan["sites"][0]["reasons"])
 
@@ -155,7 +174,7 @@ from m2m.capture import integer_readout
 class Model(torch.nn.Module):
  def forward(self,a,b,bias):
   acc=torch.ops.m2m_q.int_mm_seeded.default(a,b,bias)
-  return torch.ops.m2m_q.exact_readout.default(acc,.03,[.02],1.,None,1.,.01,0,-128,127,False,False)
+  return torch.ops.m2m_q.exact_readout.default(acc,float(torch.tensor(.03)),[float(torch.tensor(.02))],1.,None,1.,float(torch.tensor(.01)),0,-128,127,False,False)
 inputs=(torch.ones(4,8,dtype=torch.int8),torch.ones(8,16,dtype=torch.int8),torch.zeros(16,dtype=torch.int32))
 result=m2m.convert(Model(),inputs,backend='fx_importer')
 assert result.ok,result
@@ -166,7 +185,11 @@ open(sys.argv[1],'w').write(result.mlir_text)
     with IR_LOCK:
         ((op, _),) = observe_contractions(mq.parse(path.read_text()))
         readout = device_readout(op)
-        expected = Fraction(0.03) * Fraction(0.02) / Fraction(0.01)
+        import numpy as np
+
+        expected = (
+            Fraction(float(np.float32(0.03))) * Fraction(float(np.float32(0.02))) / Fraction(float(np.float32(0.01)))
+        )
         assert readout["scales"] == []
         assert readout["scale_ratios"] == [
             dict(numerator=str(expected.numerator), denominator=str(expected.denominator))
@@ -176,4 +199,29 @@ open(sys.argv[1],'w').write(result.mlir_text)
 
         readout["operation"].attributes["prov.quant.scale_denominator"] = ArrayAttr([StringAttr("0")])
         with pytest.raises(ValueError, match="positive denominators"):
+            device_readout(op)
+
+
+@pytest.mark.parametrize("where", ["contraction", "readout"])
+def test_real_host_only_metadata_refuses_device_placement(selection, source_text, where):
+    from xdsl.dialects.builtin import StringAttr
+
+    with IR_LOCK:
+        module = mq.parse(source_text)
+        ((op, _),) = observe_contractions(module)
+        selected = op if where == "contraction" else device_readout(op)["operation"]
+        selected.attributes["prov.quant.host_only"] = StringAttr("true")
+        plan = admission_plan(module, selection, captured=True)
+    assert plan["sites"][0]["status"] == "refused"
+    assert "host-only" in " ".join(plan["sites"][0]["reasons"])
+
+
+def test_schema_keys_must_also_belong_to_the_readout_kind(source_text):
+    from xdsl.dialects.builtin import StringAttr
+
+    with IR_LOCK:
+        ((op, _),) = observe_contractions(mq.parse(source_text))
+        reader = device_readout(op)["operation"]
+        reader.attributes["prov.quant.gradient"] = StringAttr("input")
+        with pytest.raises(ValueError, match="unknown readout quantization"):
             device_readout(op)

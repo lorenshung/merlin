@@ -17,10 +17,16 @@ pins:
       shift and floor-division decompositions, PT2E integer-contraction capture, and literal
       quantization-parameter lowering; missing any of these leaves supported operations opaque.
     repo_canonical: https://github.com/ucb-bar/model2MLIR.git
-    commit: "9ef1c80ca21e6d82b9353f6966cefc4614b7c421"
+    commit: "a38c319d2f036257153e17d7790060e176b21279"
     root_env: MERLIN_M2M_DIR
     requires_paths:
       - m2m/ir/decompositions.py
+      - m2m/ir/quant_schema.json
+      - m2m/ir/quant_schema.py
+      - m2m/ir/quant_attrs.py
+      - m2m/ir/integer_readout.py
+      - m2m/capture/integer_readout.py
+      - m2m/capture/quant_scales.py
       - m2m/ir/import_fx.py
       - m2m/capture/pt2e_integer_reference.py
       - m2m/capture/pt2e_integerize.py
@@ -49,7 +55,8 @@ pins:
       - m2m/ir/storage_resize.py
     content_check: true
     notes: >-
-      Reviewed model2MLIR frontend, including signed-integer lowering, portable per-tensor
+      Reviewed model2MLIR frontend with versioned quant schema v1, fp32 source-scale canonicalization,
+      host-only approximate readouts, and exact rational integer readout. Includes signed-integer lowering, portable per-tensor
       static quantization, caller layouts, exported full-call result storage contracts,
       pre-PT2E FFT candidates, upstream integer constant rounding fixes, and complete
       direct/nested complex dropout result structures, complete traced tuple selection,

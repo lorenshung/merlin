@@ -390,7 +390,9 @@ def test_cast_selection_enforces_declared_exact_range(selection, k, admitted):
     assert site["cast_exact_range_obligation"]["max_abs_bound"] == k * 128 * 128
     assert site["cast_exact_range_obligation"]["exact_limit"] == 2**24
     if not admitted:
-        assert any("host-capabilities.yaml:65" in reason and "exact_range" in reason for reason in site["reasons"])
+        location = site["cast_exact_range_obligation"]["source"]
+        expected = f"{location['path']}:{location['line']}"
+        assert any(expected in reason and "exact_range" in reason for reason in site["reasons"])
 
 
 def test_step6_checks_selected_declaration_instead_of_shadowed_exact_one(selection):
