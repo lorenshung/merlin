@@ -24,6 +24,7 @@ native_ieee_special_values:
   finite_producer: complete_exact_integer_numerator
   literal_zero_divisor: x86_negative_quiet_nan_bfloat16_positive_canonical
   bfloat16_negation_nan: positive_canonical_quiet
+  pointwise_nonfinite: affected_elements_source_ieee_only
   other_nonfinite_arithmetic: refuse_without_source_propagation_proof
   evidence:
     review_status: "authored, pending operator review"

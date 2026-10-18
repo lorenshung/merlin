@@ -139,3 +139,32 @@ def test_native_source_unsigned_byte_conversion_has_no_sign_extension(tmp_path):
     assert result.returncode == 0, result.stderr[-2000:]
     receipt = json.loads((tmp_path / "source-ieee-closure.json").read_text())
     assert receipt["output_bytes"] == [np.array([255.0], np.float32).tobytes().hex()]
+
+
+@pytest.mark.parametrize("right_word,ambiguous", [(0x7FC00000, False), (0xFFC00000, True)])
+def test_special_audit_refuses_competing_nan_signs(tmp_path, right_word, ambiguous):
+    python = os.environ.get("MERLIN_M2M_PYTHON")
+    if not python or not Path(python).is_file():
+        pytest.skip("declared capture interpreter unavailable")
+    source = """module {
+      func.func @forward(%x:tensor<1xf32>,%y:tensor<1xf32>) -> tensor<1xf32> {
+        %e=tensor.empty() : tensor<1xf32>
+        %r=linalg.generic {
+          indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]
+        } ins(%x,%y:tensor<1xf32>,tensor<1xf32>) outs(%e:tensor<1xf32>) {
+        ^bb0(%a:f32,%b:f32,%unused:f32):
+          %v=arith.addf %a,%b : f32
+          linalg.yield %v : f32
+        } -> tensor<1xf32>
+        return %r : tensor<1xf32>
+      }}"""
+    (tmp_path / "model.mlir").write_text(source)
+    np.savez(
+        tmp_path / "inputs.npz",
+        in0=np.array([0x7FC00000], np.uint32).view(np.float32),
+        in1=np.array([right_word], np.uint32).view(np.float32),
+    )
+    result = _source_reference(tmp_path, "--native-source")
+    assert result.returncode == 0, result.stderr[-2000:]
+    receipt = json.loads((tmp_path / "source-ieee-closure.json").read_text())
+    assert receipt["ieee_special_audit"]["ambiguous_nan_payload"] is ambiguous

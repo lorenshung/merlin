@@ -45,6 +45,8 @@ def validate_host_capabilities(
         or special.get("finite_producer") != "complete_exact_integer_numerator"
         or special.get("literal_zero_divisor") != "x86_negative_quiet_nan_bfloat16_positive_canonical"
         or special.get("bfloat16_negation_nan") != "positive_canonical_quiet"
+        or special.get("pointwise_nonfinite", "affected_elements_source_ieee_only")
+        != "affected_elements_source_ieee_only"
         or special.get("other_nonfinite_arithmetic") != "refuse_without_source_propagation_proof"
     ):
         raise ValueError("native_ieee_special_values requires the explicit closed CPU bit policy")

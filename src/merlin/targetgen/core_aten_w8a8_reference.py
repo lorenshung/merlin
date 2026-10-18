@@ -66,7 +66,7 @@ def validate_dispatch(dispatch, *, full_k, quant_min, quant_max):
     return limit
 
 
-def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=None):
+def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=None, ieee_audit=None):
     import torch
     from xdsl.dialects.builtin import DenseIntOrFPElementsAttr, TensorType
     from xdsl.ir.affine import AffineDimExpr
@@ -111,6 +111,12 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
         for inner in block.ops:
             name = inner.name
             xs = [local[v] if v in local else env[v] for v in inner.operands]
+            if ieee_audit is not None and name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf"}:
+                if bool(torch.isnan(xs[0]).any() and torch.isnan(xs[1]).any()):
+                    left = xs[0].contiguous().reshape(-1).view(torch.uint8)
+                    right = xs[1].contiguous().reshape(-1).view(torch.uint8)
+                    if not torch.equal(left, right):
+                        ieee_audit["ambiguous_nan_payload"] = True
             if name == "linalg.yield":
                 return xs[0]
             if name == "arith.constant":
@@ -401,8 +407,9 @@ def main():
         module = parse_mlir_file(source)
         with np.load(directory / "inputs.npz") as archive:
             arrays = [archive[f"in{i}"] for i in range(len(archive.files))]
+        audit = {"ambiguous_nan_payload": False}
         try:
-            values, _ = evaluate(module, arrays, [], quant_min=-128, quant_max=127, eps=2**-12)
+            values, _ = evaluate(module, arrays, [], quant_min=-128, quant_max=127, eps=2**-12, ieee_audit=audit)
             has_nan = any(bool(value.is_floating_point() and value.isnan().any()) for value in values)
             result = dict(status="source_nan" if has_nan else "no_source_nan")
             if "--native-source" in sys.argv[2:]:
@@ -422,6 +429,7 @@ def main():
         result.update(
             source_sha256=hashlib.sha256(source.read_bytes()).hexdigest(),
             input_sha256=hashlib.sha256((directory / "inputs.npz").read_bytes()).hexdigest(),
+            ieee_special_audit=audit,
             scope=(
                 "typed_source_ieee_storage_bits_no_target_qualification"
                 if "--native-source" in sys.argv[2:]

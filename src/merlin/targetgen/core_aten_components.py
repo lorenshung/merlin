@@ -115,7 +115,15 @@ def prepare_integer_components(directory, report, selection, provider, package, 
     )
     from merlin.targetgen.core_aten_exact_dtype import native_dtype_request
 
-    source_agreement_required = not order_dependent and native_dtype_request(report)
+    has_special_inputs = any(v.dtype.kind == "f" and not np.isfinite(v).all() for v in arrays)
+    ieee_pointwise = (
+        ieee_enabled
+        and selection["host"]["native_ieee_special_values"].get("pointwise_nonfinite")
+        == "affected_elements_source_ieee_only"
+        and has_special_inputs
+        and not order_dependent
+    )
+    source_agreement_required = not order_dependent and (native_dtype_request(report) or ieee_pointwise)
     closure_required = (
         order_dependent
         and any(dtype in {"f16", "bf16", "f64", "complex<f32>"} for dtype in native_types)
@@ -132,6 +140,21 @@ def prepare_integer_components(directory, report, selection, provider, package, 
             or closure.get("input_sha256") != hashlib.sha256((directory / "inputs.npz").read_bytes()).hexdigest()
         ):
             raise ValueError("source IEEE closure observation does not bind the current source and inputs")
+        if ieee_pointwise and (
+            "output_bytes" not in closure or closure.get("ieee_special_audit", {}).get("ambiguous_nan_payload", True)
+        ):
+            (directory / "exact-dtype-refusal.json").write_text(
+                json.dumps(
+                    dict(
+                        family="F2",
+                        code="ieee_pointwise_source_policy_unproved",
+                        reason="special propagation requires a complete source proof and unambiguous NaN payloads",
+                        source_ieee_policy=closure,
+                    )
+                )
+                + "\n"
+            )
+            return None
         if source_agreement_required and "output_bytes" in closure:
             from merlin.targetgen.core_aten_host_floor import grade_native_bits
 
@@ -158,7 +181,10 @@ def prepare_integer_components(directory, report, selection, provider, package, 
                     dict(
                         family="F2",
                         code="ieee_intermediate_nonfinite_policy_unproved",
-                        reason="finite source has IEEE overflow/invalid intermediates; native NaN propagation lacks a closed proof",
+                        reason=(
+                            "finite source has IEEE overflow/invalid intermediates; "
+                            "native NaN propagation lacks a closed proof"
+                        ),
                     )
                 )
                 + "\n"
@@ -214,6 +240,7 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         widening = any(op.name == "arith.extf" and str(op.result.type) == "f64" for op in module.walk())
         if (
             not conversion_count
+            and not ieee_pointwise
             and not widening
             and not any(dtype in {"f16", "bf16", "f64", "complex<f32>"} for dtype in native_types)
         ):
@@ -222,7 +249,12 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         from merlin.llvmlower.floating_components import rewrite_floating_components
 
         try:
-            grids = [finite_grid(value.flat) if value.dtype.kind == "f" else None for value in arrays]
+            grids = [
+                finite_grid(np.where(np.isfinite(value), value, 0).flat if ieee_pointwise else value.flat)
+                if value.dtype.kind == "f"
+                else None
+                for value in arrays
+            ]
         except ValueError as exc:
             (directory / "exact-dtype-refusal.json").write_text(json.dumps(dict(family="F2", reason=str(exc))) + "\n")
             return None
@@ -235,6 +267,7 @@ def prepare_integer_components(directory, report, selection, provider, package, 
             known_grids=conversion_grids,
             input_values=arrays,
             zero_limbs=zero_limbs,
+            ieee_pointwise=ieee_pointwise,
         )
         known_bounds.update(floating_bounds)
         if not floating_proofs and not boolean_count:

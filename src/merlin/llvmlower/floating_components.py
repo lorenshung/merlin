@@ -6,6 +6,7 @@ from math import prod
 from merlin.llvmlower.fixed_point_ir import FORMAT, finite_grid
 from merlin.llvmlower.floating_component_ir import pack_ieee_integer, point
 from merlin.llvmlower.floating_component_readout import component_readout
+from merlin.llvmlower.ieee_pointwise import finite_or_zero, finite_values
 
 
 def rewrite_floating_components(
@@ -17,6 +18,7 @@ def rewrite_floating_components(
     known_grids=None,
     input_values=None,
     zero_limbs=None,
+    ieee_pointwise=False,
 ):
     """Return new integer bounds and closed finite representation proofs.
 
@@ -90,7 +92,7 @@ def rewrite_floating_components(
         if getattr(op, "name", None) == "arith.constant":
             attr = op.properties.get("value", op.attributes.get("value"))
             values = list(attr.get_values()) if hasattr(attr, "get_values") else [attr.value.data]
-            return finite_grid(values)
+            return finite_grid(finite_values(values) if ieee_pointwise else values)
         carriers = {
             "tensor.splat",
             "tensor.concat",
@@ -151,6 +153,8 @@ def rewrite_floating_components(
 
         def scalar(args, emit):
             value = args[0]
+            if ieee_pointwise:
+                value = finite_or_zero(value, emit)
             if not wide_packing:
                 if value.type != f64:
                     value = emit(arith.ExtFOp(value, f64))
@@ -161,7 +165,8 @@ def rewrite_floating_components(
 
         result = point([value], TensorType(i64, value.type.get_shape()), scalar, operations)
         bounds[result] = aligned
-        record_zero_limbs(result, value, exponent)
+        if not ieee_pointwise:
+            record_zero_limbs(result, value, exponent)
         return result, aligned
 
     def zero(shape, operations):
@@ -196,6 +201,7 @@ def rewrite_floating_components(
         proofs=proofs,
         packing_limit=packing_limit,
         wide_packing=wide_packing,
+        ieee_pointwise=ieee_pointwise,
     )
     for op in list(function.body.block.ops):
         if op.name == "linalg.generic" and len(op.results) == 1 and floating(op.results[0]):
@@ -229,10 +235,8 @@ def rewrite_floating_components(
                     lifted = retype_additive(op, dict(zip(sources, wide_packed)), i128, floating=True)
                     if lifted is not None:
                         additive_ops, integer = lifted
-                        # Qualification requires a full-domain signed-i32 proof
-                        # for each emitted digit producer. That bounds this exact
-                        # weighted host sum without assumptions about repeated
-                        # gathers, loop counts, or cancellation in the source.
+                        # Each complete digit producer has a signed-i32 proof;
+                        # its bound covers repeated gathers and every loop term.
                         magnitude = max(b for v, b in packed)
                         digits, capacity = 1, 127
                         while magnitude > capacity:

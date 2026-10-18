@@ -11,7 +11,17 @@ from merlin.llvmlower.fixed_point_ir import FORMAT, encode_fixed_integer
 
 
 def component_readout(
-    *, point, integer_type, contractions, grids, raw_forms, components, proofs, packing_limit, wide_packing
+    *,
+    point,
+    integer_type,
+    contractions,
+    grids,
+    raw_forms,
+    components,
+    proofs,
+    packing_limit,
+    wide_packing,
+    ieee_pointwise=False,
 ):
     """Bind one program's numerical proof state; return its exact readout emitter."""
     i128 = integer_type
@@ -84,6 +94,10 @@ def component_readout(
         integer_zero = emit(arith.ConstantOp(IntegerAttr(0, i128)))
         exact_zero = emit(arith.CmpiOp(block.args[1], integer_zero, "eq"))
         selected = emit(arith.SelectOp(exact_zero, signed_zero, block.args[0]))
+        if ieee_pointwise:
+            from merlin.llvmlower.ieee_pointwise import overlay
+
+            selected = overlay(op, block.args[2 : 2 + len(op.inputs)], selected, emit)
         block.add_op(L.YieldOp(selected))
         if (
             op in contractions
@@ -128,6 +142,7 @@ def component_readout(
                 packing="exact_ieee_bit_fields" if wide_packing else "exact_binary64_power_of_two",
                 rounding="integer_quotient_remainder_rne",
                 exact_zero_sign="source_ieee_sign_bits",
+                ieee_special_readout="affected_elements_only" if ieee_pointwise else "none",
             )
         )
         Rewriter.replace_op(op, operations, [result])
