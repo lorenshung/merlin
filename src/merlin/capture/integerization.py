@@ -197,6 +197,9 @@ def integerize_static_pt2e(model, inputs, *, numerics: str = "integer_readout"):
     import torch
     from m2m.capture.pt2e_integerize import integerize_pt2e
 
+    if not isinstance(model, torch.fx.GraphModule):
+        raise ValueError("static PT2E integerization requires a converted FX GraphModule")
+
     layouts = {}
     for node in model.graph.nodes:
         value = node.meta.get("val")

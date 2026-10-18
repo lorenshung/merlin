@@ -405,7 +405,7 @@ def restore_floating_readout_widths(graph_module: Any) -> None:
         if not isinstance(source, torch.fx.Node) or not str(source.target).startswith(
             "quantized_decomposed.dequantize_per_"
         ):
-            raise RecipeError("floating readout width requires a direct dequantization boundary")
+            raise NoEligibleRecipeOperations("floating readout width requires a direct dequantization boundary")
         kwargs = {**source.kwargs, "out_dtype": node.kwargs["dtype"]}
         with graph.inserting_before(node):
             readout = graph.call_function(source.target, args=source.args, kwargs=kwargs)
@@ -1436,7 +1436,7 @@ def agreement(reference: Any, candidate: Any, samples: Iterable[Any], *, limit: 
 
     import torch
 
-    count = agree = 0
+    count = agree = empty = 0
     cosines: list[float] = []
     worst = 0.0
     with torch.no_grad():
@@ -1446,15 +1446,23 @@ def agreement(reference: Any, candidate: Any, samples: Iterable[Any], *, limit: 
             inputs = _as_tuple(sample)
             expected = torch.utils._pytree.tree_flatten(reference(*copy.deepcopy(inputs)))[0][0].float().flatten()
             actual = torch.utils._pytree.tree_flatten(candidate(*copy.deepcopy(inputs)))[0][0].float().flatten()
+            if expected.shape != actual.shape:
+                raise ValueError("agreement requires matching output shapes")
+            count += 1
+            if expected.numel() == 0:
+                empty += 1
+                continue
             cosines.append(float(torch.nn.functional.cosine_similarity(expected, actual, dim=0)))
             worst = max(worst, float((expected - actual).abs().max()))
             agree += int(int(expected.argmax()) == int(actual.argmax()))
-            count += 1
     if not count:
         return {"samples": 0}
+    if empty == count:
+        return {"samples": count, "empty_samples": empty}
     return {
         "samples": count,
-        "argmax_agreement": agree / count,
+        "empty_samples": empty,
+        "argmax_agreement": agree / (count - empty),
         "cosine_min": min(cosines),
         "cosine_mean": sum(cosines) / count,
         "max_abs_error": worst,

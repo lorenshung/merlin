@@ -33,7 +33,7 @@ from pathlib import Path
 
 # The worker is also executed as a standalone script in the capture interpreter.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from capture_refusals import refuse_integerization, write_exception_refusal  # noqa: E402
+from capture_refusals import refuse_integerization, write_exception_refusal, write_refusal  # noqa: E402
 
 # canonical dtype token -> (torchAO scheme | None, base-weight dtype cast | None). Mirrors
 # workloads/capture.py SCHEME + DTYPE_CAST so a capsule's precision matches how models are captured.
@@ -1067,6 +1067,14 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             write_exception_refusal(out, exc, fallback_code="no_eligible_recipe_operations")
             return 4
         quant_stats = getattr(mdl, "_recipe_quantization_stats", None)
+        if static and not isinstance(mdl, torch.fx.GraphModule):
+            write_refusal(
+                out,
+                code="no_eligible_recipe_operations",
+                reason="static recipe did not produce a converted PT2E FX graph",
+                quantization_stats=quant_stats,
+            )
+            return 4
         if fp32_staging is not None:
             fp32_staging["source_layer_plan_sha256"] = (
                 quant_stats.get("plan_sha256") if isinstance(quant_stats, dict) else None

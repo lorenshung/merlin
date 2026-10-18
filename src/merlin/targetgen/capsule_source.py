@@ -160,7 +160,7 @@ def _require_integer_contraction(
             raise M2MUnavailable(f"cannot verify W8A8 capture arithmetic: {exc}") from exc
         if quantizes:
             return
-        raise M2MUnavailable("contraction-free W8A8 capture carries no int8 quantize")
+        raise NoEligibleCaptureOperations("contraction-free W8A8 capture carries no int8 quantize")
     integer_recipe = recipe is not None and all(
         (recipe.get(part) or {}).get("dtype") in {"int8", "i8"} for part in ("activation", "weight")
     )
