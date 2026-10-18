@@ -6,6 +6,8 @@ placement_cost_model:
   schema: merlin.placement_cost.v1
   comparison: strictly_lower_estimated_cycles
   unknown_cost: retain_original_host
+  dma_memory: scratchpad
+  dma_count_roles: [mvin, mvout]
   # These scheduling estimates are assumptions, not extracted timing facts.
   # Array dimensions are read independently from corroborated selected RTL facts.
   rates:

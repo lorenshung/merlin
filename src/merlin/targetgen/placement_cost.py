@@ -5,6 +5,7 @@ These estimates are neither measured latency nor hardware certification. Unknown
 iteration counts, geometry or scalar costs refuse profitable placement.
 """
 
+import hashlib
 import math
 
 
@@ -127,13 +128,45 @@ def estimate(original, prepared, plan, declaration, facts):
         traffic = sum(transfer_bytes(op) for op in roots)
         instructions = sum(math.ceil(transfer_bytes(op) / cols) for op in roots)
         compute = sum(math.ceil(iterations(op) / (rows * cols)) for op in roots)
+        fences = len(roots)
+        count_basis = "logical_transfer_rows_and_selected_RTL_array"
+        catalog = plan.get("provider_catalog")
+        if catalog:
+            if catalog.get("source_sha256") != hashlib.sha256(str(prepared).encode()).hexdigest():
+                raise ValueError("provider cost catalog has a different source identity")
+            kernels = {kernel["symbol"]: kernel for kernel in catalog["kernels"]}
+            invocations = [kernels[b["symbol"]] for b in catalog["bindings"]]
+            if not invocations:
+                raise ValueError("provider cost catalog has no invoked kernels")
+            instructions = sum(kernel["instructions"] for kernel in invocations)
+            fences = sum(kernel["fences"] for kernel in invocations)
+            if plan.get("numerical_family") == "F1":
+                # The closed F1 contract does no MAC work. Count actual emitted
+                # commands and bound every byte DMA command by a full row.
+                compute = 0
+                memories = [
+                    m
+                    for m in facts.get("facts", facts).get("memories", [])
+                    if m.get("name") == declaration["dma_memory"]
+                ]
+                if len(memories) != 1:
+                    raise ValueError("selected DMA memory row fact unavailable")
+                row_bytes = memories[0]["row_elems"] * memories[0]["elem_bits"] // 8
+                if row_bytes <= 0:
+                    raise ValueError("invalid selected DMA memory row width")
+                roles = declaration["dma_count_roles"]
+                if not isinstance(roles, list) or not roles or not all(isinstance(role, str) for role in roles):
+                    raise ValueError("explicit provider DMA count roles unavailable")
+                commands = sum(kernel["counts"].get(role, 0) for kernel in invocations for role in roles)
+                traffic = max(traffic, commands * row_bytes)
+            count_basis = "source_bound_provider_emitted_instruction_and_fence_counts"
         before_after = host_work(prepared, rates, roots)
         host = host_work(original, rates)
         device_parts = dict(
             dma=traffic * rates["dma_cycles_per_byte"],
             instructions=instructions * rates["instruction_issue_cycles"],
             compute=compute * rates["compute_tile_cycles"],
-            fences=len(roots) * rates["fence_cycles"],
+            fences=fences * rates["fence_cycles"],
             setup=rates["dispatch_cycles"],
             host_pre_post=before_after,
         )
@@ -146,6 +179,8 @@ def estimate(original, prepared, plan, declaration, facts):
             device_parts=device_parts,
             transfer_bytes=traffic,
             instructions=instructions,
+            fences=fences,
+            instruction_count_basis=count_basis,
             producers=len(roots),
             geometry=dict(rows=rows, cols=cols, authority="selected_corroborated_RTL_array"),
         )

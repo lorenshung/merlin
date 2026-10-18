@@ -117,3 +117,26 @@ def test_unprofitable_candidate_restores_original_host_boundary(tmp_path):
     assert report["cases"][0]["input_abi"] == before["cases"][0]["input_abi"]
     stored = json.loads((tmp_path / "spec-int8-admission.json").read_text())
     assert stored["placement_cost"]["status"] == "host"
+
+
+def test_emitted_catalog_counts_override_geometric_estimates():
+    import hashlib
+
+    module = source(16)
+    prepared = plan(module)
+    prepared["numerical_family"] = "F1"
+    prepared["provider_catalog"] = dict(
+        source_sha256=hashlib.sha256(str(module).encode()).hexdigest(),
+        kernels=[dict(symbol="move", instructions=23, fences=3, counts=dict(load_bytes=4, store_bytes=5))],
+        bindings=[dict(symbol="move")],
+    )
+    declaration = dict(DECLARATION, dma_memory="selected_byte_rows", dma_count_roles=["load_bytes", "store_bytes"])
+    facts = copy.deepcopy(FACTS)
+    facts["facts"]["memories"] = [dict(name="selected_byte_rows", row_elems=32, elem_bits=8)]
+    cost = estimate(module, module, prepared, declaration, facts)
+    assert cost["instructions"] == 23 and cost["fences"] == 3
+    assert cost["device_parts"]["compute"] == 0
+    assert cost["transfer_bytes"] == 9 * 32
+    assert cost["instruction_count_basis"] == "source_bound_provider_emitted_instruction_and_fence_counts"
+    prepared["provider_catalog"]["source_sha256"] = "0" * 64
+    assert estimate(module, module, prepared, declaration, facts)["reason_code"] == "placement_cost_unproved"
