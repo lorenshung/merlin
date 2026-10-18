@@ -9,7 +9,8 @@ def prepare(directory, report, implementation, **kwargs):
     from merlin.frontends.linalg_mlir import parse_mlir_text
     from merlin.targetgen.placement_cost import estimate
 
-    declaration = load_yaml(kwargs["software_spec"]).get("placement_cost_model")
+    selected = kwargs.get("software_spec")
+    declaration = load_yaml(selected).get("placement_cost_model") if selected is not None else None
     if declaration is None:
         return implementation(directory, report, **kwargs)
     # Preparation can change the whole exported ABI and its inputs. A rejected
