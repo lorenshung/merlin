@@ -183,6 +183,10 @@ def provider_coverage(module, proof, op) -> str | None:
         return str(exc)
     kernel = kernels[0]
     schedule = kernel.get("schedule", {})
+    if tuple(str(getattr(value.type, "element_type", "")) for value in op.operands[:2]) == ("i32", "i32"):
+        failure = centered_operand_coverage(op, kernel)
+        if failure:
+            return failure
     if any(
         getattr(row.attributes.get("prov.quant.host_only"), "data", None) == "true"
         or getattr(row.attributes.get("prov.quant.numerics"), "data", None) == "float_readout"
@@ -220,6 +224,49 @@ def provider_coverage(module, proof, op) -> str | None:
             return "selected provider has no exact-arithmetic proof for seeded/readout semantics"
     if readout is not None and list(module.walk()).index(readout["operation"]) in binding.get("replaced_ordinals", ()):
         return "selected provider must retain the exact source readout on the host"
+    return None
+
+
+def centered_operand_coverage(op, kernel):
+    """Authenticate the provider's byte-plane proof, never an i32-to-i8 cast.
+
+    The selected provider proves the complete source selector/correction graph
+    and emitted stream. Its enclosing source hash and binding are checked by
+    provider_coverage; this validates the exact representation/readout contract.
+    """
+    schedule = kernel.get("schedule", {})
+    proof = schedule.get("centered_byte_contraction", {})
+    planes = proof.get("operand_planes", [])
+    bounds = proof.get("operand_bounds", [])
+    digests = proof.get("selector_sha256", [])
+    low, high = proof.get("accumulator_min"), proof.get("accumulator_max")
+    if (
+        kernel.get("exact_arithmetic") is not True
+        or kernel.get("device_readout") != "full_i32"
+        or proof.get("version") != 1
+        or proof.get("rule") != "closed_byte_selectors_plus_literal_integer_planes"
+        or proof.get("unsigned_packing") != "xor_0x80_then_add_128"
+        or proof.get("rounding") != "none"
+        or proof.get("device_scales") != "unit"
+        or proof.get("readout") != "full_i32"
+        or proof.get("source_operand_types") != [str(v.type) for v in op.operands[:2]]
+        or len(planes) != 2
+        or any(type(v) is not int or v < 1 for v in planes)
+        or proof.get("product_count") != math.prod(planes)
+        or len(bounds) != 2
+        or any(type(v) is not int or not 0 <= v <= 383 for v in bounds)
+        or len(digests) != 2
+        or any(not isinstance(v, str) or len(v) != 64 or any(c not in "0123456789abcdef" for c in v) for v in digests)
+        or proof.get("prefix_bound") != "abs(seed)+sum_k(sum_plane_abs(A)*sum_plane_abs(B))"
+        or type(low) is not int
+        or type(high) is not int
+        or not -(1 << 31) <= low <= high < (1 << 31)
+        or schedule.get("accumulator_min") != low
+        or schedule.get("accumulator_max") != high
+        or kernel.get("accumulator_min") != low
+        or kernel.get("accumulator_max") != high
+    ):
+        return "centered i32 operands require a source-bound exact byte-product/correction proof and full int32 readout"
     return None
 
 
@@ -262,7 +309,8 @@ def admission_plan(module, selection, *, captured=False, native=False, provider_
         if mq_host_only(op):
             reasons.append("host-only float_readout cannot feed the device")
         seeded = accumulator_init(op) == "int32_seed"
-        if seeded or readout is not None:
+        centered = shape.dtypes == ("i32", "i32", "i32") and (captured or native)
+        if seeded or readout is not None or centered:
             failure = provider_coverage(module, provider_proof, op)
             if failure:
                 reasons.append(failure)
@@ -465,9 +513,13 @@ def admission_plan(module, selection, *, captured=False, native=False, provider_
             if all(steps[-1][a]["status"] == "admitted" for a in ("software", "host")):
                 reasons.extend(readout_refusals(selection, steps[-1]))
         expected = ("i8", "i8", "i32") if captured or native else ("f32", "f32", "f32")
-        if shape.dtypes != expected:
+        if shape.dtypes != expected and not centered:
             reasons.append(f"source dtype {shape.dtypes} is not {expected}")
-        closed = closed_integer_mac(op) if captured or native else closed_float_mac(op)
+        closed = (
+            (closed_centered_integer_mac(op) if centered else closed_integer_mac(op))
+            if captured or native
+            else closed_float_mac(op)
+        )
         if not closed or not (zero_initialised(op) or (seeded and readout is not None)):
             reasons.append(
                 "source is not a closed unflagged MAC from zero (or from an int32 seed it reads out on device)"
@@ -656,13 +708,19 @@ def device_readout(op) -> dict | None:
         or relu not in {"true", "false"}
     ):
         raise ValueError("readout requires finite scales and canonical integer zero_point/quant_min/quant_max")
+    storage_dtype = mq.attr_str(reader, "prov.quant.storage_dtype")
+    storage_min, storage_max = (0, 255) if storage_dtype == "uint8" else (-128, 127)
     if (
         output_dtype == "i8"
-        and not -128 <= parameters["quant_min"] <= parameters["zero_point"] <= parameters["quant_max"] <= 127
+        and not storage_min
+        <= parameters["quant_min"]
+        <= parameters["zero_point"]
+        <= parameters["quant_max"]
+        <= storage_max
     ):
-        raise ValueError("readout quantization bounds do not fit signed i8")
-    if mq.attr_str(reader, "prov.quant.storage_dtype") not in {None, "", "int8" if output_dtype == "i8" else "float32"}:
-        raise ValueError("readout storage dtype does not match signed i8 admission")
+        raise ValueError("readout quantization bounds do not fit declared byte storage")
+    if storage_dtype not in ({None, "", "int8", "uint8"} if output_dtype == "i8" else {None, "", "float32"}):
+        raise ValueError("readout storage dtype does not match its result")
     count = len(ratios or scales)
     granularity = "tensor" if count == 1 else "channel"
     if mq.attr_str(reader, "prov.quant.granularity") not in {None, "", granularity}:
@@ -691,6 +749,7 @@ def device_readout(op) -> dict | None:
         exact_parameters[key] = numbers
     return {
         "output_dtype": output_dtype,
+        "storage_dtype": storage_dtype or ("int8" if output_dtype == "i8" else "float32"),
         "scales": [float(v) for v in scales],
         "scale_ratios": [{"numerator": str(v.numerator), "denominator": str(v.denominator)} for v in ratios],
         "scale_signs": [(v > 0) - (v < 0) for v in (ratios or scales)],
@@ -702,6 +761,31 @@ def device_readout(op) -> dict | None:
         "operation": reader,
         **({"integer_continuation": continuation} if continuation is not None else {}),
     }
+
+
+def closed_centered_integer_mac(op):
+    """A closed i32 MAC is structural only; its byte lowering needs provider proof."""
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import i32
+    from xdsl.dialects.linalg.ops import YieldOp
+
+    if len(op.operands) != 3 or len(op.results) != 1 or not hasattr(op, "body"):
+        return False
+    block = op.body.block
+    if tuple(arg.type for arg in block.args) != (i32, i32, i32) or len(block.ops) != 3:
+        return False
+    mul, add, yielded = list(block.ops)
+    return (
+        all(getattr(v.type, "element_type", None) == i32 for v in (*op.operands, *op.results))
+        and isinstance(mul, arith.MuliOp)
+        and not mul.overflow_flags.data
+        and tuple(mul.operands) == tuple(block.args[:2])
+        and isinstance(add, arith.AddiOp)
+        and not add.overflow_flags.data
+        and tuple(add.operands) in ((mul.result, block.args[2]), (block.args[2], mul.result))
+        and isinstance(yielded, YieldOp)
+        and tuple(yielded.operands) == (add.result,)
+    )
 
 
 def closed_integer_mac(op):
