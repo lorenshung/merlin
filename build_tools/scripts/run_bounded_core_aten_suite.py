@@ -53,6 +53,8 @@ def stamp(args):
         "src/merlin/targetgen/core_aten_w8a8_reference.py",
         "src/merlin/targetgen/exact_arithmetic.py",
         "src/merlin/runtime/exact_readout.py",
+        "src/merlin/llvmlower/exact_quantize.py",
+        "src/merlin/llvmlower/passes_xdsl.py",
         "merlin/contract/quant_schema.json",
         "merlin/contract/quant_schema_source.json",
         "src/merlin/targetgen/exact_quantized_reference.py",

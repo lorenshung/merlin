@@ -63,6 +63,7 @@ def batch_provenance(
             "llvmlower/contraction_quantization.py",
             "llvmlower/torchao_affine.py",
             "llvmlower/passes_xdsl.py",
+            "llvmlower/exact_quantize.py",
             "targetgen/core_aten_semantics.py",
             "targetgen/_m2m_capture_worker.py",
             "targetgen/_capture_result_contract.py",

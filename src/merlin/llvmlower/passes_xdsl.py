@@ -15,9 +15,10 @@ These run before the upstream pipeline:
 from __future__ import annotations
 
 import string
+from collections.abc import Callable
 from dataclasses import dataclass
 from hashlib import sha256
-from typing import Any, Callable
+from typing import Any
 
 from ..frontends.linalg_mlir import make_context, parse_mlir_text  # noqa: F401
 
@@ -241,6 +242,18 @@ def lower_quant_ext(module, *, on_rewrite: Callable[[Any, tuple[Any, ...], Any],
 
     for op, kind in quant_rewrites:
         if kind != "per_tensor":  # pragma: no cover - table is exhaustive
+            continue
+        if getattr(op.attributes.get("prov.aten"), "data", None) == "m2m_q.quantize.default":
+            from merlin.llvmlower.exact_quantize import lower
+
+            replacements, generic = lower(op)
+            carry_provenance(generic, op, "quant_exact_rational")
+            for replacement in replacements:
+                op.parent_block().insert_op_before(replacement, op)
+            if on_rewrite is not None:
+                on_rewrite(op, replacements, generic)
+            op.results[0].replace_all_uses_with(generic.results[0])
+            op.detach()
             continue
         value, scale, zp = op.operands
         out_t = op.results[0].type
@@ -872,7 +885,7 @@ class _Dequant:
     result_type: str
 
 
-def _parse_dequant(line: str) -> "_Dequant | None":
+def _parse_dequant(line: str) -> _Dequant | None:
     """Split a dequantize line into :class:`_Dequant`, or ``None`` if it is not one."""
     body = line.lstrip()
     indent = line[: len(line) - len(body)]
@@ -913,7 +926,7 @@ def _parse_dequant(line: str) -> "_Dequant | None":
             return _Dequant(indent, result, operands, int(body[digits_at:digits_end]), *parsed)
 
 
-def _dequant_to_generic(op: "_Dequant") -> str:
+def _dequant_to_generic(op: _Dequant) -> str:
     ind, res = op.indent, op.result
     init = f"%dq_init_{res[1:]}"  # %123 -> %dq_init_123 (suffixing %123 is invalid)
     wty, sty, zty, outty = (t.strip() for t in (op.weight_type, op.scale_type, op.zero_type, op.result_type))
