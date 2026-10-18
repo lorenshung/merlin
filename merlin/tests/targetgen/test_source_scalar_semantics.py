@@ -1,13 +1,10 @@
 """Bit-exact typed scalar semantics, independent of the target implementation."""
 
-from fractions import Fraction
-
 import numpy as np
 import pytest
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.core_aten_w8a8_reference import evaluate
-from merlin.targetgen.exact_arithmetic import round_binary
 
 
 def source(arguments, result, body):
@@ -117,8 +114,11 @@ def test_unsigned_i64_conversion_avoids_double_rounding(token, p):
     for value in [midpoint - 1, midpoint, midpoint + 1, (1 << 64) - 1]:
         signed = value - (1 << 64)
         actual = run(module, [np.array([signed], np.int64)]).item()
-        assert actual == round_binary(Fraction(value), 32 if token == "f32" else 64)
-        assert actual == dtype(round_binary(Fraction(value), 32 if token == "f32" else 64))
+        expected = (1 << 63) if value <= midpoint else (1 << 63) + (1 << (64 - p))
+        if value == (1 << 64) - 1:
+            expected = 1 << 64
+        assert actual == float(expected)
+        assert actual == dtype(expected)
 
 
 @pytest.mark.parametrize("masked", [False, True])
