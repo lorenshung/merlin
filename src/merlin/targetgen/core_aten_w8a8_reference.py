@@ -160,7 +160,9 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                 y = constant(inner)
             elif name == "arith.bitcast":
                 target = dtype(inner.results[0].type)
-                if xs[0].element_size() != torch.empty((), dtype=target).element_size():
+                source_width = 1 if xs[0].dtype == torch.bool else xs[0].element_size() * 8
+                target_width = 1 if target == torch.bool else torch.empty((), dtype=target).element_size() * 8
+                if source_width != target_width:
                     raise ValueError("source bitcast must preserve storage width")
                 y = xs[0].contiguous().view(target)
                 payload_only = ns[0]
@@ -174,15 +176,21 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                         raise ValueError("source unsigned extension has no wider supported integer storage")
                     y = (xs[0].to(torch.int64) & ((1 << width) - 1)).to(target)
             elif name in {"arith.extf", "arith.truncf", "arith.extsi", "arith.trunci", "arith.sitofp"}:
-                y = xs[0].to(dtype(inner.results[0].type))
+                target = dtype(inner.results[0].type)
+                if name in {"arith.extsi", "arith.sitofp"} and xs[0].dtype == torch.bool:
+                    y = -xs[0].to(target)
+                elif name == "arith.trunci" and target == torch.bool:
+                    y = (xs[0] & 1).to(target)
+                else:
+                    y = xs[0].to(target)
                 if name in {"arith.extf", "arith.truncf"}:
                     payload_only = ns[0]
             elif name in {"arith.addf", "arith.addi"}:
-                y = xs[0] + xs[1]
+                y = xs[0] ^ xs[1] if name == "arith.addi" and xs[0].dtype == torch.bool else xs[0] + xs[1]
             elif name in {"arith.mulf", "arith.muli"}:
                 y = xs[0] * xs[1]
             elif name in {"arith.subf", "arith.subi"}:
-                y = xs[0] - xs[1]
+                y = xs[0] ^ xs[1] if name == "arith.subi" and xs[0].dtype == torch.bool else xs[0] - xs[1]
             elif name == "arith.divf":
                 y = xs[0] / xs[1]
             elif name == "arith.negf":
@@ -244,6 +252,8 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
             elif name == "arith.cmpi":
                 predicate = inner.predicate.value.data
                 left, right = xs
+                if predicate in (2, 3, 4, 5) and left.dtype == torch.bool:
+                    left, right = -left.to(torch.int8), -right.to(torch.int8)
                 if predicate in (6, 7, 8, 9):
                     # Flipping the sign bit maps unsigned order to signed order,
                     # without a narrowing cast or a binary64 bridge for i64.

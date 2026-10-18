@@ -214,3 +214,39 @@ def test_scalar_coefficients_outside_tensor_regions_use_the_same_semantics():
     values, _ = evaluate(module, [], [], quant_min=-128, quant_max=127, eps=2**-12)
     assert values[0].item() == 0.0
     assert values[1].item() == float((1 << 63) + (1 << 40))
+
+
+@pytest.mark.parametrize("value", [2, 3, -2, -1])
+def test_truncation_to_i1_keeps_only_the_low_bit(value):
+    module = source(["i8"], "i1", "%v=arith.trunci %a0 : i8 to i1")
+    assert run(module, [np.array([value], np.int8)]).item() is bool(value & 1)
+
+
+@pytest.mark.parametrize("operation,result", [("arith.extsi", "i8"), ("arith.sitofp", "f32")])
+def test_signed_i1_conversion_sign_extends(operation, result):
+    module = source(["i1"], result, f"%v={operation} %a0 : i1 to {result}")
+    assert run(module, [np.array([True], np.bool_)]).item() == -1
+
+
+@pytest.mark.parametrize("operation", ["addi", "subi"])
+def test_i1_integer_arithmetic_wraps(operation):
+    module = source(["i1", "i1"], "i1", f"%v=arith.{operation} %a0,%a1 : i1")
+    assert run(module, [np.array([True], np.bool_)] * 2).item() is False
+
+
+@pytest.mark.parametrize(
+    "predicate,expected",
+    [
+        ("slt", True),
+        ("sle", True),
+        ("sgt", False),
+        ("sge", False),
+        ("ult", False),
+        ("ule", False),
+        ("ugt", True),
+        ("uge", True),
+    ],
+)
+def test_i1_ordering_uses_the_predicate_signedness(predicate, expected):
+    module = source(["i1", "i1"], "i1", f"%v=arith.cmpi {predicate},%a0,%a1 : i1")
+    assert run(module, [np.array([True], np.bool_), np.array([False], np.bool_)]).item() is expected
