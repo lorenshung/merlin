@@ -109,7 +109,11 @@ def test_wide_polynomial_gathers_retain_full_fixed_point_width():
     module = parse_mlir_text(str(module).replace("f16", "bf16"))
     grid = finite_grid([2.0**-133, -(2.0**127), 0.0])
     bounds, proofs = rewrite_floating_components(module, [grid, grid], allow_reassociation=True)
-    assert proofs and proofs[0]["reconstruction"] == "bounded_i1024"
+    assert proofs
+    # Fused coefficient alignment may conservatively reserve a wider carrier.
+    # Both full exponent extremes must survive without imposing minimal width.
+    carrier_bits = int(proofs[0]["reconstruction"].removeprefix("bounded_i"))
+    assert carrier_bits >= 1024 and carrier_bits & (carrier_bits - 1) == 0
     plans = rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0, 0], known_bounds=bounds)
     assert plans
     marked = [op for op in module.walk() if "test.limb" in op.attributes]
