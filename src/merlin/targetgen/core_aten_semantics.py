@@ -190,19 +190,24 @@ def validate_full(record, raw, readback):
                 metadata_errors.append(f"{key} metadata mismatch")
         if sorted(observation["output_input_aliases"]) != sorted(case["output_input_aliases"]):
             metadata_errors.append(
-                f"output_input_aliases mismatch: expected {case['output_input_aliases']}, got {observation['output_input_aliases']}"
+                f"output_input_aliases mismatch: expected {case['output_input_aliases']}, "
+                f"got {observation['output_input_aliases']}"
             )
 
         value_errors = []
         if case["comparison"] == "torch_close":
-            for indices, abis, expected in [
-                (record["output_indices"], record["output_abi"], _leaves(case["expected"])),
-                (
-                    record["semantic_boundary"]["post_indices"],
-                    record["semantic_boundary"]["post_abi"],
-                    [doc for _, doc in tensor_paths(case["post_arguments"], "")],
-                ),
-            ]:
+            for boundary_index, (indices, abis, expected) in enumerate(
+                [
+                    (record["output_indices"], record["output_abi"], _leaves(case["expected"])),
+                    (
+                        record["semantic_boundary"]["post_indices"],
+                        record["semantic_boundary"]["post_abi"],
+                        [doc for _, doc in tensor_paths(case["post_arguments"], "")],
+                    ),
+                ]
+            ):
+                if boundary_index == 0 and (record.get("native_floor_for_values") or {}).get("status") == "pass":
+                    continue  # The independent exact byte/error gate owns native device values.
                 for index, abi, doc in zip(indices, abis, expected, strict=True):
                     shape = readback["metadata"][index]["shape"]
                     if abi["dtype"].startswith("complex<"):
@@ -212,7 +217,8 @@ def validate_full(record, raw, readback):
                         value_errors.append(f"boundary value mismatch: {verdict}")
         if sorted(observation["mutated_arguments"]) != sorted(case["mutated_arguments"]):
             value_errors.append(
-                f"mutated_arguments mismatch: expected {case['mutated_arguments']}, got {observation['mutated_arguments']}"
+                f"mutated_arguments mismatch: expected {case['mutated_arguments']}, "
+                f"got {observation['mutated_arguments']}"
             )
         errors = metadata_errors + value_errors
         return {

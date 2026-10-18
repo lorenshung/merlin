@@ -33,7 +33,7 @@ _EXPECTED_DTYPES = {
 
 def numeric_policy_counts(verdicts):
     """Count executed result policies; a requested int8 policy grants no result."""
-    policies = ("fp32", "int8_w8a8", "spec_int8", "original_host", "unqualified_spec_int8")
+    policies = ("fp32", "int8_w8a8", "spec_int8", "native_host_exact", "original_host", "unqualified_spec_int8")
     numeric = {lane: dict.fromkeys(policies, 0) for lane in ("host", "device", "unassigned")}
     passed = {lane: dict.fromkeys(policies, 0) for lane in numeric}
     for verdict in verdicts:
@@ -46,6 +46,8 @@ def numeric_policy_counts(verdicts):
             policy = (
                 "original_host"
                 if lane == "host"
+                else "native_host_exact"
+                if policy == "native_host_exact" and verdict.get("host_floor", {}).get("status") == "pass"
                 else "spec_int8"
                 if policy == "spec_int8" and verdict.get("status") == "pass"
                 else "unqualified_spec_int8"
@@ -237,6 +239,14 @@ def grade_core_aten_batch(
         if any(index >= len(output_bytes) for index in indices):
             verdicts[overload] = {"status": "execution_failed", "reason": "hardware did not emit all result indices"}
             continue
+        native_floor = None
+        if (
+            record.get("numeric_admission", {}).get("host_floor", {}).get("status") == "required"
+            and record.get("routing", {}).get("lane") == "device"
+        ):
+            from merlin.targetgen.core_aten_host_floor import grade_native_bits
+
+            native_floor = grade_native_bits(record, output_bytes, execution_error=execution_error)
         details = []
         for index, abi, item in zip(indices, abis, expected):
             if output_shapes is not None:
@@ -255,7 +265,11 @@ def grade_core_aten_batch(
             elif any(d < 0 for d in abi.get("declared_shape", abi["shape"])):
                 details.append({"status": "ungradable", "reason": "dynamic result lacks runtime extent evidence"})
                 continue
-            details.append(_grade_output(output_bytes[index], abi, item, record["case"]))
+            details.append(
+                {"status": "pass", "comparison": native_floor["comparison"]}
+                if native_floor is not None and native_floor["status"] == "pass"
+                else _grade_output(output_bytes[index], abi, item, record["case"])
+            )
         if all(item["status"] == "pass" for item in details):
             status = "pass"
         elif any(item["status"] == "mismatch" for item in details):
@@ -271,7 +285,7 @@ def grade_core_aten_batch(
         }
         from merlin.targetgen.core_aten_semantics import validate_full
 
-        full = validate_full(record, output_bytes, semantic_readback)
+        full = validate_full({**record, "native_floor_for_values": native_floor}, output_bytes, semantic_readback)
         if full is not None:
             verdicts[overload].update(full)
     for record in batch_map["cases"]:
@@ -291,7 +305,7 @@ def grade_core_aten_batch(
                 from merlin.targetgen.core_aten_host_floor import grade_native_bits
 
                 floor = grade_native_bits(record, output_bytes, execution_error=execution_error)
-                verdict["host_floor"] = floor
+                verdict["host_floor"] = {**floor, "case_id": identifier}
                 if floor["status"] != "pass":
                     verdict.update(status=floor["status"], numeric_status=floor["status"], reason=floor["reason"])
             reference = admission.get("integer_reference", {})
@@ -356,7 +370,11 @@ def grade_core_aten_batch(
             )
         if routing.get("lane") == "device" and verdict.get("host_floor", {}).get("status") == "pass":
             verdict["numeric_execution_policy"] = "native_host_exact"
-            verdict["numeric_qualification"] = "native eager storage bits and complete semantic boundary checked"
+            verdict["numeric_qualification"] = "native exactness gate and complete semantic boundary checked"
+            if "observation" in verdict:
+                verdict["observation"]["numeric_reference"] = dict(
+                    policy="native_host_exact", admission_status="admitted", gate=verdict["host_floor"]
+                )
         if record.get("source_preparation"):
             verdict["source_preparation"] = record["source_preparation"]
         if routing.get("lane") == "device" and record["status"] == "bundled":

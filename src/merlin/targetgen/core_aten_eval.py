@@ -209,6 +209,25 @@ def _validate_observation(
         raise AssertionError("unsupported semantic scope")
 
     reference = observation.get("numeric_reference")
+    if reference is not None and reference.get("policy") == "native_host_exact":
+        gate = reference.get("gate", {})
+        if (
+            reference.get("admission_status") != "admitted"
+            or gate.get("status") != "pass"
+            or gate.get("case_id") != case.get("case_id")
+            or not gate.get("results")
+            or any(row.get("status") != "pass" for row in gate["results"])
+            or gate.get("comparison")
+            not in {
+                "exact_native_eager_storage_bits",
+                "exact_rational_error_not_greater_than_native_per_component",
+            }
+        ):
+            raise AssertionError("native dtype policy lacks its complete independent exactness gate")
+        # The exact gate above owns values; sealed eager retains every metadata,
+        # alias, mutation and post-argument contract. No expected value is rewritten.
+        case = {**case, "comparison": "metadata"}
+        reference = None
     if reference is not None:
         gate = reference.get("gate", {})
         if (
