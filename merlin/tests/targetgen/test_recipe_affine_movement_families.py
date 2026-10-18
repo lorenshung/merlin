@@ -167,8 +167,10 @@ for row in rows.values():
   assert "refused" in row or row["family"] == "movement"
   continue
  form = row["integer_recipe"]
+ from fractions import Fraction
  candidate = RN.IntegerRecipe(weights=tuple(form["weights"]), constant=form["constant"],
-                               readout_scale=form["readout_scale"], activation=form["activation"])
+                               readout_scale=Fraction(int(form["scale_numerator"]),int(form["scale_denominator"])),
+                               activation=form["activation"])
  if row["operator"] == "aten.sub.Tensor":
   from merlin.targetgen.exact_quantized_reference import quantize, rational
   grid=np.arange(-128,128)

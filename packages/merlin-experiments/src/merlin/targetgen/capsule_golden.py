@@ -3,7 +3,7 @@
 The golden is computed from the **capsule's declared operation** (not from the package's emitted
 command buffer), so a wrong command buffer is caught by ``golden != reference(cb)``. The arithmetic
 reuses the authoritative, dependency-free :class:`~merlin.runtime.tensor.Tensor` primitives (exact
-int matmul, round-half-even f32 ``acc_scale``, saturating i8 cast) so the golden is bit-identical in
+int matmul, exact rational host ``acc_scale``, saturating i8 cast) so the golden is bit-identical in
 *semantics* to the reference/simulate/oracle paths while being structurally independent.
 
 Leaves are materialized via :meth:`Tensor.deterministic` — the SAME function the command-buffer
@@ -138,7 +138,7 @@ def _apply_epilogue(t: Tensor, attrs: dict, env: dict[str, Tensor], operands: di
                     f"reproduces 'half_even'; grade this datapath against an independent golden.yaml "
                     f"instead of silently rounding half-even"
                 )
-            t = t.requant_acc_scale(float(attrs.get("acc_scale", 1.0)))
+            t = t.requant_acc_scale(attrs.get("acc_scale", 1.0), parameters=attrs)
         elif stage == "relu":
             t = t.relu()
         elif stage == "maxpool":

@@ -1,8 +1,8 @@
 """Prove integer recipes against exact rational quantized arithmetic.
 
-Hardware readout is modeled explicitly as a binary32 multiply. A candidate
-recipe is admitted only after every input code agrees with the rational oracle;
-coefficient approximation alone never establishes exactness.
+Device operations are exact integer math with full int32 readout. The host
+performs one exact rational RNE quantization. Coefficients and seeds must be
+identical before quantization; output-code equivalence cannot license rounding.
 """
 
 from __future__ import annotations
@@ -12,11 +12,12 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from merlin.runtime.exact_readout import requantize_int32
 from merlin.targetgen.exact_arithmetic import quantize, rational
 
 #: The largest integer weight the forms use, as three signed int8 parts of at most 127 each. A weight
 #: is applied as ``sum(part * I)`` contractions into the int32 accumulator, so it never passes an int8
-#: load path. Every proposed form still requires exhaustive exact code equality.
+#: load path. Every proposed form requires exact coefficient and seed equality.
 MAX_WEIGHT = 381
 MAX_PART = 127
 INT32 = (-(2**31), 2**31 - 1)
@@ -31,10 +32,6 @@ def _positive(name: str, value: float) -> float:
     if not math.isfinite(value) or value <= 0:
         raise RecipeNumericsError(f"{name} must be a finite positive scale, got {value!r}")
     return value
-
-
-def _f32(value: float) -> float:
-    return float(np.float32(value))
 
 
 def split_weight(weight: int, part_max: int = MAX_PART) -> tuple[int, ...]:
@@ -52,28 +49,17 @@ def split_weight(weight: int, part_max: int = MAX_PART) -> tuple[int, ...]:
 
 
 def best_rational(ratio: float, *, max_weight: int = MAX_WEIGHT) -> tuple[int, int]:
-    """``(p, q)`` with ``q > 0``, ``|p|, q <= max_weight`` and ``p/q`` closest to ``ratio``.
-
-    Ties prefer the smaller ``q`` (fewer and smaller constant parts).
-    """
-    if not math.isfinite(ratio):
-        raise RecipeNumericsError("ratio must be finite")
-    best = None
-    for q in range(1, max_weight + 1):
-        p = round(ratio * q)
-        if abs(p) > max_weight:
-            continue
-        error = abs(p / q - ratio)
-        if best is None or error < best[0]:
-            best = (error, p, q)
-    if best is None:
-        raise RecipeNumericsError(f"no weight pair within {max_weight} approximates {ratio!r}")
-    return best[1], best[2]
+    """Exact ``(p, q)`` with ``q > 0`` and bounded weights; otherwise refuse."""
+    ratio = rational(ratio)
+    p, q = ratio.numerator, ratio.denominator
+    if abs(p) > max_weight or q > max_weight:
+        raise RecipeNumericsError("exact-arithmetic proof failed: exact coefficient weights exceed the bound")
+    return p, q
 
 
 @dataclass(frozen=True)
 class IntegerRecipe:
-    """``y = sat(RNE(f32(act(sum_i w_i * x_i + constant)) * f32(readout_scale)))``.
+    """``y = clamp(RNE(act(sum_i w_i * x_i + constant) * rational_scale))``.
 
     ``weights`` apply to the int8 operand codes in order; ``constant`` is the int32 accumulator seed;
     ``activation`` is ``none`` or ``relu`` and acts on the accumulator BEFORE the scale, as a readout
@@ -82,7 +68,7 @@ class IntegerRecipe:
 
     weights: tuple[int, ...]
     constant: int
-    readout_scale: float
+    readout_scale: object
     activation: str = "none"
     qmin: int = -128
     qmax: int = 127
@@ -90,6 +76,8 @@ class IntegerRecipe:
     form: str = ""
 
     def __post_init__(self) -> None:
+        if len(self.weights) not in (1, 2):
+            raise RecipeNumericsError("an affine recipe requires at most two tensor operands")
         if not math.isfinite(self.readout_scale):
             raise RecipeNumericsError("readout scale must be finite")
         if self.activation not in {"none", "relu"}:
@@ -128,7 +116,12 @@ class IntegerRecipe:
             "weights": list(self.weights),
             "weight_parts": [list(parts) for parts in self.parts()],
             "constant": self.constant,
-            "readout_scale": self.readout_scale,
+            "readout": "full_i32",
+            "requantization": "exact_rational_host",
+            "scale_numerator": str(rational(self.readout_scale).numerator),
+            "scale_denominator": str(rational(self.readout_scale).denominator),
+            "zero_point": 0,
+            "rounding": "half_to_even",
             "activation": self.activation,
             "quant_min": self.qmin,
             "quant_max": self.qmax,
@@ -137,15 +130,21 @@ class IntegerRecipe:
 
 
 def readout(accumulator, scale: float, *, relu: bool = False, qmin: int = -128, qmax: int = 127) -> np.ndarray:
-    """Accumulator -> int8 code: optional ReLU, one binary32 multiply, round half to even, saturate."""
-    values = np.asarray(accumulator, dtype=np.int64)
+    """Full-width int32 accumulator -> exact host RNE and saturation."""
+    values = np.asarray(accumulator)
     if relu:
         values = np.maximum(values, 0)
-    if np.any(np.abs(values) >= 2**24):
-        # binary32 holds every integer below 2^24 exactly; beyond it the conversion itself rounds.
-        raise RecipeNumericsError("accumulator values at or beyond 2^24 are not exact in binary32")
-    product = values.astype(np.float32) * np.float32(scale)
-    return np.clip(np.rint(product), qmin, qmax).astype(np.int64)
+    coefficient = rational(scale)
+    try:
+        return requantize_int32(
+            values,
+            scale_numerator=coefficient.numerator,
+            scale_denominator=coefficient.denominator,
+            quant_min=qmin,
+            quant_max=qmax,
+        )
+    except ValueError as exc:
+        raise RecipeNumericsError(str(exc)) from exc
 
 
 def linear_combination(
@@ -161,7 +160,7 @@ def linear_combination(
 ) -> IntegerRecipe:
     """``y = (s_a*a + sign_b*s_b*b)/s_out`` (add.Tensor, sub.Tensor with ``sign_b=-1``).
 
-    ``Wa/Wb`` is the best rational approximation of ``s_a/s_b`` within ``max_weight``; the minus of a
+    ``Wa/Wb`` is the exact rational representation of ``s_a/s_b`` within ``max_weight``; the minus of a
     subtraction is the sign of ``Wb``, applied in the int32 accumulator and never to an int8 operand
     (negating -128 on a load saturates). The readout scale is ``s_a/(s_out*Wa)``.
     """
@@ -170,17 +169,17 @@ def linear_combination(
     )
     if sign_b not in (1, -1):
         raise RecipeNumericsError("sign_b must be +1 or -1")
-    wb, wa = best_rational(float(s_b / s_a), max_weight=max_weight)
+    wb, wa = best_rational(s_b / s_a, max_weight=max_weight)
     if wb == 0:
         raise RecipeNumericsError(f"s_b/s_a = {s_b / s_a!r} rounds to a zero weight within {max_weight}")
     recipe = IntegerRecipe(
         weights=(wa, sign_b * wb),
         constant=0,
-        readout_scale=_f32(s_a / (s_out * wa)),
+        readout_scale=s_a / (s_out * wa),
         activation=activation,
         qmin=qmin,
         qmax=qmax,
-        ratio_error=abs(wb / wa - s_b / s_a) / (s_b / s_a),
+        ratio_error=0,
         form="linear_combination",
     )
     return prove_recipe(recipe, (s_a / s_out, sign_b * s_b / s_out))
@@ -214,27 +213,21 @@ def affine(
         recipe = IntegerRecipe(
             weights=(1,),
             constant=0,
-            readout_scale=_f32(gain * s_x / s_out),
+            readout_scale=gain * s_x / s_out,
             activation=activation,
             qmin=qmin,
             qmax=qmax,
             form="affine",
         )
         return prove_recipe(recipe, (gain * s_x / s_out,), offset / s_out)
-    best = None
-    for g in range(1, max_weight + 1):
-        seed = round(g * shift)
-        error = abs(g * shift - seed) / g
-        if best is None or error < best[0]:
-            best = (error, g, seed)
-        if error <= tolerance:
-            best = (error, g, seed)
-            break
-    error, g, seed = best
+    g, seed = shift.denominator, shift.numerator
+    if g > max_weight:
+        raise RecipeNumericsError("exact-arithmetic proof failed: affine seed requires unbounded integer weights")
+    error = 0
     recipe = IntegerRecipe(
         weights=(g,),
         constant=int(seed),
-        readout_scale=_f32(gain * s_x / (s_out * g)),
+        readout_scale=gain * s_x / (s_out * g),
         activation=activation,
         qmin=qmin,
         qmax=qmax,
@@ -245,7 +238,13 @@ def affine(
 
 
 def prove_recipe(recipe, coefficients, offset=0):
-    """Exhaust the full signed-i8 Cartesian domain; a single mismatch refuses."""
+    """Require identical intermediate coefficients, then exhaust the signed-i8 code domain."""
+    factor = rational(recipe.readout_scale)
+    if (
+        any(rational(c) != w * factor for c, w in zip(coefficients, recipe.weights, strict=True))
+        or rational(offset) != recipe.constant * factor
+    ):
+        raise RecipeNumericsError("exact-arithmetic proof failed: intermediate arithmetic differs")
     codes = np.arange(-128, 128)
     inputs = np.meshgrid(*([codes] * len(coefficients)), indexing="ij")
     values = np.full(inputs[0].shape, rational(offset), dtype=object)
@@ -264,18 +263,20 @@ def prove_recipe(recipe, coefficients, offset=0):
 def requantize(s_in: float, s_out: float, *, qmin=-128, qmax=127) -> dict:
     """A movement between two scales: an exact copy when equal, else one rounding at ``s_in/s_out``.
 
-    A load-path scale rounds once and saturates, which matches the reference requantization exactly
-    (cat with independent input scales measured 100 %), so a movement never needs the accumulator.
+    Scaling runs on the host in exact rational arithmetic; it is never an approximate MVIN scale.
     """
     s_in, s_out = _positive("s_in", s_in), _positive("s_out", s_out)
-    if s_in == s_out:
-        return {"form": "copy", "scale": 1.0}
-    scale = _f32(s_in / s_out)
-    codes = np.arange(-128, 128)
-    expected = quantize(codes * rational(s_in), s_out, quant_min=qmin, quant_max=qmax)
-    if not np.array_equal(readout(codes, scale, qmin=qmin, qmax=qmax), expected):
-        raise RecipeNumericsError("scaled copy fails exact-arithmetic proof")
-    return {"form": "scaled_copy", "scale": scale}
+    ratio = rational(s_in) / rational(s_out)
+    return dict(
+        form="copy" if ratio == 1 else "host_requant",
+        readout="full_i32",
+        scale_numerator=str(ratio.numerator),
+        scale_denominator=str(ratio.denominator),
+        zero_point=0,
+        quant_min=qmin,
+        quant_max=qmax,
+        rounding="half_to_even",
+    )
 
 
 def constant_code(value: float, s_out: float, *, qmin: int = -128, qmax: int = 127) -> int:
@@ -294,14 +295,7 @@ def window_mean_readout(s_in: float, divisor: int, s_out: float, *, qmin=-128, q
     if type(divisor) is not int or divisor < 1:
         raise RecipeNumericsError("divisor must be a positive integer count")
     ratio = rational(_positive("s_in", s_in)) / (divisor * rational(_positive("s_out", s_out)))
-    if divisor * 256 > 262144:
-        raise RecipeNumericsError("window sum domain exceeds the exhaustive proof limit")
-    scale = _f32(ratio)
-    sums = np.arange(-128 * divisor, 127 * divisor + 1)
-    expected = quantize(sums * ratio, 1, quant_min=qmin, quant_max=qmax)
-    if not np.array_equal(readout(sums, scale, qmin=qmin, qmax=qmax), expected):
-        raise RecipeNumericsError("window readout fails exact-arithmetic proof")
-    return scale
+    return ratio
 
 
 def narrow_range(qmax: int = 127) -> tuple[int, int]:

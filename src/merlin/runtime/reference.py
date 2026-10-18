@@ -89,6 +89,12 @@ _CONV2D_ATTRS = frozenset(
         "epilogue",
         "output_dtype",
         "acc_scale",
+        "scale_numerator",
+        "scale_denominator",
+        "zero_point",
+        "quant_min",
+        "quant_max",
+        "rounding",
         "requant_shift",
         "semantic",
         "pool_in_dims",
@@ -100,7 +106,21 @@ _CONV2D_ATTRS = frozenset(
     }
 )
 
-_ATTENTION_ATTRS = frozenset({"epilogue", "output_dtype", "acc_scale", "requant_shift", "semantic"})
+_ATTENTION_ATTRS = frozenset(
+    {
+        "epilogue",
+        "output_dtype",
+        "acc_scale",
+        "requant_shift",
+        "semantic",
+        "scale_numerator",
+        "scale_denominator",
+        "zero_point",
+        "quant_min",
+        "quant_max",
+        "rounding",
+    }
+)
 
 
 def _conv_geom(attrs: dict[str, Any], key: str, arity: int, default: list[int]) -> tuple[int, ...]:
@@ -136,7 +156,7 @@ def _attention_epilogue(t: Tensor, attrs: dict[str, Any], default_shift: int, op
         raise ValueError(f"{op} does not implement attribute(s) {unknown}; it implements {sorted(_ATTENTION_ATTRS)}")
     for stage in attrs.get("epilogue", []):
         if stage == "acc_scale":
-            t = t.requant_acc_scale(float(attrs.get("acc_scale", 1.0)))
+            t = t.requant_acc_scale(attrs.get("acc_scale", 1.0), parameters=attrs)
         elif stage == "requant":
             t = t.requant(int(attrs.get("requant_shift", default_shift)))
         elif stage == "relu":
@@ -223,7 +243,7 @@ def _conv2d(
                 raise ValueError(f"CONV2D {dst!r}: a bias stage is declared and no bias tensor was resolved")
             result = result.add_bias(bias)
         elif stage == "acc_scale":
-            result = result.requant_acc_scale(declared_acc_scale(attrs, op=f"CONV2D {dst!r}"))
+            result = result.requant_acc_scale(declared_acc_scale(attrs, op=f"CONV2D {dst!r}"), parameters=attrs)
         elif stage == "requant":
             result = result.requant(int(attrs.get("requant_shift", default_shift)))
         elif stage == "relu":
@@ -269,7 +289,7 @@ def reference_outputs(cb: dict[str, Any], inputs: dict[str, Any] | None = None) 
             elif stage == "requant":
                 t = t.requant(shift)
             elif stage == "acc_scale":
-                t = t.requant_acc_scale(float(attrs.get("acc_scale", 1.0)))
+                t = t.requant_acc_scale(attrs.get("acc_scale", 1.0), parameters=attrs)
             elif stage == "relu":
                 t = t.relu()
             elif stage == "maxpool":
@@ -390,7 +410,7 @@ def reference_outputs(cb: dict[str, Any], inputs: dict[str, Any] | None = None) 
             # could only be graded by abandoning the opcode the interface grammar defines for it.
             q, k, dst = ops["q"], ops["k"], ops["dst"]
             qt, kt = env[q], env[k]
-            (m, d), (n, d2) = qt.shape, kt.shape
+            (_, d), (n, d2) = qt.shape, kt.shape
             if d != d2:
                 raise ValueError(f"ATTENTION_QK head-dim mismatch: {q}{qt.shape} vs {k}{kt.shape}")
             k_t = Tensor((d, n), [kt.data[i * d + j] for j in range(d) for i in range(n)], kt.dtype)
@@ -402,7 +422,7 @@ def reference_outputs(cb: dict[str, Any], inputs: dict[str, Any] | None = None) 
             # right operand; that distinction is the native ABI, not an optional attribute.
             p, v, dst = ops["p"], ops["v"], ops["dst"]
             pt, vt = env[p], env[v]
-            (m, s), (s2, _) = pt.shape, vt.shape
+            (_, s), (s2, _) = pt.shape, vt.shape
             if s != s2:
                 raise ValueError(f"ATTENTION_PV key-count mismatch: {p}{pt.shape} vs {v}{vt.shape}")
             t = _attention_epilogue(pt.matmul(vt), attrs, default_shift, f"ATTENTION_PV {dst!r}")

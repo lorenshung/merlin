@@ -74,9 +74,9 @@ def quantize(value, scale, zero_point=0, quant_min=-128, quant_max=127, *, axis=
         raise ValueError("invalid integer quantization range")
     values = exact_array(value)
     scales, zeros = _parameters(scale, zero_point, axis, values.ndim)
-    return np.vectorize(lambda x, s, z: min(quant_max, max(quant_min, round(x / s) + int(z))), otypes=[np.int64])(
-        values, scales, zeros
-    )
+    from merlin.runtime.exact_readout import round_rational_codes
+
+    return round_rational_codes(values / scales, np.vectorize(int, otypes=[object])(zeros), quant_min, quant_max)
 
 
 @dataclass

@@ -264,6 +264,8 @@ def declared_acc_scale(attrs: dict[str, Any], *, op: str) -> float:
     passes for a reason unrelated to what it tests.
     """
     value = (attrs or {}).get("acc_scale")
+    if "scale_numerator" in attrs and "scale_denominator" in attrs:
+        return 1.0  # Informational legacy scalar; the exact pair is consumed by the host readout API.
     if value is None:
         raise ValueError(
             f"{op}: an 'acc_scale' epilogue stage is declared and the command names no `acc_scale` "

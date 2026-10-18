@@ -20,7 +20,7 @@ def quantize_codes(x, scale, *, quant_min, quant_max):
 
 
 def quantize_operand(original, *, quant_min, quant_max, eps):
-    """Independent reciprocal-first f32 RNE oracle, including runtime NaN rule."""
+    """Observe the runtime f32 calibration scale, then quantize by exact rational RNE."""
     import torch
 
     x = original.float()
@@ -290,12 +290,13 @@ def run_pt2e_reference(model, inputs):
     return run(model, inputs)
 
 
-def selected_pt2e_reference(model, inputs, *, declared_readout=False, numerics="float_readout"):
+def selected_pt2e_reference(model, inputs, *, declared_readout=False, numerics="integer_readout"):
     """Bind the exact-arithmetic oracle independently of the chosen lowering numerics."""
     import copy
     import hashlib
     from pathlib import Path
 
+    from merlin.runtime import exact_readout
     from merlin.targetgen import exact_arithmetic, exact_quantized_reference
 
     if numerics not in {"float_readout", "integer_readout"}:
@@ -310,7 +311,11 @@ def selected_pt2e_reference(model, inputs, *, declared_readout=False, numerics="
             {
                 "path": str(Path(exact_arithmetic.__file__).resolve()),
                 "sha256": hashlib.sha256(Path(exact_arithmetic.__file__).read_bytes()).hexdigest(),
-            }
+            },
+            {
+                "path": str(Path(exact_readout.__file__).resolve()),
+                "sha256": hashlib.sha256(Path(exact_readout.__file__).read_bytes()).hexdigest(),
+            },
         ],
     }
     return run_pt2e_reference(model, copy.deepcopy(inputs)), identity

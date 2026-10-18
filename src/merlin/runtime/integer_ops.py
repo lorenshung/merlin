@@ -2,8 +2,7 @@
 
 ``AFFINE_MAP``, the movement forms of ``MOVEMENT``, ``CONCAT``, ``INSERT_SLICE`` and ``FILL`` are defined
 ONCE, here, and the reference engine, the command-buffer simulator and the capsule golden all call these
-functions. Three engines that each restated "round half to even after one binary32 multiply" would be
-three chances to disagree about the one thing an exact-integer grade checks.
+functions. Host requantization uses one exact rational RNE boundary shared by every engine.
 
 Every attribute an opcode needs is read and validated here, and an absent required attribute or an
 unknown one is refused by name (:class:`IntegerOpError`) rather than defaulted: an engine that applied a
@@ -16,9 +15,14 @@ weights and an int32 constant in the accumulator, ReLU on the accumulator, then 
 
 from __future__ import annotations
 
+from fractions import Fraction
+from math import lcm as integer_lcm
 from typing import Any
 
 import numpy as np
+
+from merlin.runtime.exact_readout import _integer, requantize_int32
+from merlin.targetgen.exact_arithmetic import rational
 
 from .tensor import Tensor
 
@@ -29,8 +33,9 @@ class IntegerOpError(ValueError):
 
 #: Integer container ranges an output may saturate into.
 _RANGES = {"i8": (-128, 127), "i16": (-(2**15), 2**15 - 1), "i32": (-(2**31), 2**31 - 1)}
+_EXACT_ATTRS = {"scale_numerator", "scale_denominator", "zero_point", "rounding"}
 _AFFINE_ATTRS = frozenset(
-    {"weights", "constant", "activation", "readout_scale", "output_dtype", "quant_min", "quant_max"}
+    {"weights", "constant", "activation", "readout_scale", "output_dtype", "quant_min", "quant_max"} | _EXACT_ATTRS
 )
 _MOVE_FORMS = {
     "identity": frozenset(),
@@ -40,7 +45,9 @@ _MOVE_FORMS = {
     "broadcast": frozenset(),
     "repeat": frozenset({"repeats"}),
 }
-_MOVE_COMMON = frozenset({"form", "output_dtype", "semantic", "scale", "quant_min", "quant_max", "value_code"})
+_MOVE_COMMON = frozenset(
+    {"form", "output_dtype", "semantic", "scale", "quant_min", "quant_max", "value_code"} | _EXACT_ATTRS
+)
 
 
 def _array(t: Tensor) -> np.ndarray:
@@ -70,33 +77,57 @@ def _range(attrs: dict[str, Any], dtype: str, *, op: str) -> tuple[int, int]:
     return qmin, qmax
 
 
+def _scale(attrs, legacy_key):
+    if "scale_numerator" in attrs or "scale_denominator" in attrs:
+        try:
+            n, d = attrs["scale_numerator"], attrs["scale_denominator"]
+            if isinstance(n, list):
+                (n,) = n
+            if isinstance(d, list):
+                (d,) = d
+            if _integer(d) <= 0:
+                raise ValueError("nonpositive scale denominator")
+            return Fraction(_integer(n), _integer(d))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise IntegerOpError("paired scalar integer scale numerator/positive denominator required") from exc
+    return rational(attrs[legacy_key]) if legacy_key in attrs else None
+
+
 def _requantize(values: np.ndarray, attrs: dict[str, Any], dtype: str, *, op: str, scale: Any = None) -> np.ndarray:
-    """One load-path rounding at ``scale`` (when stated), saturated into the output range."""
-    scale = attrs.get("scale") if scale is None else scale
-    if scale is None:
+    """Exact host RNE, zero-point addition and clamp; no scaled MVIN semantics."""
+    coefficient = _scale(attrs, "scale") if scale is None else rational(scale)
+    if coefficient is None:
         return values
-    if not isinstance(scale, (int, float)) or not np.isfinite(scale):
-        raise IntegerOpError(f"{op}: scale must be a finite number")
     qmin, qmax = _range(attrs, dtype, op=op)
-    product = values.astype(np.float32) * np.float32(scale)
-    return np.clip(np.rint(product), qmin, qmax).astype(np.int64)
+    try:
+        return requantize_int32(
+            values,
+            scale_numerator=coefficient.numerator,
+            scale_denominator=coefficient.denominator,
+            zero_point=attrs.get("zero_point", 0),
+            quant_min=qmin,
+            quant_max=qmax,
+            rounding=attrs.get("rounding", "half_to_even"),
+        )
+    except ValueError as exc:
+        raise IntegerOpError(f"{op}: {exc}") from exc
 
 
 def affine_map(x: Tensor, y: Tensor | None, attrs: dict[str, Any], *, op: str = "AFFINE_MAP") -> Tensor:
-    """``dst = sat(RNE(f32(act(w0*x + w1*y + constant)) * f32(readout_scale)))``; see the ABI."""
+    """Exact integer affine map followed by one rational host quantization."""
     from merlin.targetgen.recipe_numerics import IntegerRecipe, RecipeNumericsError
 
     unknown = sorted(set(attrs) - _AFFINE_ATTRS - {"name"})
     if unknown:
         raise IntegerOpError(f"{op}: unknown attribute(s) {unknown}")
-    missing = sorted({"weights", "constant", "activation", "readout_scale", "output_dtype"} - set(attrs))
+    missing = sorted({"weights", "constant", "activation", "output_dtype"} - set(attrs))
     if missing:
         raise IntegerOpError(f"{op}: required attribute(s) {missing} absent; no default is applied")
     weights = _int_list(attrs, "weights", op=op)
     if len(weights) != (1 if y is None else 2):
         raise IntegerOpError(f"{op}: {len(weights)} weight(s) for {1 if y is None else 2} operand(s)")
-    constant, scale, dtype = attrs["constant"], attrs["readout_scale"], str(attrs["output_dtype"])
-    if type(constant) is not int or not isinstance(scale, (int, float)):
+    constant, scale, dtype = attrs["constant"], _scale(attrs, "readout_scale"), str(attrs["output_dtype"])
+    if type(constant) is not int or scale is None:
         raise IntegerOpError(f"{op}: constant must be an integer and readout_scale a number")
     qmin, qmax = _range(attrs, dtype, op=op)
     a = _array(x)
@@ -110,7 +141,7 @@ def affine_map(x: Tensor, y: Tensor | None, attrs: dict[str, Any], *, op: str = 
         operands.append(np.broadcast_to(b, a.shape))
     try:
         if dtype == "i32":
-            if float(scale) != 1.0:
+            if scale != 1 or attrs.get("zero_point", 0) != 0:
                 raise IntegerOpError(f"{op}: an i32 result has no readout; readout_scale must be 1.0")
             accumulator = sum(w * v for w, v in zip(weights, operands, strict=True)) + constant
             if attrs["activation"] == "relu":
@@ -123,12 +154,24 @@ def affine_map(x: Tensor, y: Tensor | None, attrs: dict[str, Any], *, op: str = 
         recipe = IntegerRecipe(
             weights=tuple(weights),
             constant=constant,
-            readout_scale=float(scale),
+            readout_scale=scale,
             activation=str(attrs["activation"]),
             qmin=qmin,
             qmax=qmax,
         )
-        return _tensor(recipe.evaluate(*operands), dtype)
+        # Preserve the unrounded accumulator for the one host quantize boundary.
+        accumulator = sum(w * v for w, v in zip(weights, operands, strict=True)) + constant
+        if recipe.activation == "relu":
+            accumulator = np.maximum(accumulator, 0)
+        return _tensor(
+            _requantize(
+                accumulator,
+                {**attrs, "scale_numerator": str(scale.numerator), "scale_denominator": str(scale.denominator)},
+                dtype,
+                op=op,
+            ),
+            dtype,
+        )
     except RecipeNumericsError as exc:
         raise IntegerOpError(f"{op}: {exc}") from exc
 
@@ -314,8 +357,10 @@ _WINDOW_MODES = {
     "adaptive_transpose": frozenset(),
     "fold": frozenset({"kernel", "stride", "padding", "dilation"}),
 }
-_WINDOW_OPTIONAL = frozenset({"ceil_mode", "divisor_override", "layout", "quant_min", "quant_max", "name"})
-_WINDOW_COMMON = frozenset({"mode", "readout_scale", "output_dtype"})
+_WINDOW_OPTIONAL = frozenset(
+    {"ceil_mode", "divisor_override", "layout", "quant_min", "quant_max", "name", "readout_scale"} | _EXACT_ATTRS
+)
+_WINDOW_COMMON = frozenset({"mode", "output_dtype"})
 
 
 def _spatial_axes(rank: int, spatial: int, layout: str, *, op: str) -> list[int]:
@@ -357,13 +402,6 @@ def _adaptive_windows(size: int, out: int):
     ]
 
 
-def _readout(acc: np.ndarray, scale: np.ndarray, qmin: int, qmax: int) -> np.ndarray:
-    if np.any(np.abs(acc) >= 2**24):
-        raise IntegerOpError("WINDOW_SUM accumulator values at or beyond 2^24 are not exact in binary32")
-    product = acc.astype(np.float32) * scale.astype(np.float32)
-    return np.clip(np.rint(product), qmin, qmax).astype(np.int64)
-
-
 def window_sum(src: Tensor, attrs: dict[str, Any], dst_shape: list[int] | None, *, op: str = "WINDOW_SUM") -> Tensor:
     """Exact integer window sums with one readout per output; see the ABI's WINDOW_SUM entry."""
     mode = attrs.get("mode")
@@ -378,8 +416,8 @@ def window_sum(src: Tensor, attrs: dict[str, Any], dst_shape: list[int] | None, 
         raise IntegerOpError(f"{op}: mode {mode!r} requires {missing}; no default is applied")
     dtype = str(attrs["output_dtype"])
     qmin, qmax = _range(attrs, dtype, op=op)
-    scale = attrs["readout_scale"]
-    if not isinstance(scale, (int, float)) or not np.isfinite(scale) or scale <= 0:
+    scale = _scale(attrs, "readout_scale")
+    if scale is None or scale <= 0:
         raise IntegerOpError(f"{op}: readout_scale must be a finite positive number")
     if dst_shape is None:
         raise IntegerOpError(f"{op}: the destination shape must be declared")
@@ -400,8 +438,8 @@ def window_sum(src: Tensor, attrs: dict[str, Any], dst_shape: list[int] | None, 
         acc = acc.reshape(target) if acc.size == int(np.prod(target)) else None
         if acc is None:
             raise IntegerOpError(f"{op}: the reduced shape does not match the declared {list(target)}")
-        counts = np.full(acc.shape, divisor or count, dtype=np.float64)
-        return _finish(acc, counts, float(scale), dtype, qmin, qmax, op=op)
+        counts = np.full(acc.shape, divisor or count, dtype=np.int64)
+        return _finish(acc, counts, scale, dtype, qmin, qmax, op=op, attrs=attrs)
 
     if mode == "fold":
         kernel = _int_list(attrs, "kernel", op=op)
@@ -428,7 +466,7 @@ def window_sum(src: Tensor, attrs: dict[str, Any], dst_shape: list[int] | None, 
                 ]
                 if all(0 <= q < size for q, size in zip(position, out_sizes, strict=True)):
                     acc[(slice(None), slice(None), *position)] += columns[(slice(None), slice(None), *tap, *block)]
-        return _finish(acc, np.ones(acc.shape), float(scale), dtype, qmin, qmax, op=op)
+        return _finish(acc, np.ones(acc.shape, dtype=np.int64), scale, dtype, qmin, qmax, op=op, attrs=attrs)
 
     transpose = mode.endswith("_transpose")
     source_shape = target if transpose else a.shape
@@ -468,7 +506,7 @@ def window_sum(src: Tensor, attrs: dict[str, Any], dst_shape: list[int] | None, 
     grid = [range(len(windows)) for windows in per_dim]
     if not transpose:
         acc = np.zeros(target, dtype=np.int64)
-        counts = np.ones(target, dtype=np.float64)
+        counts = np.ones(target, dtype=np.int64)
         for window_index in np.ndindex(*[len(g) for g in grid]):
             out_index = [slice(None)] * a.ndim
             for ax, w in zip(axes, window_index, strict=True):
@@ -476,26 +514,39 @@ def window_sum(src: Tensor, attrs: dict[str, Any], dst_shape: list[int] | None, 
             total = a[region(window_index)].sum(axis=tuple(axes), keepdims=True)
             acc[tuple(out_index)] = total
             counts[tuple(out_index)] = window_count(window_index)
-        return _finish(acc, counts, float(scale), dtype, qmin, qmax, op=op)
+        return _finish(acc, counts, scale, dtype, qmin, qmax, op=op, attrs=attrs)
     # Transposed (a pool backward): each window's value spreads over the positions it covers, divided by
     # that window's count. Stated with integer weights L/count_w (L the least common multiple of every
     # count) into one int32 accumulator and the single readout readout_scale/L.
     windows = list(np.ndindex(*[len(g) for g in grid]))
-    lcm = int(np.lcm.reduce([window_count(w) for w in windows])) if windows else 1
+    lcm = integer_lcm(*(window_count(w) for w in windows)) if windows else 1
     acc = np.zeros(target, dtype=np.int64)
     for window_index in windows:
         source_index = [slice(None)] * a.ndim
         for ax, w in zip(axes, window_index, strict=True):
             source_index[ax] = slice(w, w + 1)
         acc[region(window_index)] += a[tuple(source_index)] * (lcm // window_count(window_index))
-    return _finish(acc, np.full(target, lcm, dtype=np.float64), float(scale), dtype, qmin, qmax, op=op)
+    return _finish(acc, np.full(target, lcm, dtype=np.int64), scale, dtype, qmin, qmax, op=op, attrs=attrs)
 
 
-def _finish(acc, counts, scale, dtype, qmin, qmax, *, op) -> Tensor:
+def _finish(acc, counts, scale, dtype, qmin, qmax, *, op, attrs) -> Tensor:
+    if np.any(acc < -(2**31)) or np.any(acc > 2**31 - 1):
+        raise IntegerOpError(f"{op}: int32 accumulation overflow")
     if dtype == "i32":
-        if scale != 1.0 or np.any(counts != 1):
+        if scale != 1 or np.any(counts != 1) or attrs.get("zero_point", 0) != 0:
             raise IntegerOpError(f"{op}: an i32 result has no readout; it needs readout_scale 1.0 and no divisor")
         return _tensor(acc, dtype)
-    # One binary32 scale per output: readout_scale / count, rounded once to binary32.
-    per_output = (np.float64(scale) / counts).astype(np.float32)
-    return _tensor(_readout(acc, per_output, qmin, qmax), dtype)
+    ratios = [rational(scale) / int(count) for count in counts.flat]
+    try:
+        result = requantize_int32(
+            acc.reshape(-1),
+            scale_numerator=[r.numerator for r in ratios],
+            scale_denominator=[r.denominator for r in ratios],
+            quant_min=qmin,
+            quant_max=qmax,
+            zero_point=attrs.get("zero_point", 0),
+            rounding=attrs.get("rounding", "half_to_even"),
+        )
+    except ValueError as exc:
+        raise IntegerOpError(f"{op}: {exc}") from exc
+    return _tensor(result.reshape(acc.shape), dtype)

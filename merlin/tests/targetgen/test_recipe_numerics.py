@@ -62,29 +62,28 @@ def test_former_near_exact_recipes_are_refused():
         RN.affine(0.1, 0.1, tolerance=1e-6)
 
 
-def test_binary32_readout_is_modeled_explicitly():
+def test_full_int32_readout_is_exact_without_float_cast():
     assert list(RN.readout(np.array([1, 3, 5, -1, -3]), 0.5)) == [0, 2, 2, 0, -2]
     assert list(RN.readout(np.array([-5, 5]), 1.0, relu=True)) == [0, 5]
-    with pytest.raises(RN.RecipeNumericsError):
-        RN.readout(np.array([2**24]), 1.0)
+    assert RN.readout(np.array([2**24 + 1]), 1.5, qmin=-(2**31), qmax=2**31 - 1).tolist() == [25165826]
 
 
 def test_movement_and_windows_prove_every_reachable_sum():
-    assert RN.requantize(0.1, 0.1) == {"form": "copy", "scale": 1.0}
+    copy = RN.requantize(0.1, 0.1)
+    assert copy["form"] == "copy" and copy["scale_numerator"] == copy["scale_denominator"] == "1"
     assert RN.constant_code(0.5, 0.25) == 2
     assert RN.constant_code(float("-inf"), 0.1) == -128
     with pytest.raises(RN.RecipeNumericsError, match="NaN"):
         RN.constant_code(float("nan"), 0.1)
     assert RN.window_mean_readout(0.25, 4, 0.5) == 0.125
-    with pytest.raises(RN.RecipeNumericsError, match="exact-arithmetic proof"):
-        RN.window_mean_readout(0.03, 2, 0.01)
+    assert RN.window_mean_readout(0.03, 2, 0.01) == Fraction(0.03) / (2 * Fraction(0.01))
     assert RN.split_weight(381) == (127, 127, 127)
 
 
 def test_inexpressible_parameters_refuse():
     with pytest.raises(RN.RecipeNumericsError, match="positive"):
         RN.linear_combination(0.0, 0.1, 0.1)
-    with pytest.raises(RN.RecipeNumericsError, match="zero weight"):
+    with pytest.raises(RN.RecipeNumericsError, match="exact coefficient weights"):
         RN.linear_combination(1.0, 1e-6, 0.1)
     with pytest.raises(RN.RecipeNumericsError, match="divisor"):
         RN.window_mean_readout(0.1, 0, 0.1)

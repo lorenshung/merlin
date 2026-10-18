@@ -23,7 +23,11 @@ def _per_tensor_scale(node: Any, operator: str) -> float | None:
     ):
         return None
     scale = node.args[1] if len(node.args) > 1 else None
-    return float(scale) if isinstance(scale, (int, float)) else None
+    if not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale <= 0:
+        return None
+    from merlin.targetgen.exact_arithmetic import round_binary
+
+    return float(scale) if round_binary(scale) == scale else None
 
 
 def _window_divisor(node: Any) -> int | None:
@@ -83,11 +87,16 @@ def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
         if family is None:
             continue
         name = str(node.target)
-        inputs = [
-            _per_tensor_scale(arg, "quantized_decomposed.dequantize_per_tensor")
-            for arg in (node.args[0] if name.startswith("aten.cat") else node.args)
-            if hasattr(arg, "op")
-        ]
+        shape_only = name.startswith(("aten.full_like.", "aten.zeros_like.", "aten.ones_like."))
+        inputs = (
+            []
+            if shape_only
+            else [
+                _per_tensor_scale(arg, "quantized_decomposed.dequantize_per_tensor")
+                for arg in (node.args[0] if name.startswith("aten.cat") else node.args)
+                if hasattr(arg, "op")
+            ]
+        )
         outputs = [_per_tensor_scale(user, "quantized_decomposed.quantize_per_tensor") for user in node.users]
         s_out = next((scale for scale in outputs if scale is not None), None)
         row: dict[str, Any] = {"node": node.name, "operator": name, "family": family, "input_scales": inputs}
@@ -101,6 +110,8 @@ def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
                 for user in node.users
                 if _per_tensor_scale(user, "quantized_decomposed.quantize_per_tensor") is not None
             ]
+            if any(tuple(user.args[1:6]) != tuple(output_nodes[0].args[1:6]) for user in output_nodes):
+                raise RN.RecipeNumericsError("multiple output quantizers require different exact recipes")
             bounds = {"qmin": output_nodes[0].args[3], "qmax": output_nodes[0].args[4]}
             row["output_scale"] = s_out
             scalar = node.args[1] if len(node.args) > 1 and isinstance(node.args[1], (int, float)) else None
@@ -125,7 +136,13 @@ def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
                 divisor = _window_divisor(node)
                 if divisor is None:
                     raise RN.RecipeNumericsError("the window's element count varies or is not static")
-                row["readout_scale"] = RN.window_mean_readout(inputs[0], divisor, s_out, **bounds)
+                ratio = RN.window_mean_readout(inputs[0], divisor, s_out, **bounds)
+                row.update(
+                    readout="full_i32",
+                    requantization="exact_rational_host",
+                    scale_numerator=str(ratio.numerator),
+                    scale_denominator=str(ratio.denominator),
+                )
                 row["divisor"] = divisor
             if recipe is not None:
                 row["integer_recipe"] = recipe.to_dict()
@@ -143,7 +160,13 @@ def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
                 )
                 if isinstance(value, (int, float)):
                     row["constant_code"] = RN.constant_code(value, s_out, **bounds)
+                if name.startswith("aten.zeros_like."):
+                    row["constant_code"] = RN.constant_code(0, s_out, **bounds)
+                elif name.startswith("aten.ones_like."):
+                    row["constant_code"] = RN.constant_code(1, s_out, **bounds)
                 row["inputs"] = [RN.requantize(scale, s_out, **bounds) for scale in inputs]
+            elif family != "window_mean":
+                raise RN.RecipeNumericsError("no exact integer recipe for the annotated operation")
         except (RN.RecipeNumericsError, TypeError, ValueError, ZeroDivisionError) as exc:
             row["refused"] = str(exc)
         rows.append(row)
