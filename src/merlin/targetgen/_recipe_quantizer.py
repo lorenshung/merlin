@@ -639,19 +639,11 @@ def build_quantizer(
 
     def tensor_inputs(node: Any) -> list[Any]:
         """The activation tensors an affine map or movement reads, in argument order."""
-        if node.target == torch.ops.aten.cat.default:
-            values = list(node.args[0]) if node.args else []
-        elif str(node.target).endswith(_CONSTANT_MOVEMENT):
-            return []
-        elif node.target in (torch.ops.aten.slice_scatter.default, torch.ops.aten.select_scatter.default):
-            values = list(node.args[:2])
-        elif node.target in (torch.ops.aten.sub.Tensor, torch.ops.aten.add.Tensor):
-            values = list(node.args[:2])
-        else:
-            values = list(node.args[:1])
+        from merlin.targetgen._recipe_integer import data_arguments
+
         return [
             value
-            for value in values
+            for value in data_arguments(node)
             if isinstance(value, torch.fx.Node)
             and value.op != "get_attr"
             and isinstance(value.meta.get("val"), torch.Tensor)

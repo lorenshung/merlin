@@ -168,6 +168,15 @@ for row in rows.values():
   continue
  form = row["integer_recipe"]
  from fractions import Fraction
+ if form["form"] == "retained_affine":
+  assert form["readout"] == "full_i32"
+  assert form["requantization"] == "retained_source_exact_integer"
+  if row["operator"] == "aten.sub.Tensor":
+   factors=[Fraction(int(n),int(d)) for n,d in zip(form["coefficients_numerator"],form["coefficients_denominator"])]
+   assert factors == [Fraction(s_a)/Fraction(s_out),-Fraction(s_b)/Fraction(s_out)]
+   assert int(form["offset_numerator"]) == 0
+  verified.append(row["operator"])
+  continue
  candidate = RN.IntegerRecipe(weights=tuple(form["weights"]), constant=form["constant"],
                                readout_scale=Fraction(int(form["scale_numerator"]),int(form["scale_denominator"])),
                                activation=form["activation"])
@@ -286,3 +295,51 @@ def test_a_sum_a_mean_and_a_constant_read_themselves_out():
         if operator in report[name]["refused"]:
             assert "exact" in report[name]["refused"][operator]
     assert report["full"]["annotated_movements"] == 1 and report["full"]["recipes"] == ["aten.full.default"]
+
+
+def test_shape_only_inputs_and_exact_retained_affine_recipe():
+    from test_exact_quantized_reference import run_torch
+
+    run_torch(r"""
+import torch
+from fractions import Fraction as F
+from merlin.targetgen._recipe_integer import integer_recipes
+import torch.ao.quantization.fx._decomposed
+Q=torch.ops.quantized_decomposed.quantize_per_tensor.default
+DQ=torch.ops.quantized_decomposed.dequantize_per_tensor.default
+for target,args in [(torch.ops.aten.fill.Scalar,(1.25,)),(torch.ops.aten.full_like.default,(1.25,)),
+                    (torch.ops.aten.zeros_like.default,()),(torch.ops.aten.ones_like.default,())]:
+ graph=torch.fx.Graph()
+ x=graph.placeholder('shape')
+ y=graph.call_function(target,(x,*args)); y.meta['merlin_recipe_family']='movement'
+ q=graph.call_function(Q,(y,.125,0,-128,127,torch.int8));graph.output(q)
+ row,=integer_recipes(torch.fx.GraphModule({},graph))
+ assert row['input_scales']==[] and 'refused' not in row
+ assert row['constant_code']==(0 if 'zeros' in str(target) else 8 if 'ones' in str(target) else 10)
+# An adjoint's second tensor is geometry, not a quantized data operand.
+for target,args in [(torch.ops.aten.avg_pool2d_backward.default,([2,2],[1,1],[0,0],False,True,3)),
+                    (torch.ops.aten._adaptive_avg_pool2d_backward.default,())]:
+ graph=torch.fx.Graph(); grad=graph.placeholder('grad'); shape=graph.placeholder('shape')
+ d=graph.call_function(DQ,(grad,.125,0,-128,127,torch.int8))
+ y=graph.call_function(target,(d,shape,*args)); y.meta['merlin_recipe_family']='window_mean'
+ q=graph.call_function(Q,(y,.25,0,-128,127,torch.int8));graph.output(q)
+ row,=integer_recipes(torch.fx.GraphModule({},graph))
+ assert row['input_scales']==[.125] and 'refused' not in row
+ assert row['divisor']=='retained_source_geometry'
+ assert row['requantization']=='retained_source_exact_integer'
+# A nonintegral seed must remain rational on host, without rounding into i32.
+for target in [torch.ops.aten.add.Scalar,torch.ops.aten.sub.Scalar]:
+ for alpha in [0,2,-3,.5]:
+  graph=torch.fx.Graph(); x=graph.placeholder('x')
+  scale=float(torch.tensor(.03))
+  d=graph.call_function(DQ,(x,scale,0,-128,127,torch.int8))
+  y=graph.call_function(target,(d,.5,alpha)); y.meta['merlin_recipe_family']='affine_map'
+  q=graph.call_function(Q,(y,.125,0,-128,127,torch.int8));graph.output(q)
+  row,=integer_recipes(torch.fx.GraphModule({},graph))
+  assert 'refused' not in row
+  if alpha:
+   form=row['integer_recipe']; sign=-1 if 'sub' in str(target) else 1
+   assert form['form']=='retained_affine'
+   assert F(int(form['coefficients_numerator'][0]),int(form['coefficients_denominator'][0]))==F(scale)/F(.125)
+   assert F(int(form['offset_numerator']),int(form['offset_denominator']))==sign*F(alpha)*F(.5)/F(.125)
+""")

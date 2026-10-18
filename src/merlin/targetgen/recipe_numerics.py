@@ -147,6 +147,33 @@ def readout(accumulator, scale: float, *, relu: bool = False, qmin: int = -128, 
         raise RecipeNumericsError(str(exc)) from exc
 
 
+def retained_affine_readout(coefficients, offset, s_out, *, activation="none", qmin=-128, qmax=127):
+    """Describe an exact source host epilogue over full-width integer operands.
+
+    This is not a device schedule proof. No coefficient, bias or partial term is
+    rounded. The selected provider must cover the integer producers and retain
+    the complete rational expression through its single RNE/clamp boundary.
+    """
+    scale = rational(_positive("s_out", s_out))
+    factors = [rational(value) / scale for value in coefficients]
+    bias = rational(offset) / scale
+    if len(factors) not in (1, 2) or activation not in {"none", "relu"}:
+        raise RecipeNumericsError("unsupported retained affine readout")
+    return dict(
+        form="retained_affine",
+        readout="full_i32",
+        requantization="retained_source_exact_integer",
+        coefficients_numerator=[str(v.numerator) for v in factors],
+        coefficients_denominator=[str(v.denominator) for v in factors],
+        offset_numerator=str(bias.numerator),
+        offset_denominator=str(bias.denominator),
+        activation=activation,
+        quant_min=qmin,
+        quant_max=qmax,
+        rounding="half_to_even",
+    )
+
+
 def linear_combination(
     s_a: float,
     s_b: float,

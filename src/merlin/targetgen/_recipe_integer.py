@@ -6,6 +6,23 @@ import math
 from typing import Any
 
 
+def data_arguments(node: Any) -> list[Any]:
+    """Recipe operands whose values participate, excluding shape-only tensors.
+
+    Annotation and exact recipe extraction share this semantic operand selection.
+    In particular a pool adjoint reads its gradient, while its source tensor
+    supplies only the destination geometry.
+    """
+    name = str(node.target)
+    if name.startswith(("aten.fill.", "aten.full.", "aten.full_like.", "aten.zeros_like.", "aten.ones_like.")):
+        return []
+    if name.startswith("aten.cat."):
+        return list(node.args[0]) if node.args else []
+    if name.startswith(("aten.add.Tensor", "aten.sub.Tensor", "aten.slice_scatter.", "aten.select_scatter.")):
+        return list(node.args[:2])
+    return list(node.args[:1])
+
+
 def _per_tensor_scale(node: Any, operator: str) -> float | None:
     """The literal per-tensor scale of a folded quantize/dequantize node, or None."""
     if getattr(node, "op", None) != "call_function" or not str(node.target).startswith(operator):
@@ -87,16 +104,11 @@ def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
         if family is None:
             continue
         name = str(node.target)
-        shape_only = name.startswith(("aten.full_like.", "aten.zeros_like.", "aten.ones_like."))
-        inputs = (
-            []
-            if shape_only
-            else [
-                _per_tensor_scale(arg, "quantized_decomposed.dequantize_per_tensor")
-                for arg in (node.args[0] if name.startswith("aten.cat") else node.args)
-                if hasattr(arg, "op")
-            ]
-        )
+        inputs = [
+            _per_tensor_scale(arg, "quantized_decomposed.dequantize_per_tensor")
+            for arg in data_arguments(node)
+            if hasattr(arg, "op")
+        ]
         outputs = [_per_tensor_scale(user, "quantized_decomposed.quantize_per_tensor") for user in node.users]
         s_out = next((scale for scale in outputs if scale is not None), None)
         row: dict[str, Any] = {"node": node.name, "operator": name, "family": family, "input_scales": inputs}
@@ -115,35 +127,64 @@ def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
             bounds = {"qmin": output_nodes[0].args[3], "qmax": output_nodes[0].args[4]}
             row["output_scale"] = s_out
             scalar = node.args[1] if len(node.args) > 1 and isinstance(node.args[1], (int, float)) else None
-            alpha = rational(node.kwargs.get("alpha", 1))
+            alpha = rational(
+                node.args[2]
+                if name.startswith(("aten.add.Scalar", "aten.sub.Scalar")) and len(node.args) > 2
+                else node.kwargs.get("alpha", 1)
+            )
+            coefficients, offset = None, rational(0)
             if name.startswith(("aten.sub.Tensor", "aten.add.Tensor")) and scalar is None and len(inputs) == 2:
                 sign = -1 if name.startswith("aten.sub") else 1
-                recipe = RN.linear_combination(inputs[0], alpha * rational(inputs[1]), s_out, sign_b=sign, **bounds)
+                coefficients = (rational(inputs[0]), sign * alpha * rational(inputs[1]))
             elif name.startswith(("aten.add.", "aten.sub.")) and scalar is not None:
-                sign = -1.0 if name.startswith("aten.sub") else 1.0
-                recipe = RN.affine(inputs[0], s_out, offset=int(sign) * alpha * rational(scalar), **bounds)
+                sign = -1 if name.startswith("aten.sub") else 1
+                coefficients, offset = (rational(inputs[0]),), sign * alpha * rational(scalar)
             elif name.startswith("aten.mul.") and scalar is not None:
-                recipe = RN.affine(inputs[0], s_out, gain=rational(scalar), **bounds)
+                coefficients = (rational(scalar) * rational(inputs[0]),)
             elif name.startswith("aten.div.") and scalar is not None:
-                recipe = RN.affine(inputs[0], s_out, gain=1 / rational(scalar), **bounds)
+                coefficients = (rational(inputs[0]) / rational(scalar),)
             elif name.startswith("aten.neg"):
-                recipe = RN.affine(inputs[0], s_out, gain=-1, **bounds)
+                coefficients = (-rational(inputs[0]),)
             elif name.startswith("aten.relu"):
-                recipe = RN.affine(inputs[0], s_out, activation="relu", **bounds)
-            else:
-                recipe = None
+                coefficients = (rational(inputs[0]),)
+            recipe = None
+            if coefficients is not None:
+                activation = "relu" if name.startswith("aten.relu") else "none"
+                try:
+                    if len(coefficients) == 1:
+                        recipe = RN.affine(
+                            inputs[0],
+                            s_out,
+                            gain=coefficients[0] / rational(inputs[0]),
+                            offset=offset,
+                            activation=activation,
+                            **bounds,
+                        )
+                    else:
+                        recipe = RN.linear_combination(
+                            inputs[0], abs(coefficients[1]), s_out, sign_b=-1 if coefficients[1] < 0 else 1, **bounds
+                        )
+                except RN.RecipeNumericsError:
+                    # A bounded common integer seed/weight is one possible schedule,
+                    # not a requirement on exact source semantics. Retain the real
+                    # coefficients and bias on host; provider source coverage and
+                    # the independent integerization oracle still gate placement.
+                    row["integer_recipe"] = RN.retained_affine_readout(
+                        coefficients, offset, s_out, activation=activation, **bounds
+                    )
             if family == "window_mean":
                 divisor = _window_divisor(node)
-                if divisor is None:
-                    raise RN.RecipeNumericsError("the window's element count varies or is not static")
-                ratio = RN.window_mean_readout(inputs[0], divisor, s_out, **bounds)
+                # Variable windows and adjoints retain their exact source
+                # geometry/coefficient expression. A single constant divisor is
+                # only a simplification, not a prerequisite for exact lowering.
+                ratio = RN.window_mean_readout(inputs[0], divisor or 1, s_out, **bounds)
                 row.update(
                     readout="full_i32",
-                    requantization="exact_rational_host",
+                    requantization="retained_source_exact_integer" if divisor is None else "exact_rational_host",
                     scale_numerator=str(ratio.numerator),
                     scale_denominator=str(ratio.denominator),
                 )
-                row["divisor"] = divisor
+                row["divisor"] = "retained_source_geometry" if divisor is None else divisor
             if recipe is not None:
                 row["integer_recipe"] = recipe.to_dict()
             elif family == "movement":
@@ -165,7 +206,7 @@ def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
                 elif name.startswith("aten.ones_like."):
                     row["constant_code"] = RN.constant_code(1, s_out, **bounds)
                 row["inputs"] = [RN.requantize(scale, s_out, **bounds) for scale in inputs]
-            elif family != "window_mean":
+            elif family != "window_mean" and "integer_recipe" not in row:
                 raise RN.RecipeNumericsError("no exact integer recipe for the annotated operation")
         except (RN.RecipeNumericsError, TypeError, ValueError, ZeroDivisionError) as exc:
             row["refused"] = str(exc)
