@@ -266,6 +266,7 @@ def verify_capture_receipt(path: str | Path) -> dict:
             or not isinstance(reference, dict)
             or pointer.get("sha256") != reference.get("sha256")
             or not isinstance(source, dict)
+            or not is_sha256(source.get("sha256"))
             or not (
                 source.get("sha256") == tool_sources.get("m2m/capture/pt2e_integer_reference.py")
                 or _known_rational_reference(source)
