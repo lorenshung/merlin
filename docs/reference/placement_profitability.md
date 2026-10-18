@@ -27,7 +27,7 @@ pointwise streams, or materialized movement bytes. They contain no overload list
 A source whose reachable tensor data work has at most one element remains host
 according to the declared scalar cutoff; a reduction of multiple elements to one
 scalar still qualifies its arithmetic family.
-empty boundaries retain `empty_tensor_no_device_work`.
+Empty boundaries retain `empty_tensor_no_device_work`.
 
 Movement inspects typed index maps and slice strides. Contiguous selectors use
 reference logical rows. Element gathers pay a full selected RTL memory row per
@@ -54,3 +54,14 @@ force. A conversion before host transcendental arithmetic cannot qualify its
 operation. A cost rejection restores original program, inputs, and result ABI.
 Reference-scale profitability makes no per-case latency claim; use the strict
 observation and independent timing measurements for that purpose.
+
+The reference declaration uses a common producer/traffic profile for each
+family. Actual dtype-specific limb multiplicity, integer widths, and complete
+retained epilogue instruction counts belong to the strict observation. A
+profitable reference family is a coverage-policy decision, not an assertion
+that every instantiated dtype or sample runs faster.
+
+Unqualified source comparisons and maxima/minima after a conversion also fail
+complete-operation coverage. Generated Boolean truth decoding and closed
+sign/clamp readouts carry their own exact host arithmetic proof markers; these
+readouts do not grant permission to retain arbitrary source predicates.
