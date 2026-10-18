@@ -39,6 +39,9 @@ operations:
     # field here against the selected facts.
     # window_mean: the derived recipe quantizes an average pool as this unit's own contraction
     # against a constant one, with the reciprocal of the count folded into the readout scale.
+    # Rank 4 (convolution and its backward) is LOWERED to direct per-tap rank-2 matmuls; no im2col
+    # unit is built. A bias is the int32 accumulator seed (`accumulator_seed_load` below). A
+    # constant operand (a ones vector, a scaled identity) is an ordinary operand of this unit.
     families: [contraction, window_mean]
     placement: accelerator
     operand_dtypes: [int8]
@@ -58,8 +61,12 @@ operations:
     hardware: fused
   elementwise_map_standalone:
     # The operand sum on the load path (accumulate_on_load). operand_sum is the recipe family it
-    # quantizes.
-    families: [elementwise_map, operand_sum]
+    # quantizes. Its general form is the contract's: out = sat(RNE(s_o * act(sum_i w_i x_i + c)))
+    # over at most two int8 tensors and one broadcast constant, per-tensor scales, act in
+    # {none, relu}; int8 or int32 result.
+    # affine_map: the recipe family that quantizes that general form (scalar add/sub/mul/div, neg,
+    # relu, a difference) as integer weights and an int32 constant, then one readout.
+    families: [elementwise_map, operand_sum, affine_map]
     hardware: standalone
   elementwise_map_after_operand_sum:
     # Only stages the SAME fact-derived operand-sum/readout path carries. This is not the
@@ -76,7 +83,21 @@ operations:
     # Max pooling fused on the store path (readout stage 'maxpool').
     families: [reduction]
     hardware: fused
+  reduction_standalone:
+    # Standalone SUM reductions: accumulate-on-load over an outer axis or a window, then one
+    # readout scale. Max reductions stay fused (`pooling_on_readout`). Admission is family-level,
+    # so that limit is stated here, not enforced (see the contract's reduction rows).
+    # The row id is not a family name, so it does not shadow `pooling_on_readout` in family
+    # queries; window_mean makes avg pools and mean quantization-eligible.
+    families: [reduction, window_mean]
+    # Reviewed by the operator (Loren Hung, 2026-10-17, decision D3a). Evidence: Spike and stock
+    # GemminiRocketConfig RTL bit-exact for mean.dim, the avg/adaptive pools and their backwards,
+    # and col2im; gate-3 int8 numerics 0 LSB; FireSim jobs 2933/2944 (gemmini-coverage repo,
+    # analysis/FINAL_LISTS.md).
+    status: reviewed
+    hardware: standalone
   movement:
+    # Forms and their constraints are the contract's: copy, broadcast, zero_fill, permutation.
     hardware: standalone
     layouts: [row_major_contiguous]
     aliasing: [disjoint_inputs_outputs]
@@ -333,6 +354,8 @@ quantization:
       # Every accelerator declaration covering a family the derived hardware recipes quantize.
       eligible_operations: from_facts
 transfer_contracts:
+  # The last two rows are PROPOSED and widen this reviewed block: README.md needs a new operator
+  # decision row before they apply.
   status: reviewed
   operand_load:
     from: host
@@ -349,3 +372,22 @@ transfer_contracts:
     evidence:
       status: reviewed
       basis: "RTL facts: storage_datapaths accumulator i32 (AccumulatorMem SInt<32>); every observed accelerator->host crossing is an i32 row_major_contiguous SSA value"
+  accumulator_seed_load:
+    from: host
+    to: accelerator
+    copy: {dtype: i32, layout: row_major_contiguous}
+    # Reviewed by the operator (Loren Hung, 2026-10-17, decision D1): Spike + stock RTL bit-exact,
+    # gate-3 fixes Q1/Q9/Q10 verified, FireSim job 2944 (gemmini-coverage analysis/FINAL_LISTS.md).
+    evidence:
+      status: reviewed
+      basis: "An int32 bias or constant loaded into the accumulator at full width (MVIN3 through a shrink = 0 load state; no scale unit on that path, Configs.scala:114; LoadController.scala:108). Gate 3 needs it: op_addmm_default__quant, op_convolution_default__quant, op_add_Scalar__quant, op_sub_Scalar__quant."
+  int8_readout:
+    from: accelerator
+    to: host
+    copy: {dtype: int8, layout: row_major_contiguous}
+    valid_window: required
+    # Reviewed by the operator (Loren Hung, 2026-10-17, decision D6): on-device requantize matches
+    # the gate-3 bit-level model on Spike and stock RTL; FireSim jobs 2933/2944.
+    evidence:
+      status: reviewed
+      basis: "An int8 result after the readout's ReLU, acc_scale and saturation (AccumulatorScale.scala:118-138), or an int8 tensor moved by DMA. The crossing itself is a bit-preserving copy."
