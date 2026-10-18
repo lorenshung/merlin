@@ -225,3 +225,97 @@ def test_schema_keys_must_also_belong_to_the_readout_kind(source_text):
         reader.attributes["prov.quant.gradient"] = StringAttr("input")
         with pytest.raises(ValueError, match="unknown readout quantization"):
             device_readout(op)
+
+
+@pytest.fixture(scope="module")
+def continuation_sources(tmp_path_factory):
+    import json
+    import os
+    import subprocess
+
+    python = os.environ.get("MERLIN_M2M_PYTHON")
+    if not python:
+        pytest.skip("MERLIN_M2M_PYTHON is required for real continuation capture")
+    path = tmp_path_factory.mktemp("integer-continuation") / "sources.json"
+    script = r"""
+import json,sys,torch,m2m
+from m2m.capture import integer_readout
+class Model(torch.nn.Module):
+ def __init__(self,mode):super().__init__();self.mode=mode
+ def forward(self,a,b):
+  acc=torch.ops.aten._int_mm.default(a,b).reshape(2,2,2)
+  if self.mode=='overflow':acc=acc*1000000
+  elif self.mode=='float':return acc.float()*.125
+  else:acc=acc+acc
+  return torch.ops.m2m_q.exact_readout.default(acc,.25,[.5])
+inputs=(torch.ones(4,8,dtype=torch.int8),torch.ones(8,2,dtype=torch.int8))
+sources={}
+for mode in ['exact','overflow','float']:
+ result=m2m.convert(Model(mode),inputs,backend='fx_importer')
+ assert result.ok,result
+ sources[mode]=result.mlir_text
+open(sys.argv[1],'w').write(json.dumps(sources))
+"""
+    result = subprocess.run([python, "-c", script, str(path)], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    return json.loads(path.read_text())
+
+
+def test_integer_continuation_proves_all_intermediate_ranges(continuation_sources):
+    from merlin.targetgen.integer_continuation import readout_continuation
+
+    with IR_LOCK:
+        for mode, source in continuation_sources.items():
+            ((op, _),) = observe_contractions(mq.parse(source))
+            proof = readout_continuation(op)
+            if mode != "exact":
+                assert proof is None
+                assert device_readout(op) is None
+            else:
+                reader, proof = proof
+                assert mq.attr_str(reader, "prov.quant.arithmetic") == "exact"
+                assert proof["status"] == "proven"
+                assert any(row["maximum"] == 2 * 8 * 16384 for row in proof["operations"])
+                assert device_readout(op)["integer_continuation"] == proof
+
+
+def test_integer_continuation_requires_raw_width_and_retained_source(selection, continuation_sources):
+    import copy
+    import hashlib
+
+    with IR_LOCK:
+        module = mq.parse(continuation_sources["exact"])
+        ((op, _),) = observe_contractions(module)
+        ordinal = list(module.walk()).index(op)
+        readout = device_readout(op)
+        proof = dict(
+            status="proven",
+            source_sha256=hashlib.sha256(str(module).encode()).hexdigest(),
+            kernels=[
+                dict(
+                    symbol="raw",
+                    status="proven",
+                    full_result_bound=8 * 16384,
+                    schedule=dict(output_dtype="i32", scale=1.0, bias=False, relu=False),
+                )
+            ],
+            bindings=[dict(source_operation_ordinal=ordinal, symbol="raw", replaced_ordinals=[ordinal])],
+        )
+        admitted = admission_plan(module, selection, captured=True, provider_proof=proof)
+        assert admitted["sites"][0]["status"] == "admitted", admitted["sites"][0]["reasons"]
+        damaged = []
+        for key, value in [("output_dtype", "i8"), ("scale", 0.5), ("bias", True), ("relu", True)]:
+            candidate = copy.deepcopy(proof)
+            candidate["kernels"][0]["schedule"][key] = value
+            damaged.append(candidate)
+        candidate = copy.deepcopy(proof)
+        candidate["bindings"][0]["replaced_ordinals"].extend(
+            readout["integer_continuation"]["retained_operation_ordinals"]
+        )
+        damaged.append(candidate)
+        candidate = copy.deepcopy(proof)
+        candidate["kernels"][0]["full_result_bound"] = 2**31
+        damaged.append(candidate)
+        for candidate in [None, *damaged]:
+            refused = admission_plan(module, selection, captured=True, provider_proof=candidate)
+            assert refused["sites"][0]["status"] == "refused"

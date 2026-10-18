@@ -190,18 +190,36 @@ def provider_coverage(module, proof, op) -> str | None:
     ):
         return "host-only float_readout cannot feed the device"
     if readout is not None:
-        if schedule.get("readout") != "full_i32" or schedule.get("requantization") != "retained_source_exact_integer":
-            return "selected provider must prove full int32 readout with exact host requantization"
-        for field, name in (("scale_numerator", "numerator"), ("scale_denominator", "denominator")):
-            if schedule.get(field) != [v[name] for v in readout["scale_ratios"]]:
-                return "selected provider readout scale differs from the exact source contract"
-    if readout is not None or accumulator_init(op) == "int32_seed":
+        if readout.get("integer_continuation"):
+            # This binding replaces only the raw producer. All integer host work
+            # and its final rational boundary remain the captured source.
+            if (
+                schedule.get("output_dtype") != "i32"
+                or schedule.get("scale") != 1
+                or schedule.get("relu") is not False
+                or schedule.get("bias") is not False
+                or type(kernel.get("full_result_bound")) is not int
+                or not 0 <= kernel["full_result_bound"] <= 2**31 - 1
+            ):
+                return "selected provider must prove bounded from-zero raw int32 continuation readout"
+            if set(binding.get("replaced_ordinals", ())) & set(
+                readout["integer_continuation"]["retained_operation_ordinals"]
+            ):
+                return "selected provider must retain the proved integer continuation on the host"
+        else:
+            if (
+                schedule.get("readout") != "full_i32"
+                or schedule.get("requantization") != "retained_source_exact_integer"
+            ):
+                return "selected provider must prove full int32 readout with exact host requantization"
+            for field, name in (("scale_numerator", "numerator"), ("scale_denominator", "denominator")):
+                if schedule.get(field) != [v[name] for v in readout["scale_ratios"]]:
+                    return "selected provider readout scale differs from the exact source contract"
+    if (readout is not None and not readout.get("integer_continuation")) or accumulator_init(op) == "int32_seed":
         if kernels[0].get("exact_arithmetic") is not True:
             return "selected provider has no exact-arithmetic proof for seeded/readout semantics"
-        if readout is not None and list(module.walk()).index(readout["operation"]) in binding.get(
-            "replaced_ordinals", ()
-        ):
-            return "selected provider must retain the exact source readout on the host"
+    if readout is not None and list(module.walk()).index(readout["operation"]) in binding.get("replaced_ordinals", ()):
+        return "selected provider must retain the exact source readout on the host"
     return None
 
 
@@ -575,9 +593,15 @@ def device_readout(op) -> dict | None:
 
     result = op.results[0] if len(op.results) == 1 else None
     users = list(result.uses) if result is not None else []
-    if len(users) != 1:
-        return None
-    reader = users[0].operation
+    reader = users[0].operation if len(users) == 1 else None
+    continuation = None
+    if reader is None or mq.op_name(reader) != "linalg.generic" or mq.attr_str(reader, "prov.role") != "readout":
+        from merlin.targetgen.integer_continuation import readout_continuation
+
+        found = readout_continuation(op) if result is not None else None
+        if found is None:
+            return None
+        reader, continuation = found
     validate_quantization_attributes(reader, "integer_readout")
     if mq.op_name(reader) != "linalg.generic" or mq.attr_str(reader, "prov.role") != "readout":
         return None
@@ -677,6 +701,7 @@ def device_readout(op) -> dict | None:
         "arithmetic": arithmetic or "unspecified",
         "exact_parameters": exact_parameters,
         "operation": reader,
+        **({"integer_continuation": continuation} if continuation is not None else {}),
     }
 
 
