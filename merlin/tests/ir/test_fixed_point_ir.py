@@ -4,7 +4,7 @@ import random
 from fractions import Fraction
 
 import pytest
-from xdsl.dialects.builtin import IntegerType, bf16, f16, f32, i128
+from xdsl.dialects.builtin import IntegerType, bf16, f16, f32, f64, i128
 from xdsl.ir import Block
 
 from merlin.llvmlower.fixed_point_ir import FORMAT, encode_fixed_integer, finite_grid
@@ -100,7 +100,7 @@ def emitted_bits(numerator, exponent, denominator, dtype):
     return values[result]
 
 
-@pytest.mark.parametrize("dtype", [f16, bf16, f32])
+@pytest.mark.parametrize("dtype", [f16, bf16, f32, f64])
 def test_emitted_rne_matches_nearest_ieee_search(dtype):
     rng = random.Random(1767)
     samples = [

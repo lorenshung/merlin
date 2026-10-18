@@ -51,15 +51,19 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
             return bounds[value]
         op = value.owner
         if getattr(op, "name", None) == "arith.constant":
-            attr = op.properties.get("value") or op.attributes.get("value")
+            attr = op.properties.get("value", op.attributes.get("value"))
             if hasattr(attr, "get_values"):
                 return max((abs(int(v)) for v in attr.get_values()), default=0)
         return 1 << (width(value) - 1) if width(value) else None
 
-    def count(value):
+    def count(value, *, mathematical=False):
         bits = width(value)
         magnitude = absolute(value)
-        return min((bits + 7) // 8, max(1, (magnitude.bit_length() + 8) // 8))
+        digits, capacity = 1, 127
+        while magnitude > capacity:
+            digits += 1
+            capacity = 256 * capacity + 127
+        return digits if mathematical else min((bits + 7) // 8, digits)
 
     def init(shape, element, value=0):
         constant = arith.ConstantOp(IntegerAttr(value, element))
@@ -210,7 +214,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         typ = op.results[0].type
         bits = width(op.results[0])
         operations, result = [], op.operands[2]
-        counts = [count(v) for v in op.operands[:2]]
+        counts = [count(v, mathematical=bits > width(v)) for v in op.operands[:2]]
         digits = []
         for source, n in zip(op.operands[:2], counts, strict=True):
             values = []
@@ -269,7 +273,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         if width(source) not in (8, 16, 32, 64):
             return False
         bits = width(op.results[0])
-        digits = count(source)
+        digits = count(source, mathematical=bits > width(source))
         operations, result = [], seed
         for index in range(digits):
             if 8 * index >= bits:
@@ -308,6 +312,44 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
             continue
         if any(k.startswith("prov.quant.") or k == limb_attribute for k in op.attributes):
             continue
+        if "merlin.exact_additive" in op.attributes:
+            from merlin.llvmlower.additive_regions import data_sources, retype_additive
+
+            sources = data_sources(op, lambda typ: str(typ) == "i128")
+            if not sources:
+                continue
+            digits = max(count(value, mathematical=True) for value in sources)
+            operations, result = init(op.results[0].type.get_shape(), op.results[0].type.element_type)
+            for index in range(digits):
+                replacements, carriers = {}, []
+                for source in sources:
+                    split_ops, limb = digit(source, index)
+                    operations.extend(split_ops)
+
+                    def extend(args, emit):
+                        return emit(arith.ExtSIOp(args[0], i32))
+
+                    carrier_ops, carrier = point([limb], TensorType(i32, source.type.get_shape()), extend)
+                    operations.extend(carrier_ops)
+                    replacements[source] = carrier
+                    carriers.append(carrier)
+                lifted = retype_additive(op, replacements, i32, floating=False)
+                if lifted is None:
+                    break
+                producer_ops, producer = lifted
+                operations.extend(producer_ops)
+                mark(
+                    producer,
+                    [
+                        dict(operand=list(producer.inputs).index(v), index=index, count=digits, exponent=0)
+                        for v in carriers
+                    ],
+                )
+                result = weighted(result, producer.results[0], 8 * index, operations)
+            else:
+                bounds[result] = absolute(op.results[0])
+                Rewriter.replace_op(op, operations, [result])
+                continue
         if bilinear(op) or sum_reduction(op):
             continue
         expression = affine(op)
@@ -324,7 +366,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         operations, result = init(typ.get_shape(), typ.element_type, bias)
         for i, coefficient in terms.items():
             source = op.inputs[i]
-            digits = count(source)
+            digits = count(source, mathematical=bits > width(source))
             for index in range(digits):
                 if 8 * index >= bits:
                     continue

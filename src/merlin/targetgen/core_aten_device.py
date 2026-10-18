@@ -293,8 +293,10 @@ def run_spike_bundle(
                         report["numeric_preparation"]["quantized_contractions"]
                         or report["numeric_preparation"].get("native_contractions", 0)
                     )
-                    and (report["numeric_preparation"].get("quantized_non_contraction_sites", 0)
-                         or report["numeric_preparation"].get("exact_dtype_sites", 0))
+                    and (
+                        report["numeric_preparation"].get("quantized_non_contraction_sites", 0)
+                        or report["numeric_preparation"].get("exact_dtype_sites", 0)
+                    )
                     and callable(region_offload)
                 ):
                     # Admitted int8 non-contraction sites: the provider binds and lowers its own regions.
@@ -316,7 +318,11 @@ def run_spike_bundle(
                     plan = report["numeric_preparation"]
                     reason = "; ".join(dict.fromkeys(reason for site in plan["sites"] for reason in site["reasons"]))
                     reason = "; ".join(filter(None, (reason, *plan.get("fft_refusals", []))))
-                    reason = reason or "no contraction in captured source; original host execution retained"
+                    reason = (
+                        reason
+                        or plan.get("host_reason")
+                        or "no contraction in captured source; original host execution retained"
+                    )
                 else:
                     routing, reason = routing_for_bundle(directory, target, device_package, provider, facts)
                     if numeric_policy == "int8_w8a8" and report.get("numeric_preparation", {}).get(

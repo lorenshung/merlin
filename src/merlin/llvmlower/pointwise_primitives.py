@@ -18,6 +18,7 @@ def expose_pointwise_primitives(module):
         "arith.negf",
         "arith.extf",
         "arith.truncf",
+        "arith.sitofp",
         "linalg.yield",
     }
     changed = 0

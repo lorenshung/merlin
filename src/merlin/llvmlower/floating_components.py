@@ -92,7 +92,7 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=()):
             return grids[value]
         op = value.owner
         if getattr(op, "name", None) == "arith.constant":
-            attr = op.properties.get("value") or op.attributes.get("value")
+            attr = op.properties.get("value", op.attributes.get("value"))
             values = list(attr.get_values()) if hasattr(attr, "get_values") else [attr.value.data]
             return finite_grid(values)
         carriers = {
@@ -247,7 +247,11 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=()):
         exact_zero = emit(arith.CmpiOp(block.args[1], integer_zero, "eq"))
         selected = emit(arith.SelectOp(exact_zero, signed_zero, block.args[0]))
         block.add_op(L.YieldOp(selected))
-        if op in contractions:
+        if (
+            op in contractions
+            or any(it.data == L.IteratorType.REDUCTION for it in op.get_iterator_types())
+            or any(child.name == "scf.for" for child in op.body.walk())
+        ):
             # A positive-zero seeded contraction rounds exact cancellation to +0.
             result = converted
         else:
@@ -261,10 +265,10 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=()):
             )
             operations.extend([empty, final])
             result = final.results[0]
-        max_exponent = integer_bound.bit_length() - 1 + exponent if integer_bound else 0
+        max_exponent = (2 * integer_bound).bit_length() - 1 + exponent if integer_bound else 0
         grids[result] = (
             (exponent, 2 * integer_bound)
-            if (2 * integer_bound).bit_length() <= 52 and max_exponent <= FORMAT[str(output_type)][2]
+            if (2 * integer_bound).bit_length() <= 52 and max_exponent < FORMAT[str(output_type)][2]
             else None
         )
         tag = getattr(integer.owner.attributes.get("merlin.exact_component"), "data", None)
@@ -273,6 +277,10 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=()):
         proofs.append(
             dict(
                 source_operation=op.name,
+                source_data_arithmetic=any(
+                    child.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "arith.negf"}
+                    for child in op.body.walk()
+                ),
                 common_exponent=exponent,
                 integer_absolute_bound=integer_bound,
                 reconstruction="bounded_i128",
@@ -287,11 +295,65 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=()):
 
     contractions = dict(observe_contractions(module))
     for op in list(function.body.block.ops):
+        if op.name == "linalg.generic" and len(op.results) == 1 and floating(op.results[0]):
+            from xdsl.dialects.builtin import StringAttr
+
+            from merlin.llvmlower.additive_regions import data_sources, retype_additive
+
+            sources = data_sources(op, lambda typ: str(typ) in FORMAT)
+            has_reduction = any(it.data == L.IteratorType.REDUCTION for it in op.get_iterator_types()) or any(
+                child.name == "scf.for" for child in op.body.walk()
+            )
+            source_grids = [grid(v) for v in sources]
+            seed_grid = grid(op.outputs[0]) if op.body.block.args[-1].uses else (0, 0)
+            if has_reduction and sources and all(g is not None for g in source_grids) and seed_grid == (0, 0):
+                exponent = min((e for e, b in source_grids if b), default=0)
+                operations = []
+                try:
+                    packed = [pack(value, exponent, operations) for value in sources]
+                except ValueError:
+                    packed = []
+                if packed:
+                    wide_packed = []
+                    for value, magnitude in packed:
+
+                        def extend(values, emit):
+                            return emit(arith.ExtSIOp(values[0], i128))
+
+                        wide = point([value], TensorType(i128, value.type.get_shape()), extend, operations)
+                        bounds[wide] = magnitude
+                        wide_packed.append(wide)
+                    lifted = retype_additive(op, dict(zip(sources, wide_packed)), i128, floating=True)
+                    if lifted is not None:
+                        additive_ops, integer = lifted
+                        # Qualification requires a full-domain signed-i32 proof
+                        # for each emitted digit producer. That bounds this exact
+                        # weighted host sum without assumptions about repeated
+                        # gathers, loop counts, or cancellation in the source.
+                        magnitude = max(b for v, b in packed)
+                        digits, capacity = 1, 127
+                        while magnitude > capacity:
+                            digits += 1
+                            capacity = 256 * capacity + 127
+                        bound = (1 << 31) * sum(1 << (8 * j) for j in range(digits))
+                        if bound.bit_length() < 120:
+                            integer.attributes["merlin.exact_additive"] = StringAttr("closed_zero_seed_sum")
+                            operations.extend(additive_ops)
+                            bounds[integer.results[0]] = bound
+                            publish(op, integer.results[0], exponent, bound, operations)
+                            continue
         if op in contractions and len(op.operands) == 3 and all(floating(v) for v in op.operands):
+            from merlin.llvmlower.additive_regions import positive_zero_seed
+
             operands = op.operands[:2]
             source_grids = [grid(v) for v in operands]
             seed_grid = grid(op.operands[2])
-            if any(g is None for g in source_grids) or seed_grid is None or seed_grid[1] != 0:
+            if (
+                any(g is None for g in source_grids)
+                or seed_grid is None
+                or seed_grid[1] != 0
+                or not positive_zero_seed(op.operands[2])
+            ):
                 continue
             exponent = sum(e for e, b in source_grids)
             operations = []

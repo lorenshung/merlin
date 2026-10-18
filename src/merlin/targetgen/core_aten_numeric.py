@@ -140,6 +140,11 @@ def prepare_spec_int8(
     from merlin.targetgen.core_aten_spec_int8 import admission_plan, host_readout_chain, select_spec
 
     selection = select_spec(target, facts, software_spec, host_capabilities)
+    from merlin.targetgen.core_aten_exact_dtype import empty_host_plan
+
+    empty = empty_host_plan(directory, report, selection)
+    if empty is not None:
+        return empty
     original = (directory / "model.mlir").read_bytes()
     prepare = getattr(provider, "prepare_bundle", None)
     preparation = prepare(directory, target=target, facts=facts) if prepare is not None else {}
@@ -151,6 +156,18 @@ def prepare_spec_int8(
     if bitwise is not None:
         return bitwise
     # An unsuccessful candidate must not change the original source or its ordinals.
+    module = parse_mlir_file(directory / "model.mlir")
+    from merlin.targetgen.core_aten_components import prepare_integer_components
+
+    components = prepare_integer_components(
+        directory, report, selection, provider, package, module, limb_attribute=f"{target}.limb"
+    )
+    if components is not None:
+        return components
+    from merlin.targetgen.core_aten_exact_dtype import native_dtype_request, retain_native_host
+
+    if native_dtype_request(report):
+        return retain_native_host(directory, report, selection)
     module = parse_mlir_file(directory / "model.mlir")
     native = any(shape.dtypes == ("i8", "i8", "i32") for _, shape in observe_contractions(module))
     if native:

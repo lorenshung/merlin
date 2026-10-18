@@ -66,20 +66,70 @@ def bitwise_catalog_coverage(module, manifest):
 
 
 def _expose_literal_movement(module):
-    """Expose uniform tensor literals as explicit selectors without changing bits."""
+    """Expose literal storage bytes, including NaN payloads, as selectors."""
+    from math import prod
+
     from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import DenseIntOrFPElementsAttr, TensorType
+    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, DenseIntOrFPElementsAttr, IntegerType, TensorType
+    from xdsl.dialects.linalg import ops as L
+    from xdsl.ir import Block, Region
+    from xdsl.ir.affine import AffineMap
     from xdsl.rewriter import Rewriter
 
     for op in list(module.walk()):
         if op.name != "arith.constant" or not isinstance(op.results[0].type, TensorType):
             continue
-        value = op.properties.get("value") or op.attributes.get("value")
-        if not isinstance(value, DenseIntOrFPElementsAttr) or not value.is_splat():
+        value = op.properties.get("value", op.attributes.get("value"))
+        if not isinstance(value, DenseIntOrFPElementsAttr):
             continue
-        scalar = arith.ConstantOp(value.get_attrs()[0])
-        splat = tensor.SplatOp(scalar.result, [], op.results[0].type)
-        Rewriter.replace_op(op, [scalar, splat])
+        typ = op.results[0].type
+        widths = {"f16": 2, "bf16": 2, "f32": 4, "f64": 8}
+        if str(typ.element_type) not in widths:
+            if value.is_splat():
+                scalar = arith.ConstantOp(value.get_attrs()[0])
+                splat = tensor.SplatOp(scalar.result, [], typ)
+                Rewriter.replace_op(op, [scalar, splat])
+            continue
+        width = widths[str(typ.element_type)]
+        raw = value.data.data
+        count = prod(typ.get_shape())
+        if not count:
+            continue
+        if len(raw) == width:
+            raw *= count
+        if len(raw) != width * count:
+            raise ValueError("dense literal bytes do not cover their declared tensor")
+        element = IntegerType(8 * width)
+        integer_type = TensorType(element, typ.get_shape())
+        bits = [int.from_bytes(raw[i : i + width], "little", signed=True) for i in range(0, len(raw), width)]
+        literal = arith.ConstantOp(DenseIntOrFPElementsAttr.from_list(integer_type, bits))
+        empty = tensor.EmptyOp([], integer_type)
+        identity = AffineMapAttr(AffineMap.identity(len(typ.get_shape())))
+        iterators = ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * len(typ.get_shape()))
+        copy_body = Block(arg_types=[element, element])
+        copy_body.add_op(L.YieldOp(copy_body.args[0]))
+        copied = L.GenericOp(
+            inputs=[literal.result],
+            outputs=[empty.tensor],
+            body=Region(copy_body),
+            indexing_maps=ArrayAttr([identity, identity]),
+            iterator_types=iterators,
+            result_types=[integer_type],
+        )
+        destination = tensor.EmptyOp([], typ)
+        body = Block(arg_types=[element, typ.element_type])
+        cast = arith.BitcastOp(body.args[0], typ.element_type)
+        body.add_ops([cast, L.YieldOp(cast.result)])
+        identity = AffineMapAttr(AffineMap.identity(len(typ.get_shape())))
+        result = L.GenericOp(
+            inputs=[copied.results[0]],
+            outputs=[destination.tensor],
+            body=Region(body),
+            indexing_maps=ArrayAttr([identity, identity]),
+            iterator_types=ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * len(typ.get_shape())),
+            result_types=[typ],
+        )
+        Rewriter.replace_op(op, [literal, empty, copied, destination, result], [result.results[0]])
 
 
 def prepare_bitwise(directory, report, selection, provider, package, module):
@@ -92,10 +142,22 @@ def prepare_bitwise(directory, report, selection, provider, package, module):
     if any(k.startswith("prov.quant.") for op in module.walk() for k in op.attributes):
         return None
     # These operations cannot be byte selectors even when a later copy matches.
-    if any(op.name in {"linalg.matmul", "linalg.batch_matmul", "linalg.reduce"}
-           or op.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "arith.negf",
-                          "arith.extf", "arith.truncf", "arith.sitofp", "arith.fptosi"}
-           for op in module.walk()):
+    if any(
+        op.name in {"linalg.matmul", "linalg.batch_matmul", "linalg.reduce"}
+        or op.name
+        in {
+            "arith.addf",
+            "arith.subf",
+            "arith.mulf",
+            "arith.divf",
+            "arith.negf",
+            "arith.extf",
+            "arith.truncf",
+            "arith.sitofp",
+            "arith.fptosi",
+        }
+        for op in module.walk()
+    ):
         return None
     _expose_literal_movement(module)
     module.verify()
@@ -115,26 +177,106 @@ def prepare_bitwise(directory, report, selection, provider, package, module):
     operations = list(module.walk())
     for ordinal in roots:
         typ = operations[ordinal].results[0].type
-        signature = dict(family="movement", numerical_family="F1", operand_dtype=str(typ.element_type),
-                         rank=len(typ.get_shape()), layout="row_major_contiguous",
-                         aliasing="disjoint_inputs_outputs")
+        signature = dict(
+            family="movement",
+            numerical_family="F1",
+            operand_dtype=str(typ.element_type),
+            rank=len(typ.get_shape()),
+            layout="row_major_contiguous",
+            aliasing="disjoint_inputs_outputs",
+        )
         decision = admit_operation(selection["spec"], "movement", signature, "accelerator")
         host = admit_operation(selection["host"], "movement", signature, "host")
         if decision["status"] != "admitted" or host["status"] != "admitted":
             return None
         sites.append(dict(source_operation_ordinal=ordinal, family="movement", status="admitted", software=decision))
     for origin, destination in (("host", "accelerator"), ("accelerator", "host")):
-        transfer = screen_transfer_contract(selection["spec"], source_placement=origin,
-                                            destination_placement=destination, operand_dtype="i8", result_dtype="i8",
-                                            operand_layout="row_major_contiguous", result_layout="row_major_contiguous")
+        transfer = screen_transfer_contract(
+            selection["spec"],
+            source_placement=origin,
+            destination_placement=destination,
+            operand_dtype="i8",
+            result_dtype="i8",
+            operand_layout="row_major_contiguous",
+            result_layout="row_major_contiguous",
+        )
         if transfer["status"] != "admitted":
             return None
-    plan = dict(status="admitted", numerical_family="F1", quantized_contractions=0,
-                native_contractions=0, quantized_non_contraction_sites=0,
-                exact_dtype_sites=len(sites), sites=sites, provider_catalog=manifest,
-                host_floor=dict(status="required", comparison="native_eager_bits_every_boundary_result"))
+    plan = dict(
+        status="admitted",
+        numerical_family="F1",
+        quantized_contractions=0,
+        native_contractions=0,
+        quantized_non_contraction_sites=0,
+        exact_dtype_sites=len(sites),
+        sites=sites,
+        provider_catalog=manifest,
+        host_floor=dict(status="required", comparison="native_eager_bits_every_boundary_result"),
+    )
     document = {"selection": selection, **plan}
     (directory / "model.mlir").write_text(source + "\n")
+    (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
+    for record in report["cases"]:
+        record.update(numeric_admission=plan, numeric_selection=selection["identities"])
+    return document
+
+
+def empty_host_plan(directory, report, selection):
+    """No accelerator work exists for a complete empty tensor boundary."""
+    from math import prod
+
+    cases = [r for r in report["cases"] if r.get("status") == "bundled"]
+    if not cases:
+        return None
+    for record in cases:
+        outputs, inputs = record.get("output_abi", []), record.get("input_abi", [])
+        empty_outputs = bool(outputs) and all(prod(abi["shape"]) == 0 for abi in outputs)
+        empty_inputs = bool(inputs) and all(prod(abi["shape"]) == 0 for abi in inputs)
+        if not (empty_outputs or empty_inputs):
+            return None
+    plan = dict(
+        status="host",
+        refusal_code="empty_tensor_no_device_work",
+        host_reason="empty_tensor_no_device_work",
+        quantized_contractions=0,
+        native_contractions=0,
+        quantized_non_contraction_sites=0,
+        sites=[],
+    )
+    document = dict(selection=selection, **plan)
+    (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
+    for record in cases:
+        record.update(numeric_admission=plan, numeric_selection=selection["identities"])
+    return document
+
+
+def native_dtype_request(report):
+    """A quantized f32 oracle cannot qualify native integer/half/complex results."""
+    records = [record for record in report["cases"] if record.get("status") == "bundled"]
+    inputs = [abi["dtype"] for record in records for abi in record.get("input_abi", [])]
+    outputs = [abi["dtype"] for record in records for abi in record.get("output_abi", [])]
+    return (
+        not inputs or any(dtype != "f32" for dtype in inputs) or any(dtype.startswith("complex") for dtype in outputs)
+    )
+
+
+def retain_native_host(directory, report, selection):
+    """Explicit native host fallback grants no lossy int8 recapture."""
+    reason = dict(family="native", reason="no closed exact component producer for the native source arithmetic")
+    path = directory / "exact-dtype-refusal.json"
+    if path.exists():
+        reason = json.loads(path.read_text())
+    plan = dict(
+        status="host",
+        refusal_code="native_dtype_exact_components_unavailable",
+        refusal_details=reason,
+        host_reason=reason["reason"],
+        quantized_contractions=0,
+        native_contractions=0,
+        quantized_non_contraction_sites=0,
+        sites=[],
+    )
+    document = dict(selection=selection, **plan)
     (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
     for record in report["cases"]:
         record.update(numeric_admission=plan, numeric_selection=selection["identities"])

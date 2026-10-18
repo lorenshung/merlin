@@ -120,3 +120,23 @@ def test_boolean_or_uses_unsigned_truth_codes_and_exact_host_predicate():
     assert count == 1
     assert rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[1, 1], known_bounds=bounds)
     assert evaluate(source, [[0, 0, 1, 1], [0, 1, 0, 1]]) == [0, -1, -1, -1]
+
+
+def test_widening_keeps_the_carry_above_the_original_storage_width():
+    source = parse_mlir_text("""builtin.module {
+      func.func @forward(%x: tensor<4xi64>, %unused: tensor<4xi64>) -> tensor<4xi128> {
+        %e = tensor.empty() : tensor<4xi128>
+        %r = linalg.generic {
+          indexing_maps = [affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
+          iterator_types = ["parallel"]
+        } ins(%x : tensor<4xi64>) outs(%e : tensor<4xi128>) {
+        ^bb0(%a: i64, %b: i128):
+          %v = arith.extsi %a : i64 to i128
+          linalg.yield %v : i128
+        } -> tensor<4xi128>
+        func.return %r : tensor<4xi128>
+      }}""")
+    values = [(1 << 63) - 1, -(1 << 63), 32767, -32768]
+    plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[1 << 63, 0])
+    assert len(plans) == 9
+    assert evaluate(source, [values, [0] * 4]) == values

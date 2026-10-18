@@ -130,6 +130,37 @@ operations:
       quantization: none
       device_transfer_dtype: int8
       comparison: native_eager_bits
+  component_linear:
+    status: reviewed
+    families: [elementwise_map, reduction]
+    placement: accelerator
+    signature:
+      numerical_family: [F2, F4, F5]
+      operand_dtypes: [int8]
+      accumulator_dtype: i32
+      readout_dtype: i32
+    numerical_contract:
+      representation: signed_radix_256_components
+      producer: closed_static_linear_integer
+      accumulation: exact_i32_with_all_partial_sums_bounded
+      readout: full_i32
+      recombination: retained_source_host_exact_integer
+  component_bilinear:
+    status: reviewed
+    families: [contraction]
+    placement: accelerator
+    signature:
+      numerical_family: [F2, F4, F5]
+      operand_dtypes: [int8]
+      accumulator_dtype: i32
+      readout_dtype: i32
+      ranks: [2, 3]
+    numerical_contract:
+      representation: signed_radix_256_components
+      producer: closed_static_bilinear_integer
+      accumulation: exact_i32_with_all_partial_sums_bounded
+      readout: full_i32
+      recombination: retained_source_host_exact_integer
   host_only:
     families: [reduction, normalization, attention, softmax]
     placement: host
