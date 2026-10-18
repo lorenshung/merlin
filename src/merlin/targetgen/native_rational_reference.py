@@ -72,6 +72,9 @@ def rational_outputs(case):
         if isinstance(value, dict):
             if value.get("kind") == "tensor":
                 return
+            if value.get("kind") == "float":
+                scalar_proof(float(value["value"]))
+                return
             for child in value.values():
                 scalar_proof(child)
         elif isinstance(value, (list, tuple)):

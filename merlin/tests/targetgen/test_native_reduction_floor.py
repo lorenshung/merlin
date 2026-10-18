@@ -156,3 +156,23 @@ def test_scalar_mean_accepts_torch_scalar_axis_conventions(axes):
     )
     result = rational_outputs(case)[0]
     assert result.shape == () and result.item() == Fraction(5, 4)
+
+
+@pytest.mark.parametrize("encoded", [False, True])
+@pytest.mark.parametrize("alpha,proved", [(0.5, True), (0.1, False)])
+def test_native_scalar_opmath_proof_covers_sealed_float_encoding(encoded, alpha, proved):
+    from fractions import Fraction
+
+    tensor = dict(kind="tensor", dtype="float32", shape=[1, 1], values=[[1.0]])
+    case = dict(
+        overload="aten.addmm.default",
+        arguments=dict(
+            args=dict(kind="tuple", items=[tensor, tensor, tensor]),
+            kwargs=dict(alpha=dict(kind="float", value=str(alpha)) if encoded else alpha),
+        ),
+    )
+    if proved:
+        assert rational_outputs(case)[0].item() == Fraction(3, 2)
+    else:
+        with pytest.raises(ValueError, match="opmath representation proof"):
+            rational_outputs(case)
