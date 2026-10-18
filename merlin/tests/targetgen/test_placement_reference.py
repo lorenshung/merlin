@@ -214,3 +214,11 @@ def test_static_index_arithmetic_is_not_device_computation():
     declaration, facts = inputs()
     result = estimate_reference(module, candidate(module, "movement", "F1"), declaration, facts)
     assert result["reason_code"] == "index_generated_constant_host"
+
+
+def test_component_k_one_packaging_does_not_change_pointwise_reference_family():
+    declaration, facts = inputs()
+    module = source(7)
+    result = estimate_reference(module, candidate(module, "contraction", "F2"), declaration, facts)
+    assert result["family"] == "elementwise_map"
+    assert result["workload"]["operations_per_element"] == 1

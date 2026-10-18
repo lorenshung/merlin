@@ -229,13 +229,25 @@ def prepare_numeric_fixture(bundle: Path, report: dict, flow: dict) -> None:
         and all(site.get("status") == "admitted" for site in plan.get("sites", []))
         and len(plan.get("sites", [])) == plan.get("exact_dtype_sites")
     )
-    if plan.get("placement_cost", {}).get("status") == "host":
+    if (
+        plan.get("placement_cost", {}).get("status") == "host"
+        and plan["placement_cost"].get("reason_code") != "no_admitted_device_candidate"
+    ):
         raise ValueError(
             "scored capsule requires device placement but the cost model retained host execution: "
             + plan["placement_cost"]["reason_code"]
         )
     if not native and (not admitted or (plan.get("integer_reference") or {}).get("status") != "prepared"):
-        raise ValueError("scored capsule has no admitted contraction with an exact integer reference")
+        raise ValueError(
+            "scored capsule has no admitted contraction with an exact integer reference: "
+            + str([(r.get("case_id", r.get("overload")), r.get("routing")) for r in report["cases"]])
+            + "; numeric refusal: "
+            + str(
+                plan.get("refusal_code")
+                or plan.get("refusal_details")
+                or [s.get("reasons") for key in ("sites", "non_contraction_sites") for s in plan.get(key, [])]
+            )
+        )
     report["numeric_preparation"] = plan
     for record in report["cases"]:
         record["numeric_policy"] = flow["policy"]

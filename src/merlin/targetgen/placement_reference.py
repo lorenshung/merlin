@@ -82,13 +82,23 @@ def estimate_reference(original, plan, declaration, facts):
         families = {s.get("family") for s in sites}
         if not families:
             raise ValueError("no admitted semantic producer family")
-        if (
-            plan.get("quantized_contractions")
-            or plan.get("native_contractions")
-            or any(op.name in {"linalg.matmul", "linalg.batch_matmul"} for op in original.walk())
-        ):
+        from merlin.kernels.shapes import observe_contractions
+
+        source_contractions = bool(observe_contractions(original))
+        source_reductions = any(
+            op.name in {"linalg.reduce", "scf.for"}
+            or (op.name == "linalg.generic" and any(it.data.value == "reduction" for it in op.get_iterator_types()))
+            for op in original.walk()
+        )
+        if plan.get("numerical_family") in {"F2", "F4", "F5"}:
+            # A pointwise product may be packaged as K=1 GEMMs by component
+            # lowering. Its reference work is still one pointwise operation.
+            families = {
+                "contraction" if source_contractions else "reduction" if source_reductions else "elementwise_map"
+            }
+        elif source_contractions or plan.get("quantized_contractions") or plan.get("native_contractions"):
             families.add("contraction")
-        if any(op.name == "linalg.reduce" for op in original.walk()):
+        if source_reductions:
             families.add("reduction")
         family = (
             "movement"
