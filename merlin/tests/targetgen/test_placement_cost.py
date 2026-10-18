@@ -66,7 +66,7 @@ def test_actual_geometry_and_host_epilogue_are_charged():
     large = estimate(module, module, plan(module), DECLARATION, bigger)
     assert large["device_parts"]["compute"] < ordinary["device_parts"]["compute"]
     assert ordinary["device_parts"]["host_pre_post"] == 0
-    assert host_work(module, RATES) == 4096
+    assert host_work(module, RATES) == 8192  # arithmetic plus input/output traffic
 
 
 def test_unknown_facts_never_create_a_profitable_placement():
@@ -140,3 +140,12 @@ def test_emitted_catalog_counts_override_geometric_estimates():
     assert cost["instruction_count_basis"] == "source_bound_provider_emitted_instruction_and_fence_counts"
     prepared["provider_catalog"]["source_sha256"] = "0" * 64
     assert estimate(module, module, prepared, declaration, facts)["reason_code"] == "placement_cost_unproved"
+
+
+def test_yield_only_materialization_has_host_memory_cost():
+    from xdsl.rewriter import Rewriter
+
+    module = source(256)
+    negation = next(op for op in module.walk() if op.name == "arith.negf")
+    Rewriter.replace_op(negation, [], [negation.operands[0]])
+    assert host_work(module, RATES) == 256  # Two f32 streams at 1/8 cycle per byte.

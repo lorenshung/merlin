@@ -87,6 +87,10 @@ def host_work(module, rates, excluded=()):
         count = iterations(op)
         named_compute = hasattr(op, "get_static_loop_ranges") and not op.regions
         own = count * rates["host_arithmetic_cycles"] if named_compute else scalar_cost(op, rates)
+        if op.name == "linalg.generic":
+            # A yield-only materialization still reads/writes storage. Index
+            # descriptors and empty allocations alone do not pay that traffic.
+            own += transfer_bytes(op) * rates["host_copy_cycles_per_byte"]
         return multiplier * own + sum(
             visit(child, multiplier * count) for region in op.regions for block in region.blocks for child in block.ops
         )
