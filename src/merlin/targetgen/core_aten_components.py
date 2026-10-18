@@ -129,6 +129,24 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         and any(dtype in {"f16", "bf16", "f64", "complex<f32>"} for dtype in native_types)
         and all(np.isfinite(value).all() for value in arrays)
     )
+    if closure_required:
+        from merlin.targetgen.core_aten_host_floor import native_boundary_has_nan
+
+        if native_boundary_has_nan(report):
+            (directory / "exact-dtype-refusal.json").write_text(
+                json.dumps(
+                    dict(
+                        family="F2",
+                        code="ieee_intermediate_nonfinite_policy_unproved",
+                        reason=(
+                            "finite native inputs produce CPU NaN; "
+                            "no rational error floor or closed overflow policy"
+                        ),
+                    )
+                )
+                + "\n"
+            )
+            return None
     if source_agreement_required or closure_required:
         from merlin.targetgen.core_aten_numeric import _source_reference
 
