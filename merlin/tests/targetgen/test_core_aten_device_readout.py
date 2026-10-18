@@ -36,7 +36,7 @@ def source_text(tmp_path_factory):
     if not python:
         pytest.skip("MERLIN_M2M_PYTHON is required for real model2mlir readout capture")
     path = tmp_path_factory.mktemp("device-readout") / "source.mlir"
-    script = "import sys,torch,m2m\nfrom m2m.capture import integer_readout\nclass Model(torch.nn.Module):\n def forward(self,a,b,bias):\n  acc=torch.ops.m2m_q.int_mm_seeded.default(a,b,bias)\n  return torch.ops.m2m_q.requantize.default(acc,[0.0125],0,-128,127,True)\ninputs=(torch.ones(4,8,dtype=torch.int8),torch.ones(8,16,dtype=torch.int8),torch.arange(16,dtype=torch.int32))\nresult=m2m.convert(Model(),inputs,backend='fx_importer')\nassert result.ok,result\nopen(sys.argv[1],'w').write(result.mlir_text)\n"
+    script = "import sys,torch,m2m\nfrom m2m.capture import integer_readout\nclass Model(torch.nn.Module):\n def forward(self,a,b,bias):\n  acc=torch.ops.m2m_q.int_mm_seeded.default(a,b,bias)\n  return torch.ops.m2m_q.requantize.default(acc,[0.5],0,-128,127,True)\ninputs=(torch.ones(4,8,dtype=torch.int8),torch.ones(8,16,dtype=torch.int8),torch.arange(16,dtype=torch.int32))\nresult=m2m.convert(Model(),inputs,backend='fx_importer')\nassert result.ok,result\nopen(sys.argv[1],'w').write(result.mlir_text)\n"
     result = subprocess.run([python, "-c", script, str(path)], capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr
     return path.read_text()
@@ -63,7 +63,7 @@ def test_the_seed_and_the_fused_readout_are_read_structurally(source_text):
         assert accumulator_init(op) == "int32_seed" and not zero_initialised(op)
         readout = device_readout(op)
     assert readout["relu"] and readout["quant_min"] == -128 and readout["granularity"] == "tensor"
-    assert readout["scales"] == [pytest.approx(0.0125)]
+    assert readout["scales"] == [0.5]
 
 
 def test_the_device_readout_plan_replaces_the_host_cast_and_its_k_bound(selection, source_text):
@@ -89,15 +89,27 @@ def test_seeded_admission_requires_selected_provider_coverage(selection, source_
         proof = dict(
             status="proven",
             source_sha256=hashlib.sha256(str(module).encode()).hexdigest(),
-            kernels=[dict(symbol="seeded", status="proven")],
-            bindings=[dict(source_operation_ordinal=ordinal, symbol="seeded")],
+            kernels=[dict(symbol="seeded", status="proven", exact_arithmetic=True)],
+            bindings=[
+                dict(
+                    source_operation_ordinal=ordinal,
+                    symbol="seeded",
+                    replaced_ordinals=[ordinal, list(module.walk()).index(device_readout(op)["operation"])],
+                )
+            ],
         )
     _, absent = _plan(selection, source_text)
     assert absent["sites"][0]["status"] == "refused"
     assert "coverage proof unavailable" in " ".join(absent["sites"][0]["reasons"])
     _, admitted = _plan(selection, source_text, proof)
     assert admitted["sites"][0]["status"] == "admitted", admitted["sites"][0]["reasons"]
-    for damaged in ({**proof, "bindings": []}, {**proof, "source_sha256": "stale"}, {**proof, "kernels": []}):
+    for damaged in (
+        {**proof, "bindings": []},
+        {**proof, "source_sha256": "stale"},
+        {**proof, "kernels": []},
+        {**proof, "kernels": [dict(symbol="seeded", status="proven")]},
+        {**proof, "bindings": [{**proof["bindings"][0], "replaced_ordinals": [ordinal]}]},
+    ):
         _, refused = _plan(selection, source_text, damaged)
         assert refused["sites"][0]["status"] == "refused"
 
@@ -125,3 +137,43 @@ def test_unknown_readout_numerics_are_refused_before_any_frontend_import():
 
     with pytest.raises(ValueError, match="numerics"):
         integerize_static_pt2e(None, (), numerics="fixed_point")
+
+
+def test_exact_ratio_metadata_comes_from_real_model2mlir(tmp_path):
+    import json
+    import os
+    import subprocess
+    from fractions import Fraction
+
+    python = os.environ.get("MERLIN_M2M_PYTHON")
+    if not python:
+        pytest.skip("MERLIN_M2M_PYTHON is required")
+    path = tmp_path / "rational-readout.mlir"
+    script = r"""
+import sys,torch,m2m
+from m2m.capture import integer_readout
+class Model(torch.nn.Module):
+ def forward(self,a,b,bias):
+  acc=torch.ops.m2m_q.int_mm_seeded.default(a,b,bias)
+  return torch.ops.m2m_q.exact_readout.default(acc,.03,[.02],1.,None,1.,.01,0,-128,127,False,False)
+inputs=(torch.ones(4,8,dtype=torch.int8),torch.ones(8,16,dtype=torch.int8),torch.zeros(16,dtype=torch.int32))
+result=m2m.convert(Model(),inputs,backend='fx_importer')
+assert result.ok,result
+open(sys.argv[1],'w').write(result.mlir_text)
+"""
+    result = subprocess.run([python, "-c", script, str(path)], capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+    with IR_LOCK:
+        ((op, _),) = observe_contractions(mq.parse(path.read_text()))
+        readout = device_readout(op)
+        expected = Fraction(0.03) * Fraction(0.02) / Fraction(0.01)
+        assert readout["scales"] == []
+        assert readout["scale_ratios"] == [
+            dict(numerator=str(expected.numerator), denominator=str(expected.denominator))
+        ]
+        json.dumps({key: value for key, value in readout.items() if key != "operation"})
+        from xdsl.dialects.builtin import ArrayAttr, StringAttr
+
+        readout["operation"].attributes["prov.quant.scale_denominator"] = ArrayAttr([StringAttr("0")])
+        with pytest.raises(ValueError, match="positive denominators"):
+            device_readout(op)

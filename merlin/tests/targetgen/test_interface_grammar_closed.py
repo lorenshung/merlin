@@ -1,3 +1,4 @@
+# ruff: noqa: E501 -- interface fixtures keep each MLIR operation on one line
 """The canonical interface parser must fail CLOSED on an op it does not define.
 
 MEASURED, and the reason this file exists: ``parse_interface_mlir`` used to return only the commands

@@ -73,7 +73,8 @@ def standalone_admission(
             "standalone": True,
             "basis": "evidence" if checked else "declared_unchecked",
             "paths": paths,
-            "reason": f"{capability.family} {'runs' if checked else 'is declared'} standalone through {selected['fact']} "
+            "reason": f"{capability.family} {'runs' if checked else 'is declared'} standalone "
+            f"through {selected['fact']} "
             f"using roles {selected['roles']}" + ("" if checked else "; semantic fact not checked"),
         }
     why = "; ".join(

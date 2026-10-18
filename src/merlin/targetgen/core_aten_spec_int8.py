@@ -35,6 +35,9 @@ _QUANTIZATION_KEYS = frozenset(
         "beta",
         "acc_scale",
         "numerics",
+        "scale_numerator",
+        "scale_denominator",
+        "storage_dtype",
     }
 )
 
@@ -181,6 +184,19 @@ def provider_coverage(module, proof, op) -> str | None:
     kernels = [row for row in proof.get("kernels", ()) if row.get("symbol") == binding.get("symbol")]
     if len(kernels) != 1 or kernels[0].get("status") != "proven":
         return "selected provider binding lacks a proven kernel"
+    from merlin.kernels.shapes import accumulator_init
+
+    try:
+        readout = device_readout(op)
+    except ValueError as exc:
+        return str(exc)
+    if readout is not None or accumulator_init(op) == "int32_seed":
+        if kernels[0].get("exact_arithmetic") is not True:
+            return "selected provider has no exact-arithmetic proof for seeded/readout semantics"
+        if readout is not None and list(module.walk()).index(readout["operation"]) not in binding.get(
+            "replaced_ordinals", ()
+        ):
+            return "selected provider coverage does not include the fused readout"
     return None
 
 
@@ -346,7 +362,7 @@ def admission_plan(module, selection, *, captured=False, native=False, provider_
                 "fused_accelerator",
             )
             steps[-1]["device_readout"] = {key: value for key, value in readout.items() if key != "operation"}
-            if readout["relu"] and any(scale <= 0 for scale in readout["scales"]):
+            if readout["relu"] and any(sign <= 0 for sign in readout["scale_signs"]):
                 reasons.append(
                     "step 4 a readout ReLU runs before the scale, so it cannot pair with a nonpositive scale"
                 )
@@ -569,6 +585,9 @@ def device_readout(op) -> dict | None:
         "output_scale",
         "alpha",
         "beta",
+        "scale_numerator",
+        "scale_denominator",
+        "storage_dtype",
     }
     unknown = sorted(key for key in attributes if key.startswith("prov.quant.") and key[11:] not in allowed)
     if unknown:
@@ -584,10 +603,25 @@ def device_readout(op) -> dict | None:
         scales = [getattr(getattr(item, "value", None), "data", None) for item in scale.data]
     else:
         scales = [number("prov.quant.scale")]
+    from fractions import Fraction
+
+    ratios = []
+    if "prov.quant.scale_numerator" in attributes or "prov.quant.scale_denominator" in attributes:
+        if scale is not None:
+            raise ValueError("readout cannot declare both a floating scale and a rational scale")
+        try:
+            numerators = [int(item.data) for item in attributes["prov.quant.scale_numerator"].data]
+            denominators = [int(item.data) for item in attributes["prov.quant.scale_denominator"].data]
+            if not numerators or any(d <= 0 for d in denominators):
+                raise ValueError("nonpositive denominator or empty scale")
+            ratios = [Fraction(n, d) for n, d in zip(numerators, denominators, strict=True)]
+        except (KeyError, AttributeError, TypeError, ValueError) as exc:
+            raise ValueError("readout requires paired integer scale numerators and positive denominators") from exc
+        scales = []
     parameters = {key: number(f"prov.quant.{key}") for key in ("zero_point", "quant_min", "quant_max")}
     relu = mq.attr_str(reader, "prov.quant.relu")
     if (
-        not scales
+        (not scales and not ratios)
         or any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in scales)
         or any(type(value) is not int for value in parameters.values())
         or relu not in {"true", "false"}
@@ -595,6 +629,14 @@ def device_readout(op) -> dict | None:
         raise ValueError("readout requires finite scales and canonical integer zero_point/quant_min/quant_max")
     if not -128 <= parameters["quant_min"] <= parameters["zero_point"] <= parameters["quant_max"] <= 127:
         raise ValueError("readout quantization bounds do not fit signed i8")
+    if mq.attr_str(reader, "prov.quant.storage_dtype") not in {None, "", "int8"}:
+        raise ValueError("readout storage dtype does not match signed i8 admission")
+    count = len(ratios or scales)
+    granularity = "tensor" if count == 1 else "channel"
+    if mq.attr_str(reader, "prov.quant.granularity") not in {None, "", granularity}:
+        raise ValueError("readout granularity contradicts its scales")
+    if count > 1 and count != reader.results[0].type.get_shape()[-1]:
+        raise ValueError("readout channel scales do not match its trailing dimension")
     rounding = mq.attr_str(reader, "prov.quant.rounding")
     if rounding not in {None, "", "half_to_even"}:
         raise ValueError(f"unsupported readout rounding {rounding!r}")
@@ -617,7 +659,9 @@ def device_readout(op) -> dict | None:
         exact_parameters[key] = numbers
     return {
         "scales": [float(v) for v in scales],
-        "granularity": "tensor" if len(scales) == 1 else "channel",
+        "scale_ratios": [{"numerator": str(v.numerator), "denominator": str(v.denominator)} for v in ratios],
+        "scale_signs": [(v > 0) - (v < 0) for v in (ratios or scales)],
+        "granularity": granularity,
         **{key: int(value) for key, value in parameters.items()},
         "relu": relu == "true",
         "arithmetic": arithmetic or "unspecified",

@@ -33,7 +33,7 @@ from pathlib import Path
 
 # The worker is also executed as a standalone script in the capture interpreter.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from capture_refusals import refuse_integerization, write_exception_refusal, write_refusal  # noqa: E402
+from capture_refusals import refuse_integerization, write_exception_refusal  # noqa: E402
 
 # canonical dtype token -> (torchAO scheme | None, base-weight dtype cast | None). Mirrors
 # workloads/capture.py SCHEME + DTYPE_CAST so a capsule's precision matches how models are captured.
@@ -347,51 +347,9 @@ def _output_abi(outputs):
 
 
 def _integerized_agreement(before, after, *, atol: float, rtol: float) -> dict:
-    """Compare two independently supplied executions on the capture input."""
-    import torch
+    from merlin.targetgen._capture_integer_agreement import integerized_agreement
 
-    left, left_abi = _output_abi(before)
-    right, right_abi = _output_abi(after)
-    rows = []
-    compatible = left_abi == right_abi and bool(left)
-    for original, rewritten in zip(left, right):
-        lhs = original.detach().to(torch.float64)
-        rhs = rewritten.detach().to(torch.float64)
-        same_shape = lhs.shape == rhs.shape
-        finite = bool(torch.isfinite(lhs).all() and torch.isfinite(rhs).all()) if same_shape else False
-        if same_shape and finite and lhs.numel():
-            delta = (lhs - rhs).abs()
-            max_abs = float(delta.max())
-            max_rel = float((delta / lhs.abs().clamp_min(1e-12)).max())
-            within = bool(torch.all(delta <= atol + rtol * lhs.abs()))
-        elif same_shape and finite:
-            max_abs = max_rel = 0.0
-            within = True
-        else:
-            max_abs = max_rel = 0.0
-            within = False
-        rows.append(
-            {
-                "max_abs": max_abs,
-                "max_rel": max_rel,
-                "within_tolerance": within,
-                "finite": finite,
-                "atol": atol,
-                "rtol": rtol,
-                "shape": list(original.shape),
-            }
-        )
-    passed = compatible and len(rows) == len(left) and all(row["within_tolerance"] for row in rows)
-    return {
-        "status": "passed" if passed else "failed",
-        "samples": 1,
-        "atol": atol,
-        "rtol": rtol,
-        "max_abs": max((row["max_abs"] for row in rows), default=0.0),
-        "max_rel": max((row["max_rel"] for row in rows), default=0.0),
-        "outputs": rows,
-        "finite": compatible and all(row["finite"] for row in rows),
-    }
+    return integerized_agreement(before, after, atol=atol, rtol=rtol, output_abi=_output_abi)
 
 
 def _fp32_stage_observation(
@@ -1151,7 +1109,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         # Independently account for integer and preserved-float contractions.
         from merlin.capture.integerization import integerize_static_pt2e
 
-        selected_engine = recipe.get("software_numerical_engine") if recipe is not None else None
+        selected_engine = (recipe or {}).get("software_numerical_engine", "integer_reference")
         # The recipe states which readout the target executes (quant_recipe.readout_numerics); the
         # frontend default stays the portable float readout.
         readout_numerics = (recipe or {}).get("readout_numerics", "float_readout")
@@ -1228,6 +1186,8 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             portable_output, integer_output, atol=a.agreement_atol, rtol=a.agreement_rtol
         )
         portable_agreement["reference"] = "portable_pt2e"
+        portable_agreement["informational"] = True
+        portable_agreement["label"] = "eager-float divergence"
         integerization_receipt["portable_agreement"] = portable_agreement
         if selected_engine == "integer_reference":
             if independent is None:
@@ -1263,7 +1223,9 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 reference_path = out / "integer-reference.json"
                 reference_path.write_bytes(reference_bytes)
                 golden_agreement.update(
-                    reference="pt2e_integer",
+                    reference="pt2e_exact_rational",
+                    arithmetic="exact_rational",
+                    eager_float_divergence=independent.eager_float_divergence,
                     source=independent_source,
                     output={"path": reference_path.name, "sha256": hashlib.sha256(reference_bytes).hexdigest()},
                     executed_contractions={

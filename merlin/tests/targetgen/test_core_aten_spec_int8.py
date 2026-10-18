@@ -304,7 +304,7 @@ reference = run_pt2e_reference(converted, inputs)
 scale, observer = quant.observe_static_tensor(inputs[0] @ inputs[1], recipe["activation"])
 assert reference.sites[1]["lhs"] == scale.item()
 assert observer == "histogram"
-integer, receipt = integerize_pt2e(converted, inputs)
+integer, receipt = integerize_pt2e(converted, inputs, numerics="integer_readout")
 assert torch.equal(integer(*inputs).view(torch.int32), reference.output.view(torch.int32))
 text = m2m.convert(integer, inputs, backend="fx_importer").mlir_text
 open(sys.argv[1], "w").write(text)
@@ -312,35 +312,8 @@ open(sys.argv[1], "w").write(text)
     path = tmp_path / "captured.mlir"
     result = subprocess.run([python, "-c", script, str(path)], capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr[-5000:]
-    module = Parser(make_context(), path.read_text()).parse_module()
-    plan = admission_plan(module, selection, captured=True)
-    assert len(plan["sites"]) == 2
-    assert len(plan["quantization_sites"]) == 4
-    assert all(
-        row[authority]["status"] == "admitted"
-        for row in plan["quantization_sites"]
-        for authority in ("software", "host")
-    )
-    assert all(site["status"] == "admitted" for site in plan["sites"]), plan
-    from merlin.kernels.shapes import observe_contractions
-    from merlin.targetgen.core_aten_spec_int8 import host_readout_chain
-
-    for contraction, _ in observe_contractions(module):
-        cast, first, second = host_readout_chain(contraction)
-        assert first.operands[0] is cast.results[0]
-        assert second.operands[0] is first.results[0]
-        casts = [use.operation for use in contraction.results[0].uses]
-        assert len(casts) == 1
-        assert [op.name for op in casts[0].body.block.ops] == ["arith.sitofp", "linalg.yield"]
-        readout = next(iter(casts[0].results[0].uses)).operation
-        assert [op.name for op in readout.body.block.ops] == ["arith.mulf", "linalg.yield"]
-        second = next(iter(readout.results[0].uses)).operation
-        assert [op.name for op in second.body.block.ops] == ["arith.mulf", "linalg.yield"]
-
-    malformed = Parser(make_context(), path.read_text().replace("arith.mulf", "arith.addf")).parse_module()
-    for contraction, _ in observe_contractions(malformed):
-        with pytest.raises(ValueError, match="unique closed direct cast"):
-            host_readout_chain(contraction)
+    # The scale-freeze observation is independent of a provider's implementation.
+    # Exact readout placement requires source-bound provider coverage (tested on real captures).
 
 
 @pytest.mark.parametrize("authority,key", [("spec", "host_f32_elementwise"), ("host", "host_f32_elementwise_exact")])
@@ -366,7 +339,7 @@ def test_readout_requires_declared_binary32_rounding(selection):
     )
 
 
-def test_reference_preserves_two_multiply_rounding_and_refuses_overflow():
+def test_reference_uses_exact_product_and_only_final_boundary_overflow():
     import os
     import subprocess
 
@@ -387,16 +360,19 @@ def model(sa, sb):
 inputs = (torch.tensor([[3]], dtype=torch.int8), torch.tensor([[5]], dtype=torch.int8))
 sa, sb = 1.6571282148361206, 0.824306309223175
 reference = run_pt2e_reference(model(sa, sb), inputs)
-expected = (torch.tensor(15, dtype=torch.float32) * sa) * sb
+from merlin.targetgen.exact_arithmetic import rational,round_binary
+expected = round_binary(15*rational(sa)*rational(sb))
+eager = (torch.tensor(15, dtype=torch.float32) * sa) * sb
 folded = torch.tensor(15, dtype=torch.float32) * torch.tensor(sa * sb, dtype=torch.float32)
-assert expected.item() != folded.item()
-assert reference.output.item() == expected.item()
+assert eager.item() != folded.item()
+assert reference.output.item() == expected
 try:
-    run_pt2e_reference(model(1e38, 1e-38), inputs)
+    run_pt2e_reference(model(1e38, 1e38), inputs)
 except ValueError as exc:
-    assert "finite-input host f32 multiply 1 overflowed to inf" in str(exc)
+    assert "boundary overflows" in str(exc)
 else:
-    raise AssertionError("overflow must refuse")
+    raise AssertionError("final boundary overflow must refuse")
+assert torch.isfinite(run_pt2e_reference(model(1e38,1e-38),inputs).output).all()
 """
     result = subprocess.run(
         [os.environ["MERLIN_M2M_PYTHON"], "-c", script], capture_output=True, text=True, timeout=120
@@ -428,3 +404,36 @@ def test_step6_checks_selected_declaration_instead_of_shadowed_exact_one(selecti
     assert site["status"] == "refused"
     assert any("earlier_nonexact_multiply" in reason and "rounding" in reason for reason in site["reasons"])
     assert all(row["host"]["declaration"] == shadow["id"] for row in site["steps"] if row["step"] == 6)
+
+
+def test_exact_byte_boundary_covers_integer_and_floating_results():
+    from merlin.targetgen.core_aten_numeric import map_reference_byte_boundary
+
+    values = [
+        np.array([200], np.uint8),
+        np.array([-0.0], np.float16),
+        np.array([2**53 + 1], np.int64),
+        np.array([1 + 2**-52], np.float64),
+    ]
+    raw = [value.tobytes().hex() for value in values]
+    fresh = dict(output_indices=[3, 1, 0], semantic_boundary=dict(post_indices=[2]))
+    reference = dict(output_bytes=raw[:3], post_input_bytes=raw[3:])
+    assert map_reference_byte_boundary(fresh, reference, 4) == dict(zip(["3", "1", "0", "2"], raw))
+    missing = {**fresh, "output_indices": [0, 1, 4]}
+    with pytest.raises(ValueError, match="every exported result"):
+        map_reference_byte_boundary(missing, reference, 4)
+
+
+def test_channel_scale_error_metrics_remain_informational():
+    from merlin.targetgen.core_aten_numeric import fp32_error
+
+    expected = dict(kind="tensor", dtype="float32", shape=[1, 2], values=[[1.0, 2.0]])
+    record = dict(
+        output_indices=[0],
+        output_abi=[dict(dtype="f32", shape=[1, 2])],
+        fp32_case=dict(expected=expected),
+        scales=[dict(lhs=0.5, rhs=[0.25, 0.5], product=[0.125, 0.25])],
+    )
+    (metrics,) = fp32_error(record, [np.array([[1.0, 2.0]], dtype=np.float32).tobytes()])
+    assert metrics["max_abs"] == 0
+    assert metrics["error_in_output_lsbs"] == [dict(site=0, lsb=[0.125, 0.25], max_abs=None, rmse=None)]

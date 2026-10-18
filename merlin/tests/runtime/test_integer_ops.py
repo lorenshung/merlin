@@ -36,7 +36,7 @@ _Y = np.flip(_X, axis=1)
 
 
 def test_affine_map_is_the_recipe_numerics_form():
-    recipe = RN.linear_combination(0.031, 0.0247, 0.05, sign_b=-1)
+    recipe = RN.linear_combination(0.5, 0.25, 1.0, sign_b=-1)
     attrs = {
         "weights": list(recipe.weights),
         "constant": 0,

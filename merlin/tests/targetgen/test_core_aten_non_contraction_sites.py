@@ -168,7 +168,11 @@ def test_primitive_limits_are_enforced(selection, change, expected):
     elif change == "transcendental":
         source = source.replace(
             "%s = arith.addi %a, %b : i8",
-            "%af = arith.sitofp %a : i8 to f32\n      %exp = math.exp %af : f32\n      %s = arith.fptosi %exp : f32 to i8",
+            (
+                "%af = arith.sitofp %a : i8 to f32\n"
+                "      %exp = math.exp %af : f32\n"
+                "      %s = arith.fptosi %exp : f32 to i8"
+            ),
         )
         source = source.replace("aten.add.Tensor", "aten.sigmoid.default")
     else:
@@ -176,10 +180,16 @@ def test_primitive_limits_are_enforced(selection, change, expected):
         source = source.replace(
             "ins(%x, %y : tensor<2x8xi8>, tensor<2x8xi8>)", "ins(%x, %y : tensor<2x8xi8>, tensor<2xi8>)"
         )
-        old = "affine_map<(d0, d1) -> (d0, d1)>,\n                                            affine_map<(d0, d1) -> (d0, d1)>]"
+        old = (
+            "affine_map<(d0, d1) -> (d0, d1)>,\n"
+            "                                            affine_map<(d0, d1) -> (d0, d1)>]"
+        )
         source = source.replace(
             old,
-            "affine_map<(d0, d1) -> (d0)>,\n                                            affine_map<(d0, d1) -> (d0, d1)>]",
+            (
+                "affine_map<(d0, d1) -> (d0)>,\n"
+                "                                            affine_map<(d0, d1) -> (d0, d1)>]"
+            ),
         )
     with IR_LOCK:
         (site,) = non_contraction_sites(mq.parse(source), selection, contract=selection["capability_contract"])
@@ -187,9 +197,10 @@ def test_primitive_limits_are_enforced(selection, change, expected):
     assert software["status"] == "unsupported", software
     from merlin.targetgen.software_spec import admit_operation
 
-    standalone = {**selection["spec"], "operations": [
-        row for row in selection["spec"]["operations"] if row["id"] == "elementwise_map_standalone"
-    ]}
+    standalone = {
+        **selection["spec"],
+        "operations": [row for row in selection["spec"]["operations"] if row["id"] == "elementwise_map_standalone"],
+    }
     decision = admit_operation(standalone, site["source_operator"], site["signature"], "accelerator")
     assert decision["status"] == "unsupported", decision
     assert expected in decision["reason"], decision

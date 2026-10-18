@@ -270,13 +270,19 @@ for annotation in annotations:
 converted = quant.apply_recipe(model, recipe, example_inputs=inputs,
                                source_layer_inventory=quant.layer_inventory(model))
 reference = run_pt2e_reference(converted, inputs)
-integer, receipt = integerize_static_pt2e(converted, inputs)
+integer, receipt = integerize_static_pt2e(converted, inputs, numerics="integer_readout")
 expected_count = 2 if operation == "attention" else 1
 assert receipt["quantized_contractions_integerized"] == reference.contraction_count == expected_count
 actual = integer(*inputs)
 assert actual.dtype == reference.output.dtype == torch.float32
 assert actual.stride() == model(*inputs).stride()
-assert torch.equal(actual.contiguous().view(torch.int32), reference.output.contiguous().view(torch.int32))
+from merlin.targetgen._capture_integer_agreement import integerized_agreement
+from merlin.targetgen._m2m_capture_worker import _output_abi
+agreement=integerized_agreement(reference.output,actual,atol=0,rtol=0,output_abi=_output_abi)
+if not torch.equal(actual.contiguous().view(torch.int32), reference.output.contiguous().view(torch.int32)):
+ assert agreement["status"]=="failed"  # exactness mismatch must refuse device capture
+else:
+ assert agreement["status"]=="passed"
 """
     result = subprocess.run([python, "-c", script, operation], capture_output=True, text=True, timeout=120)
     assert result.returncode == 0, result.stdout + result.stderr[-5000:]

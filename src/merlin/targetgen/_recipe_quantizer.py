@@ -31,13 +31,16 @@ import math
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+from merlin.targetgen._recipe_integer import _per_tensor_scale as _per_tensor_scale
+from merlin.targetgen._recipe_integer import integer_recipes as integer_recipes
+
 RECIPE_SCHEMA = "quant_recipe_v1"
 DEFAULT_OBSERVER_EPSILON = 2**-12
 
 #: Recipe dtype -> the torch dtype a spec is built with. A dtype absent here is refused, not mapped
 #: to a neighbour: the recipe states the hardware's element format and a near miss is a different
 #: datapath.
-_TORCH_DTYPE = {"int8": "int8", "fp8_e4m3": "float8_e4m3fn", "fp8_e5m2": "float8_e5m2"}
+_TORCH_DTYPE = {"int8": "int8", "uint8": "uint8", "fp8_e4m3": "float8_e4m3fn", "fp8_e5m2": "float8_e5m2"}
 
 
 class RecipeError(ValueError):
@@ -941,128 +944,6 @@ def build_quantizer(
 
     return CapabilityQuantizer()
 
-
-def _per_tensor_scale(node: Any, operator: str) -> float | None:
-    """The literal per-tensor scale of a folded quantize/dequantize node, or None."""
-    if getattr(node, "op", None) != "call_function" or not str(node.target).startswith(operator):
-        return None
-    scale = node.args[1] if len(node.args) > 1 else None
-    return float(scale) if isinstance(scale, (int, float)) else None
-
-
-def _window_divisor(node: Any) -> int | None:
-    """The one element count a mean or unpadded average pool divides by, or None if it varies."""
-    argument = node.args[0] if node.args and hasattr(node.args[0], "meta") else None
-    source = argument.meta.get("val") if argument is not None else None
-    # Converted quantize/dequantize nodes often carry no value metadata; walk the Q/DQ chain to the
-    # first value that does (they all have the same shape).
-    while source is None and argument is not None and argument.args and hasattr(argument.args[0], "meta"):
-        argument = argument.args[0]
-        source = argument.meta.get("val")
-    result = node.meta.get("val")
-    if source is None or result is None or not hasattr(source, "shape"):
-        return None
-    name = str(node.target)
-    if "backward" in name or name.startswith("aten.col2im"):
-        return None  # a transpose spreads each window over many outputs: no single divisor per output
-    shape = [int(extent) for extent in source.shape]
-    if name.startswith("aten.mean.dim"):
-        dims = node.args[1] if len(node.args) > 1 else None
-        dims = [dims] if isinstance(dims, int) else list(dims or range(len(shape)))
-        return math.prod(shape[dim % len(shape)] for dim in dims) or None
-    if "adaptive_avg_pool" in name:
-        out = [int(extent) for extent in result.shape]
-        rank = len(node.args[1]) if len(node.args) > 1 else 0
-        if not rank or any(i % o for i, o in zip(shape[-rank:], out[-rank:], strict=True)):
-            return None  # windows of different sizes
-        return math.prod(i // o for i, o in zip(shape[-rank:], out[-rank:], strict=True))
-    if "avg_pool" in name:
-        kernel = node.args[1] if len(node.args) > 1 else None
-        padding = node.args[3] if len(node.args) > 3 else 0
-        override = node.args[6] if len(node.args) > 6 else None
-        if len(node.args) > 4 and node.args[4]:
-            return None  # ceil_mode: a partial last window divides by fewer elements
-        if isinstance(override, int) and override > 0:
-            return override
-        if any(int(p) for p in (padding if isinstance(padding, (list, tuple)) else [padding])):
-            return None  # padded border windows divide by a different count
-        return math.prod(int(k) for k in (kernel if isinstance(kernel, (list, tuple)) else [kernel]))
-    return None
-
-
-def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
-    """Integer recipe parameters for each converted affine map and movement, keyed by node name.
-
-    Reads the scales PT2E calibrated on the node's own dequantize inputs and quantize output, and
-    states the operation in the form :mod:`merlin.targetgen.recipe_numerics` defines: integer weights
-    and an int32 constant into the accumulator, then one readout. A node whose scales are not literal
-    per-tensor constants, or whose form the numerics refuse, is recorded with the reason.
-    """
-    from merlin.targetgen import recipe_numerics as RN
-
-    rows = []
-    for node in graph_module.graph.nodes:
-        family = node.meta.get("merlin_recipe_family")
-        if family is None:
-            continue
-        name = str(node.target)
-        inputs = [
-            _per_tensor_scale(arg, "quantized_decomposed.dequantize_per_tensor")
-            for arg in (node.args[0] if name.startswith("aten.cat") else node.args)
-            if hasattr(arg, "op")
-        ]
-        outputs = [_per_tensor_scale(user, "quantized_decomposed.quantize_per_tensor") for user in node.users]
-        s_out = next((scale for scale in outputs if scale is not None), None)
-        row: dict[str, Any] = {"node": node.name, "operator": name, "family": family, "input_scales": inputs}
-        try:
-            if s_out is None or (family == "affine_map" and None in inputs):
-                raise RN.RecipeNumericsError("the node's quantization scales are not literal per-tensor constants")
-            row["output_scale"] = s_out
-            scalar = node.args[1] if len(node.args) > 1 and isinstance(node.args[1], (int, float)) else None
-            alpha = float(node.kwargs.get("alpha", 1))
-            if name.startswith(("aten.sub.Tensor", "aten.add.Tensor")) and scalar is None and len(inputs) == 2:
-                sign = -1 if name.startswith("aten.sub") else 1
-                recipe = RN.linear_combination(inputs[0], alpha * inputs[1], s_out, sign_b=sign)
-            elif name.startswith(("aten.add.", "aten.sub.")) and scalar is not None:
-                sign = -1.0 if name.startswith("aten.sub") else 1.0
-                recipe = RN.affine(inputs[0], s_out, offset=sign * alpha * float(scalar))
-            elif name.startswith("aten.mul.") and scalar is not None:
-                recipe = RN.affine(inputs[0], s_out, gain=float(scalar))
-            elif name.startswith("aten.div.") and scalar is not None:
-                recipe = RN.affine(inputs[0], s_out, gain=1.0 / float(scalar))
-            elif name.startswith("aten.neg"):
-                recipe = RN.affine(inputs[0], s_out, gain=-1.0)
-            elif name.startswith("aten.relu"):
-                recipe = RN.affine(inputs[0], s_out, activation="relu")
-            else:
-                recipe = None
-            if family == "window_mean":
-                divisor = _window_divisor(node)
-                if divisor is None:
-                    raise RN.RecipeNumericsError("the window's element count varies or is not static")
-                row["readout_scale"] = RN.window_mean_readout(inputs[0], divisor, s_out)
-                row["divisor"] = divisor
-            if recipe is not None:
-                row["integer_recipe"] = recipe.to_dict()
-            elif family == "movement":
-                value = (
-                    node.args[1]
-                    if name.startswith(("aten.fill", "aten.full"))
-                    else node.args[2]
-                    if name.startswith("aten.constant_pad_nd") and len(node.args) > 2
-                    else node.args[3]
-                    if name.startswith("aten.pad") and len(node.args) > 3
-                    else 0.0
-                    if name.startswith(("aten.constant_pad_nd", "aten.pad"))
-                    else None
-                )
-                if isinstance(value, (int, float)):
-                    row["constant_code"] = RN.constant_code(float(value), s_out)
-                row["inputs"] = [RN.requantize(scale, s_out) if scale is not None else None for scale in inputs]
-        except (RN.RecipeNumericsError, TypeError, ValueError, ZeroDivisionError) as exc:
-            row["refused"] = str(exc)
-        rows.append(row)
-    return rows
 
 
 def quantize_config(recipe: Mapping[str, Any]):

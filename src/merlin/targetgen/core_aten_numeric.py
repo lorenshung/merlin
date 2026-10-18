@@ -27,6 +27,23 @@ def map_reference_boundary(fresh, reference, output_count):
     return outputs
 
 
+def map_reference_byte_boundary(fresh, reference, output_count):
+    """Cover every result and post-input dtype with exact transport bytes."""
+    expected = {}
+    for indices, values in (
+        (fresh["output_indices"], reference["output_bytes"]),
+        (fresh["semantic_boundary"]["post_indices"], reference["post_input_bytes"]),
+    ):
+        for index, value in zip(indices, values, strict=True):
+            key = str(index)
+            if key in expected and expected[key] != value:
+                raise ValueError("aliased exact reference byte observations disagree")
+            expected[key] = value
+    if set(expected) != {str(i) for i in range(output_count)}:
+        raise ValueError("exact reference bytes do not cover every exported result")
+    return expected
+
+
 def restore_caller_layouts(module, original, fresh, semantic_path):
     """Retain source caller storage for inputs and their actual exported post-call observations."""
     from xdsl.dialects.builtin import StringAttr
@@ -161,7 +178,11 @@ def prepare_spec_int8(
 
             function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
             returned = next(op for op in function.body.block.ops if op.name == "func.return")
-            accumulators = [contractions[site["source_operation_ordinal"]].results[0] for site in selected]
+            accumulators = [
+                contractions[site["source_operation_ordinal"]].results[0]
+                for site in selected
+                if site.get("readout") != "device_int8"
+            ]
             returned.operands = [*returned.operands, *accumulators]
             function.properties["function_type"] = FunctionType.from_lists(
                 [arg.type for arg in function.body.block.args], [value.type for value in returned.operands]
@@ -346,6 +367,7 @@ def prepare_spec_int8(
                     reasons=[str(exc)],
                 )
             non_contraction = False
+            plan.update(status="refused", quantized_contractions=0, quantized_non_contraction_sites=0)
             plan["refusal_code"] = exc.code
             plan["refusal_details"] = exc.details
             if exc.code == "fft_admission_refused":
@@ -401,8 +423,18 @@ def prepare_spec_int8(
                 records[0].update(numeric_admission=plan, numeric_selection=selection["identities"])
                 return document
             selected = captured_plan["sites"]
-            if len(selected) != len(reference["scales"]):
-                raise ValueError("captured contractions and independent PT2E reference census differ")
+            if len(selected) != len(reference["scales"]) or any(
+                scale.get("accumulator") is None for scale in reference["scales"]
+            ):
+                for site in selected:
+                    site.update(status="refused", reasons=["exact reference does not cover every emitted accumulator"])
+                plan = {**captured_plan, "status": "refused", "quantized_contractions": 0}
+                plan["source_sha256_before"] = hashlib.sha256(original).hexdigest()
+                plan["source_sha256_after"] = plan["source_sha256_before"]
+                document = {"selection": selection, **plan}
+                (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
+                records[0].update(numeric_admission=plan, numeric_selection=selection["identities"])
+                return document
             module = prepared_module
             plan = captured_plan
             if non_contraction_admitted:
@@ -432,7 +464,7 @@ def prepare_spec_int8(
                         "transfer_contracts.accumulator_readout"
                     )
                     site["host_readout_bridge"] = {"status": "composed_integer_readout"}
-                    observations.append((contraction.results[0],))
+                    observations.append(() if site.get("readout") == "device_int8" else (contraction.results[0],))
                     continue
                 # Readout preserves two separately rounded frontend f32 multiplies.
                 (cast, first_readout, readout), restored_readout, bridge = host_readout_chain(
@@ -552,20 +584,15 @@ def prepare_spec_int8(
             function.properties["function_type"] = FunctionType.from_lists(
                 [a.type for a in function.body.block.args], [v.type for v in returned.operands]
             )
-            expected_bytes = {
-                str(i): np.asarray(v, dtype=np.float32).tobytes().hex()
-                for i, v in enumerate(reference["outputs"])
-                if str(originals[i].type.element_type) == "f32"
-            }
+            expected_bytes = map_reference_byte_boundary(fresh, reference, len(originals))
             acc_index = len(originals)
             for site, scale, observed in zip(selected, reference["scales"], observations, strict=True):
-                expected_bytes[str(acc_index)] = np.asarray(scale["accumulator"], np.int32).tobytes().hex()
+                if observed:
+                    expected_bytes[str(acc_index)] = np.asarray(scale["accumulator"], np.int32).tobytes().hex()
                 if len(observed) == 2:
                     expected_bytes[str(acc_index + 1)] = np.asarray(scale["readout"], np.float32).tobytes().hex()
                 binding = next(
-                    b
-                    for b in proof["bindings"]
-                    if b["region"] == f"spec_int8_contraction_{site['source_operation_ordinal']}"
+                    b for b in proof["bindings"] if b["source_operation_ordinal"] == site["source_operation_ordinal"]
                 )
                 schedule = next(k for k in proof["kernels"] if k["symbol"] == binding["symbol"])
                 actual_bound = (
@@ -585,7 +612,7 @@ def prepare_spec_int8(
                     padded_primitive_k=schedule["padded_primitive_k"],
                 )
                 site.update(
-                    accumulator_output_index=acc_index,
+                    accumulator_output_index=acc_index if observed else None,
                     readout_output_index=acc_index + 1 if len(observed) == 2 else None,
                     actual_dispatch="provider catalog with independently checked WS schedule",
                     scales={k: v for k, v in scale.items() if k not in {"accumulator", "readout"}},
@@ -595,16 +622,16 @@ def prepare_spec_int8(
                 status="prepared",
                 engine=reference["engine"],
                 expected_output_bytes=expected_bytes,
-                final_f32_comparison="exact bit patterns; signed zero distinct",
+                final_comparison="exact bit patterns for every result dtype; signed zero distinct",
                 accumulator_comparison="exact i32",
             )
             plan["scales"] = [
                 {k: v for k, v in scale.items() if k not in {"accumulator", "readout"}} for scale in reference["scales"]
             ]
             record["scales"] = plan["scales"]
-            products = {scale["product"] for scale in plan["scales"]}
-            if len(products) == 1:
-                record["output_scale"] = next(iter(products))
+            products = {json.dumps(scale.get("product")): scale.get("product") for scale in plan["scales"]}
+            if len(products) == 1 and isinstance(next(iter(products.values())), (int, float)):
+                record["output_scale"] = next(iter(products.values()))
             observed_count = sum(len(observed) for observed in observations)
             report["output_count"] += observed_count
             from xdsl.dialects.builtin import StringAttr
@@ -915,7 +942,20 @@ def fp32_error(record, outputs) -> list[dict]:
         )
         # An output epilogue can combine several contraction sites. Report each
         # site's LSB explicitly; no invented single scale for composed outputs.
-        lsbs = [site.get("output_lsb", float(site["lhs"]) * float(site["rhs"])) for site in record.get("scales", [])]
+        lsb_errors = []
+        for i, site in enumerate(record.get("scales", [])):
+            lsb = site.get("output_lsb", site.get("product"))
+            if lsb is None and site.get("lhs") is not None and site.get("rhs") is not None:
+                lsb = (np.asarray(site["lhs"]) * np.asarray(site["rhs"])).tolist()
+            scalar = isinstance(lsb, (int, float)) and np.isfinite(lsb) and lsb > 0
+            lsb_errors.append(
+                dict(
+                    site=i,
+                    lsb=lsb,
+                    max_abs=float(np.max(difference, initial=0) / lsb) if scalar else None,
+                    rmse=rmse / lsb if scalar else None,
+                )
+            )
         errors.append(
             dict(
                 max_abs=float(np.max(difference, initial=0)),
@@ -925,10 +965,7 @@ def fp32_error(record, outputs) -> list[dict]:
                 sqnr_db=sqnr,
                 cosine=cosine,
                 normalized_l2=normalized_l2,
-                error_in_output_lsbs=[
-                    dict(site=i, lsb=lsb, max_abs=float(np.max(difference, initial=0) / lsb), rmse=rmse / lsb)
-                    for i, lsb in enumerate(lsbs)
-                ],
+                error_in_output_lsbs=lsb_errors,
                 contraction_diagnostics=[
                     dict(
                         operands=site.get("operands"),
@@ -938,11 +975,18 @@ def fp32_error(record, outputs) -> list[dict]:
                     for site in record.get("scales", [])
                 ],
                 output_lsb_error="not_applicable"
-                if not record.get("output_scale")
+                if not isinstance(record.get("output_scale"), (int, float)) or not record["output_scale"]
                 else float(np.max(difference, initial=0) / record["output_scale"]),
                 output_lsb_unit="contraction readout scale product; list gives each stage when no single scale exists",
                 contraction_output_lsb_errors=[
-                    dict(scale=scale["product"], max_error=float(np.max(difference, initial=0) / scale["product"]))
+                    dict(
+                        scale=scale["product"],
+                        max_error=float(np.max(difference, initial=0) / scale["product"])
+                        if isinstance(scale["product"], (int, float))
+                        and np.isfinite(scale["product"])
+                        and scale["product"] > 0
+                        else None,
+                    )
                     for scale in record.get("scales", [])
                     if "product" in scale
                 ],

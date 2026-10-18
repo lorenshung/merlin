@@ -50,7 +50,7 @@ else:
                      and row['status']!='unsupported' for row in rows)
  assert all(row['ignored_disjoint_host_precision_declarations']==['host_f32_bmm'] for row in rows)
  reference=run_pt2e_reference(converted,inputs)
- integer,receipt=integerize_static_pt2e(converted,inputs)
+ integer,receipt=integerize_static_pt2e(converted,inputs,numerics="integer_readout")
  if 'integer_bmm_emitted' in receipt:
   assert receipt['integer_bmm_emitted']==1
  else:

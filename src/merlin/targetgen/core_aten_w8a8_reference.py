@@ -7,15 +7,16 @@ Unsupported source operations refuse qualification rather than using compiled an
 from __future__ import annotations
 
 import itertools
-import math
 
 
 def quantize_codes(x, scale, *, quant_min, quant_max):
-    """The policy's f32 reciprocal-first RNE/clamp integer observation."""
+    """Exact rational divide and RNE/clamp, independent of reciprocal rounding."""
     import torch
 
-    rounded = torch.round(x * (1.0 / scale))
-    return torch.clamp(rounded, quant_min, quant_max).to(torch.int32)
+    from merlin.targetgen.exact_arithmetic import quantize
+
+    codes = quantize(x, scale, quant_min=quant_min, quant_max=quant_max)
+    return torch.tensor(codes.tolist(), dtype=torch.int32).reshape(codes.shape)
 
 
 def quantize_operand(original, *, quant_min, quant_max, eps):
@@ -131,7 +132,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                 codes, scale, finite, metrics = quantize_operand(
                     original, quant_min=quant_min, quant_max=quant_max, eps=eps
                 )
-                q.append(codes)
+                q.append(codes.to(torch.int64))
                 ss.append(scale)
                 valid.append(finite)
                 operands.append(metrics)
@@ -176,7 +177,13 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                         partial_max = max(partial_max, int(partial.to(torch.int64).abs().max()))
             maximum = int(acc.to(torch.int64).abs().max())
             combined = ss[0].double() * ss[1].double()
-            result = (acc.float().double() * combined).float()
+            import numpy as np
+
+            from merlin.targetgen.exact_arithmetic import exact_array, round_binary
+
+            exact = exact_array(acc) * exact_array(ss[0]) * exact_array(ss[1])
+            rounded = np.vectorize(round_binary, otypes=[float])(exact)
+            result = torch.tensor(rounded, dtype=torch.float32)
             restored = result.to(xs[-1].dtype)
             if all(valid):
                 if not bool(torch.isfinite(result).all() and torch.isfinite(restored).all()):
@@ -277,280 +284,60 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
 
 
 def run_pt2e_reference(model, inputs):
-    """Independent integer reference over the observed Q/DQ graph, before rewrite.
+    """Exact rational source Q/DQ oracle; eager float divergence is informational."""
+    from merlin.targetgen.exact_quantized_reference import run
 
-    Explicit ascending-K int64 MACs prove every prefix fits i32. Conv patches
-    use the frontend's declared kh/kw/channel order; no emitted integer graph
-    or device code is evaluated to manufacture expected accumulators.
-    """
-    from types import SimpleNamespace
-
-    import torch
-    from torch.nn import functional as F
-
-    sites = []
-    counts = {"linear": 0, "conv2d": 0, "matmul": 0}
-    dequant = torch.ops.quantized_decomposed.dequantize_per_tensor.default
-    targets = {
-        torch.ops.aten.mm.default: "matmul",
-        torch.ops.aten.matmul.default: "matmul",
-        torch.ops.aten.bmm.default: "matmul",
-        torch.ops.aten.linear.default: "linear",
-        torch.ops.aten.conv2d.default: "conv2d",
-    }
-
-    def codes(interpreter, operand):
-        raw, scale, zp, qmin, qmax, dtype = interpreter.fetch_args_kwargs_from_env(operand)[0][:6]
-        if zp != 0 or dtype != torch.int8 or (qmin, qmax) not in {(-128, 127), (-127, 127)}:
-            raise ValueError("PT2E reference requires symmetric tensor int8")
-        scale = float(torch.tensor(scale, dtype=torch.float32))
-        return raw.to(torch.int64), scale, dict(scale=scale, quantized_max_abs=int(raw.to(torch.int32).abs().max()))
-
-    def ascending_k(lhs, rhs):
-        """[M, K] x [K, N] in ascending K with every int64 prefix checked against i32."""
-        acc = torch.zeros((*lhs.shape[:-1], rhs.shape[-1]), dtype=torch.int64)
-        maximum = 0
-        for k in range(lhs.shape[-1]):
-            acc += lhs[..., :, k].unsqueeze(-1) * rhs[..., k, :].unsqueeze(-2)
-            maximum = max(maximum, int(acc.abs().max()))
-            if maximum > (1 << 31) - 1:
-                raise ValueError("reference i32 prefix overflow")
-        return acc, maximum
-
-    def read_out(acc, scales):
-        """``(f32(acc) * s1) * s2 ...``: one f32 multiply per scale, in order."""
-        if int(acc.abs().max()) > (1 << 31) - 1:
-            raise ValueError("reference i32 result overflow")
-        readout = acc.to(torch.int32).to(torch.float32)
-        for ordinal, scale in enumerate(scales, 1):
-            if not math.isfinite(scale):
-                raise ValueError(f"host readout scale {ordinal} is nonfinite")
-            readout = readout * torch.tensor(scale, dtype=torch.float32)
-            if not torch.isfinite(readout).all():
-                raise ValueError(f"finite-input host f32 multiply {ordinal} overflowed to inf")
-        return readout
-
-    def gemm_site(node, label, lhs, rhs, stats, scales):
-        acc, maximum = ascending_k(lhs, rhs)
-        sites.append(
-            dict(
-                node=f"{node.name}.{label}",
-                kind="conv2d",
-                lhs=scales[0],
-                rhs=scales[1],
-                product=scales[0] * scales[1],
-                # The GEMM's accumulator reaches its readout through further exact integer work (a tap
-                # accumulation, a layout change), so the site states the accumulator only.
-                readout_order="(f32(composed acc) * grad_scale) * operand_scale",
-                readout=None,
-                operands=stats,
-                accumulator=acc.to(torch.int32).tolist(),
-                accumulator_max_abs=int(acc.abs().max()),
-                prefix_max_abs=maximum,
-            )
-        )
-        return acc
-
-    def convolution_backward(interpreter, node):
-        """2-D convolution_backward over int8 codes: the backward GEMMs, exact sums, one readout each.
-
-        grad_input: per group the columns W^T[Cg*K, Fg] x dY[Fg, N*O], added tap by tap (ascending)
-        into strided windows of a zero accumulator; grad_weight: per group dY[Fg, N*O] x
-        im2col(X)[N*O, K*Cg] with taps then channels; grad_bias: the sum of dY over (N, H, W). Every
-        integer result is checked against torch's own exact float64 gradient of the codes, then read
-        out with its scales (s_g*s_w, s_g*s_x, s_g) as one f32 multiply each.
-        """
-        args = interpreter.fetch_args_kwargs_from_env(node)[0]
-        (g, sg, g_stats), (x, sx, x_stats), (w, sw, w_stats) = (codes(interpreter, a) for a in node.args[:3])
-        stride, padding, dilation = (list(args[i]) for i in (4, 5, 6))
-        transposed, output_padding, groups, mask = bool(args[7]), list(args[8]), int(args[9]), list(args[10])
-        if transposed or any(output_padding) or g.ndim != 4:
-            raise ValueError("reference covers 2-D non-transposed convolution_backward")
-        n, cin, h, wd = x.shape
-        _, fout, oh, ow = g.shape
-        _, cg, kh, kw = w.shape
-        fg, positions = fout // groups, n * oh * ow
-        rows = [g[:, i * fg : (i + 1) * fg].permute(1, 0, 2, 3).reshape(fg, positions) for i in range(groups)]
-        exact64 = [t.to(torch.float64) for t in (g, x, w)]
-        out = [None, None, None]
-        if mask[0]:
-            pieces = []
-            for i in range(groups):
-                weight_t = w[i * fg : (i + 1) * fg].reshape(fg, cg * kh * kw).transpose(0, 1)
-                columns = gemm_site(node, f"grad_input{i}", weight_t, rows[i], [w_stats, g_stats], [sw, sg])
-                columns = columns.reshape(cg, kh, kw, n, oh, ow)
-                acc = torch.zeros((n, cg, h + 2 * padding[0], wd + 2 * padding[1]), dtype=torch.int64)
-                for ky in range(kh):
-                    for kx in range(kw):
-                        y0, x0 = ky * dilation[0], kx * dilation[1]
-                        acc[
-                            :,
-                            :,
-                            y0 : y0 + (oh - 1) * stride[0] + 1 : stride[0],
-                            x0 : x0 + (ow - 1) * stride[1] + 1 : stride[1],
-                        ] += columns[:, ky, kx].permute(1, 0, 2, 3)
-                pieces.append(acc[:, :, padding[0] : padding[0] + h, padding[1] : padding[1] + wd])
-            acc = torch.cat(pieces, 1)
-            exact = torch.nn.grad.conv2d_input(
-                tuple(x.shape), exact64[2], exact64[0], stride, padding, dilation, groups
-            )
-            if not torch.equal(acc.to(torch.float64), exact):
-                raise ValueError("grad_input tap accumulation disagrees with the exact gradient")
-            out[0] = read_out(acc, [sg, sw])
-        if mask[1]:
-            padded = torch.nn.functional.pad(x, [padding[1], padding[1], padding[0], padding[0]])
-            pieces = []
-            for i in range(groups):
-                source = padded[:, i * cg : (i + 1) * cg]
-                patches = [
-                    source[
-                        :,
-                        :,
-                        ky * dilation[0] : ky * dilation[0] + oh * stride[0] : stride[0],
-                        kx * dilation[1] : kx * dilation[1] + ow * stride[1] : stride[1],
-                    ]
-                    .permute(0, 2, 3, 1)
-                    .reshape(positions, cg)
-                    for ky in range(kh)
-                    for kx in range(kw)
-                ]
-                acc = gemm_site(node, f"grad_weight{i}", rows[i], torch.cat(patches, 1), [g_stats, x_stats], [sg, sx])
-                pieces.append(acc.reshape(fg, kh, kw, cg).permute(0, 3, 1, 2))
-            acc = torch.cat(pieces, 0)
-            exact = torch.nn.grad.conv2d_weight(
-                exact64[1], tuple(w.shape), exact64[0], stride, padding, dilation, groups
-            )
-            if not torch.equal(acc.to(torch.float64), exact):
-                raise ValueError("grad_weight GEMM disagrees with the exact gradient")
-            out[1] = read_out(acc, [sg, sx])
-        if mask[2]:
-            out[2] = read_out(g.sum((0, 2, 3)), [sg])
-        counts["conv2d"] += 1
-        return tuple(out)
-
-    class Reference(torch.fx.Interpreter):
-        def run_node(self, node):
-            if (
-                node.op == "call_function"
-                and node.target == torch.ops.aten.convolution_backward.default
-                and all(isinstance(n, torch.fx.Node) and n.target == dequant for n in node.args[:3])
-            ):
-                return convolution_backward(self, node)
-            kind = targets.get(node.target)
-            if node.op != "call_function" or kind is None:
-                return super().run_node(node)
-            operands = node.args[:2]
-            if not all(isinstance(n, torch.fx.Node) and n.target == dequant for n in operands):
-                return super().run_node(node)
-            (lhs, lhs_scale, lhs_stats), (rhs, rhs_scale, rhs_stats) = (codes(self, a) for a in operands)
-            scales, stats = [lhs_scale, rhs_scale], [lhs_stats, rhs_stats]
-            args, kwargs = self.fetch_args_kwargs_from_env(node)
-            if kind == "conv2d":
-                stride = args[3] if len(args) > 3 else kwargs.get("stride", [1, 1])
-                padding = args[4] if len(args) > 4 else kwargs.get("padding", [0, 0])
-                dilation = args[5] if len(args) > 5 else kwargs.get("dilation", [1, 1])
-                groups = args[6] if len(args) > 6 else kwargs.get("groups", 1)
-                if groups != 1:
-                    raise ValueError("reference requires ungrouped conv2d")
-                n, cin, h, w = lhs.shape
-                cout, _, kh, kw = rhs.shape
-                oh = (h + 2 * padding[0] - dilation[0] * (kh - 1) - 1) // stride[0] + 1
-                ow = (w + 2 * padding[1] - dilation[1] * (kw - 1) - 1) // stride[1] + 1
-                cols = F.unfold(lhs.to(torch.float32), (kh, kw), dilation=dilation, padding=padding, stride=stride)
-                lhs = (
-                    cols.reshape(n, cin, kh, kw, oh * ow)
-                    .permute(0, 4, 2, 3, 1)
-                    .reshape(n * oh * ow, -1)
-                    .to(torch.int64)
-                )
-                rhs = rhs.permute(2, 3, 1, 0).reshape(-1, cout)
-            elif kind == "linear":
-                lhs = lhs.reshape(-1, lhs.shape[-1])
-                rhs = rhs.transpose(-1, -2)
-            acc, maximum = ascending_k(lhs, rhs)
-            acc = acc.to(torch.int32)
-            readout = read_out(acc, scales)
-            sites.append(
-                dict(
-                    node=node.name,
-                    kind=kind,
-                    lhs=scales[0],
-                    rhs=scales[1],
-                    product=scales[0] * scales[1],
-                    readout_order="(f32(acc) * lhs_scale) * rhs_scale",
-                    operands=stats,
-                    accumulator=acc.tolist(),
-                    readout=readout.tolist(),
-                    accumulator_max_abs=int(acc.abs().max()),
-                    prefix_max_abs=maximum,
-                )
-            )
-            counts[kind] += 1
-            if kind == "conv2d":
-                out = readout.reshape(n, oh, ow, cout).permute(0, 3, 1, 2)
-                if args[2] is not None:
-                    out = out + args[2].reshape(1, -1, 1, 1)
-                return out
-            if kind == "linear":
-                out = readout.reshape(*args[0].shape[:-1], rhs.shape[-1])
-                return out + args[2] if len(args) > 2 and args[2] is not None else out
-            return readout
-
-    output = Reference(model, garbage_collect_values=False).run(*inputs)
-    return SimpleNamespace(
-        output=output,
-        post_inputs=inputs,
-        sites=sites,
-        contraction_count=sum(counts.values()),
-        linear_count=counts["linear"],
-        conv2d_count=counts["conv2d"],
-        matmul_count=counts["matmul"],
-    )
+    return run(model, inputs)
 
 
 def selected_pt2e_reference(model, inputs, *, declared_readout=False, numerics="float_readout"):
-    """Select the independent reference and bind its actual implementation bytes.
-
-    ``numerics`` is the integerizer's readout (``float_readout`` or ``integer_readout``); the reference
-    evaluates the SAME readout the capture emits, so the oracle and the program agree by construction
-    on where the rounding is. The declared host-readout chain exists for the float readout only.
-    """
+    """Bind the exact-arithmetic oracle independently of the chosen lowering numerics."""
     import copy
     import hashlib
-    import inspect
-    import sys
     from pathlib import Path
 
-    from m2m.capture.pt2e_integer_reference import run_pt2e_integer_reference
+    from merlin.targetgen import exact_arithmetic, exact_quantized_reference
 
-    inputs = copy.deepcopy(inputs)
-    run = run_pt2e_reference if declared_readout else run_pt2e_integer_reference
-    source = Path(sys.modules[run.__module__].__file__).resolve()
-    if not source.is_file():
-        raise RuntimeError("selected integer reference source is unavailable")
-    identity = {"path": str(source), "sha256": hashlib.sha256(source.read_bytes()).hexdigest()}
-    if numerics == "float_readout":
-        return run(model, inputs), identity
-    if declared_readout:
-        raise ValueError("a declared host-readout chain is the float readout; it cannot check integer_readout")
-    if "numerics" not in inspect.signature(run).parameters:
-        raise ValueError("the selected frontend reference cannot evaluate the integer_readout numerics")
-    return run(model, inputs, numerics=numerics), {**identity, "numerics": numerics}
+    if numerics not in {"float_readout", "integer_readout"}:
+        raise ValueError(f"unknown readout numerics {numerics!r}")
+    source = Path(exact_quantized_reference.__file__).resolve()
+    identity = {
+        "path": str(source),
+        "sha256": hashlib.sha256(source.read_bytes()).hexdigest(),
+        "arithmetic": "exact_rational",
+        "numerics": numerics,
+        "dependencies": [
+            {
+                "path": str(Path(exact_arithmetic.__file__).resolve()),
+                "sha256": hashlib.sha256(Path(exact_arithmetic.__file__).read_bytes()).hexdigest(),
+            }
+        ],
+    }
+    return run_pt2e_reference(model, copy.deepcopy(inputs)), identity
 
 
 def write_pt2e_reference(path, reference, leaves, source):
     """Retain independent outputs and contraction observations beside capture."""
     import json
 
+    import torch
+
     from merlin.targetgen._capture_tensor_values import to_native
+
+    def raw(value):
+        return value.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes().hex()
 
     path.write_text(
         json.dumps(
             {
-                "engine": "independent_pt2e_ascending_k_integer_mac",
+                "engine": "independent_pt2e_exact_rational",
+                "arithmetic": "exact_rational",
+                "eager_float_divergence": reference.eager_float_divergence,
                 "outputs": [to_native(value) for value in leaves],
+                "output_bytes": [raw(value) for value in leaves],
                 "scales": reference.sites,
                 "post_inputs": [to_native(value) for value in reference.post_inputs],
+                "post_input_bytes": [raw(value) for value in reference.post_inputs],
                 "source": source,
             },
             indent=2,
