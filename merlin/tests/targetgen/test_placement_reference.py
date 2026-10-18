@@ -197,3 +197,20 @@ def test_named_inner_axis_selectors_are_not_contiguous_dma(text, reason):
     pattern, evidence, _ = movement_pattern(parse_mlir_text(text))
     assert pattern == "element_gather"
     assert evidence[0]["reason"] == reason
+
+
+def test_static_index_arithmetic_is_not_device_computation():
+    module = parse_mlir_text("""module {
+      func.func @forward(%e: tensor<7xi64>) -> tensor<7xi64> {
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>], iterator_types=["parallel"]}
+          outs(%e : tensor<7xi64>) {
+          ^bb0(%unused: i64):
+            %i=linalg.index 0 : index
+            %v=arith.index_cast %i : index to i64
+            linalg.yield %v : i64
+          } -> tensor<7xi64>
+        func.return %r : tensor<7xi64>
+      }}""")
+    declaration, facts = inputs()
+    result = estimate_reference(module, candidate(module, "movement", "F1"), declaration, facts)
+    assert result["reason_code"] == "index_generated_constant_host"

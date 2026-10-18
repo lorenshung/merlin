@@ -22,6 +22,8 @@ def movement_pattern(module):
 
     for op in module.walk():
         if op.name == "linalg.generic":
+            if any(child.name == "tensor.extract" for child in op.walk()):
+                evidence.append(dict(operation=op.name, reason="explicit_element_index_lookup"))
             maps = list(op.indexing_maps)
             for mapping, operand in zip(maps, op.operands, strict=True):
                 shape = operand.type.get_shape()
@@ -97,6 +99,16 @@ def estimate_reference(original, plan, declaration, facts):
             if families & {"reduction", "window_mean"}
             else "elementwise_map"
         )
+        if (
+            family == "movement"
+            and any(op.name == "linalg.index" for op in original.walk())
+            and not any(op.name == "tensor.extract" for op in original.walk())
+        ):
+            # Static index-generated values were evaluated into a literal table
+            # by the byte-selector provider. Moving that table does none of the
+            # source arithmetic, so it is not an accelerated computation.
+            result.update(reason_code="index_generated_constant_host", family=family)
+            return result
         workload = reference["workloads"][family]
         if any(type(v) is not int or v <= 0 for v in workload.values()):
             raise ValueError("reference workload extents must be positive integers")
