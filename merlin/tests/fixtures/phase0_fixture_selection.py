@@ -57,6 +57,7 @@ def fixture_resolved(target_dir: Path, target: str) -> dict:
         readout_facets=FACETS,
         quantization_candidates=QUANT,
         taxonomy={},
+        semantic_facts={"facts": {"accumulate_on_load": {"status": "derived"}}},
     )
     spec, _ = D.resolve_spec(load_software_spec(target_dir / "software-spec.yaml", target=target), facts)
     return spec

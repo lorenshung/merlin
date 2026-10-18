@@ -67,12 +67,14 @@ def standalone_admission(
         )
     admitted = [p for p in paths if p["admitted"]]
     if admitted:
+        checked = [p for p in admitted if p["fact_status"] == DERIVED]
+        selected = (checked or admitted)[0]
         return {
             "standalone": True,
-            "basis": "evidence",
+            "basis": "evidence" if checked else "declared_unchecked",
             "paths": paths,
-            "reason": f"{capability.family} runs standalone through {admitted[0]['fact']} "
-            f"using roles {admitted[0]['roles']}",
+            "reason": f"{capability.family} {'runs' if checked else 'is declared'} standalone through {selected['fact']} "
+            f"using roles {selected['roles']}" + ("" if checked else "; semantic fact not checked"),
         }
     why = "; ".join(
         f"{p['fact']}: "

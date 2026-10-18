@@ -101,6 +101,7 @@ def fact_capabilities(
     quantization_candidates: Iterable[Mapping[str, Any]] = (),
     taxonomy: Mapping[str, Any] | None = None,
     prohibited_roles: Iterable[str] = (),
+    semantic_facts: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Per-family capability from the derived ladder, the evidence-checked contract and the facets.
 
@@ -140,7 +141,11 @@ def fact_capabilities(
     for family in sorted({*derived.supported, *declared, *derived.unknown}):
         evidence = derived.supported.get(family)
         capabilities = declared.get(family, [])
-        verdict = CR.family_admission(units, family, prohibited_roles=prohibited_roles) if capabilities else None
+        verdict = (
+            CR.family_admission(units, family, prohibited_roles=prohibited_roles, semantic_facts=semantic_facts)
+            if capabilities
+            else None
+        )
         notes: list[str] = []
         composed: set[str] = set()
         mode = None
@@ -510,7 +515,6 @@ def resolve_spec(spec: Mapping[str, Any], facts: Mapping[str, Any]) -> tuple[dic
         family = semantic_family(row)
         form = (forms.get(family) or {}).get(form_name)
         record = {"id": row["id"], "family": family, "form": form_name, "fields": {}, "evidence": {}}
-        row["derived_from_facts"] = {"form": form_name, "family": family}
         signature = row.setdefault("signature", {})
         if form is None:
             row["placement"] = "unknown"
@@ -519,6 +523,7 @@ def resolve_spec(spec: Mapping[str, Any], facts: Mapping[str, Any]) -> tuple[dic
             unresolved.append(record)
             rows.append(record)
             continue
+        row["derived_from_facts"] = {"form": form_name, "family": family}
         for field, fact in sorted(form.items()):
             values = list(fact.values)
             if field == "placement":
