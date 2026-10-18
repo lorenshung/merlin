@@ -46,6 +46,8 @@ def evaluate(module, arrays):
         name = op.name
         if name == "arith.constant":
             result = op.value.value.data
+            if not isinstance(op.results[0].type, IntegerType):
+                result = int.from_bytes(op.results[0].type.pack([result]), "little")
         elif name in {"arith.extsi", "arith.trunci", "arith.bitcast"}:
             result = a[0]
         elif name == "arith.extui":
@@ -62,8 +64,17 @@ def evaluate(module, arrays):
             assert 0 <= a[1] < op.results[0].type.width.data
             result = a[0] << a[1]
         elif name == "arith.cmpi":
-            assert op.predicate.value.data == 1
-            result = int(a[0] != a[1])
+            predicate = op.predicate.value.data
+            assert predicate in (1, 2)
+            result = int(a[0] != a[1] if predicate == 1 else a[0] < a[1])
+        elif name == "arith.cmpf":
+            import struct
+
+            assert str(op.operands[0].type) == "f16" and op.predicate.value.data == 4
+            left, right = [struct.unpack("<e", (int(value) & 0xFFFF).to_bytes(2, "little"))[0] for value in a]
+            result = int(left < right)
+        elif name == "arith.select":
+            result = a[1] if a[0] else a[2]
         else:
             raise AssertionError(name)
         env[op.results[0]] = normalize(result, op.results[0].type)
@@ -173,3 +184,42 @@ def test_native_sign_transform_keeps_all_ieee_payload_bits_in_integer_literals()
     source.verify()
     for words in [[0, 0x8000, 0x7C00, 0xFC00], [0x7E01, 0xFE7F, 0x7C01, 0xFC01], [0x0001, 0x8001, 0x3C00, 0xBC00]]:
         assert [value & 0xFFFF for value in evaluate(source, [words])] == [word ^ 0x8000 for word in words]
+
+
+@pytest.mark.parametrize("dtype,predicate,zero", [("f16", "olt", "0.0"), ("i64", "slt", "0")])
+def test_clamp_epilogue_preserves_source_comparison_and_payloads(dtype, predicate, zero):
+    from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
+
+    source = parse_mlir_text(
+        """builtin.module {
+      func.func @forward(%x: tensor<4xTYPE>) -> tensor<4xTYPE> {
+        %e = tensor.empty() : tensor<4xTYPE>
+        %r = linalg.generic {
+          indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>], iterator_types=["parallel"]
+        } ins(%x : tensor<4xTYPE>) outs(%e : tensor<4xTYPE>) {
+        ^bb0(%a: TYPE,%unused: TYPE):
+          %zero=arith.constant ZERO : TYPE
+          %p=arith.CMP PRED,%a,%zero : TYPE
+          %v=arith.select %p,%zero,%a : TYPE
+          linalg.yield %v : TYPE
+        } -> tensor<4xTYPE>
+        func.return %r : tensor<4xTYPE>
+      }}""".replace("TYPE", dtype)
+        .replace("ZERO", zero)
+        .replace("PRED", predicate)
+        .replace("CMP", "cmpf" if dtype == "f16" else "cmpi")
+    )
+    bounds, proofs = rewrite_native_sign_components(source)
+    assert proofs[0]["arithmetic"] == "source_compare_select_retained_host"
+    plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[1 << 63], known_bounds=bounds)
+    assert plans
+    source.verify()
+    if dtype == "f16":
+        for words, expected in [
+            ([0, 0x8000, 0x7C00, 0xFC00], [0, 0x8000, 0x7C00, 0]),
+            ([0x7E01, 0xFE7F, 0x7C01, 0xFC01], [0x7E01, 0xFE7F, 0x7C01, 0xFC01]),
+            ([0x0001, 0x8001, 0x3C00, 0xBC00], [0x0001, 0, 0x3C00, 0]),
+        ]:
+            assert [v & 0xFFFF for v in evaluate(source, [words])] == expected
+    else:
+        assert evaluate(source, [[-(1 << 63), -1, 0, (1 << 63) - 1]]) == [0, 0, 0, (1 << 63) - 1]

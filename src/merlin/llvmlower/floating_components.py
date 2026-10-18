@@ -6,7 +6,7 @@ from math import prod
 from merlin.llvmlower.fixed_point_ir import FORMAT, encode_fixed_integer, finite_grid
 
 
-def rewrite_floating_components(module, input_grids, *, complex_inputs=()):
+def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow_reassociation=False):
     """Return new integer bounds and closed finite representation proofs.
 
     Source packing uses exact power-of-two scaling in binary64, bounded to
@@ -40,6 +40,7 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=()):
     components = {}
     bounds = {}
     proofs = []
+    raw_forms = {}
 
     def floating(value):
         return hasattr(value.type, "element_type") and str(value.type.element_type) in FORMAT
@@ -88,6 +89,8 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=()):
         return None
 
     def grid(value):
+        if allow_reassociation and value in raw_forms and raw_forms[value][3] == 1:
+            return raw_forms[value][1:3]
         if value in grids:
             return grids[value]
         op = value.owner
@@ -141,6 +144,24 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=()):
         return generic.results[0]
 
     def pack(value, exponent, operations):
+        if allow_reassociation and value in raw_forms:
+            integer, source_exponent, bound, divisor = raw_forms[value]
+            if divisor != 1 or exponent > source_exponent:
+                raise ValueError("raw rational component cannot be packed as an integer")
+            aligned = bound << (source_exponent - exponent)
+            if aligned.bit_length() > 62:
+                raise ValueError("raw exact component exceeds the signed-i64 operand representation")
+
+            def scalar(values, emit):
+                result = values[0]
+                if source_exponent != exponent:
+                    shift = emit(arith.ConstantOp(IntegerAttr(source_exponent - exponent, i128)))
+                    result = emit(arith.ShLIOp(result, shift))
+                return emit(arith.TruncIOp(result, i64))
+
+            packed = point([integer], TensorType(i64, value.type.get_shape()), scalar, operations)
+            bounds[packed] = aligned
+            return packed, aligned
         source_grid = grid(value)
         if source_grid is None:
             raise ValueError("floating source lacks a complete finite dyadic input proof")
@@ -150,6 +171,8 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=()):
         aligned = bound * (1 << (e - exponent)) if bound else 0
         if aligned.bit_length() > 52:
             raise ValueError("aligned fixed-point coefficient exceeds the exact binary64 packing bound")
+        if not -1023 <= exponent <= 1074:
+            raise ValueError("exact binary64 packing scale is outside its representable exponent range")
 
         def scalar(args, emit):
             value = args[0]
@@ -178,12 +201,12 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=()):
             bounds[changed.result] = bounds[value]
         return changed.result
 
-    def publish(op, integer, exponent, integer_bound, operations, compute_type=None):
+    def publish(op, integer, exponent, integer_bound, operations, compute_type=None, denominator=1):
         compute_type = compute_type or op.results[0].type.element_type
         output_type = op.results[0].type.element_type
 
         def convert(values, emit):
-            rounded = encode_fixed_integer(values[0], exponent, compute_type, emit)
+            rounded = encode_fixed_integer(values[0], exponent, compute_type, emit, denominator=denominator)
             if output_type != compute_type:
                 rounded = emit(arith.TruncFOp(rounded, output_type))
             return rounded
@@ -268,9 +291,12 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=()):
         max_exponent = (2 * integer_bound).bit_length() - 1 + exponent if integer_bound else 0
         grids[result] = (
             (exponent, 2 * integer_bound)
-            if (2 * integer_bound).bit_length() <= 52 and max_exponent < FORMAT[str(output_type)][2]
+            if denominator == 1
+            and (2 * integer_bound).bit_length() <= 52
+            and max_exponent < FORMAT[str(output_type)][2]
             else None
         )
+        raw_forms[result] = (integer, exponent, integer_bound, denominator)
         tag = getattr(integer.owner.attributes.get("merlin.exact_component"), "data", None)
         if tag:
             components[result] = tag

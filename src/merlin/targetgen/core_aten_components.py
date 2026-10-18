@@ -68,7 +68,7 @@ def prepare_integer_components(directory, report, selection, provider, package, 
     conversion_bounds, conversion_count = rewrite_integer_float_boundaries(module, bounds)
     known_bounds.update(conversion_bounds)
     sign_proofs = []
-    if any(dtype in {"f16", "bf16", "f64", "complex<f32>"} for dtype in native_types):
+    if any(dtype in {"i8", "i16", "i32", "i64", "f16", "bf16", "f64", "complex<f32>"} for dtype in native_types):
         from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
 
         sign_bounds, sign_proofs = rewrite_native_sign_components(module)
@@ -102,7 +102,9 @@ def prepare_integer_components(directory, report, selection, provider, package, 
             (directory / "exact-dtype-refusal.json").write_text(json.dumps(dict(family="F2", reason=str(exc))) + "\n")
             return None
         complex_indices = [i for i, dtype in enumerate(native_types) if dtype == "complex<f32>"]
-        floating_bounds, floating_proofs = rewrite_floating_components(module, grids, complex_inputs=complex_indices)
+        floating_bounds, floating_proofs = rewrite_floating_components(
+            module, grids, complex_inputs=complex_indices, allow_reassociation=order_dependent
+        )
         known_bounds.update(floating_bounds)
         if not floating_proofs and not boolean_count:
             return None
@@ -127,6 +129,18 @@ def prepare_integer_components(directory, report, selection, provider, package, 
     )
     if not plans:
         return None
+    if order_dependent and floating_proofs:
+        from merlin.targetgen.native_rational_reference import rational_outputs
+
+        try:
+            for record in report["cases"]:
+                rational_outputs(record["case"])
+        except (ValueError, TypeError, OverflowError, ZeroDivisionError) as exc:
+            (directory / "exact-dtype-refusal.json").write_text(
+                json.dumps(dict(family="F2", reason="independent native reduction reference unavailable: " + str(exc)))
+                + "\n"
+            )
+            return None
     for origin, destination, dtype in (("host", "accelerator", "i8"), ("accelerator", "host", "i32")):
         decision = screen_transfer_contract(
             selection["spec"],

@@ -106,7 +106,7 @@ def test_emitted_rne_matches_nearest_ieee_search(dtype):
     samples = [
         (n, e, d)
         for n in (0, 1, -1, 3, -3, (1 << 119) - 1, -(1 << 119) + 1)
-        for e in (-300, -149, -24, -1, 0, 128)
+        for e in (-1200, -1074, -300, -149, -24, -1, 0, 128, 1023, 1100)
         for d in (1, 3, 7)
     ]
     samples += [
