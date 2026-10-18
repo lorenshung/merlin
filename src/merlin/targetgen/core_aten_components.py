@@ -36,6 +36,8 @@ def prepare_integer_components(directory, report, selection, provider, package, 
             value = inputs[key]
             arrays.append(value.copy())
             bounds.append(max((abs(int(v)) for v in value.flat), default=0) if value.dtype.kind in "biu" else None)
+    recorded_integer_bounds = list(bounds)
+    grids = []
     # Float components have a distinct representation and must never inherit an integer cast.
     functions = [op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward"]
     if not functions:
@@ -241,7 +243,11 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         integer_float_boundaries={"count": conversion_count, "rounding": "source_sitofp_before_host_epilogue"},
         input_bound_proof=dict(
             method="complete_immutable_input_payload",
-            absolute_bounds=bounds,
+            absolute_bounds=recorded_integer_bounds,
+            dyadic_grids=[
+                None if value is None else dict(binary_exponent=value[0], integer_absolute_bound=value[1])
+                for value in grids
+            ],
             input_sha256=hashlib.sha256((directory / "inputs.npz").read_bytes()).hexdigest(),
         ),
         host_floor=dict(
