@@ -115,6 +115,9 @@ operations:
     aliasing: [disjoint_inputs_outputs]
   movement_bitwise:
     status: reviewed
+    evidence:
+      review_status: "authored, pending operator review"
+      scope: "Authored family admission screen; source/provider proofs and exact execution gates remain mandatory"
     families: [movement]
     placement: accelerator
     signature:
@@ -132,6 +135,9 @@ operations:
       comparison: native_eager_bits
   component_linear:
     status: reviewed
+    evidence:
+      review_status: "authored, pending operator review"
+      scope: "Authored family admission screen; source/provider proofs and exact execution gates remain mandatory"
     families: [elementwise_map, reduction]
     placement: accelerator
     signature:
@@ -147,6 +153,9 @@ operations:
       recombination: retained_source_host_exact_integer
   component_bilinear:
     status: reviewed
+    evidence:
+      review_status: "authored, pending operator review"
+      scope: "Authored family admission screen; source/provider proofs and exact execution gates remain mandatory"
     families: [contraction]
     placement: accelerator
     signature:
@@ -194,6 +203,9 @@ operations:
     quantization_parameters: {zero_point: 0, quant_min: -128, quant_max: 127}
   host_quantize_exact:
     status: reviewed
+    evidence:
+      review_status: "authored, pending operator review"
+      change: "Generalized exact rank-agnostic host Q/DQ to ranks 0 through 5; not an extension of prior operator approval"
     ops: [quantized_decomposed.quantize_per_tensor.default]
     placement: host
     ordered_operand_dtypes: [f32, f64, i64]
@@ -203,6 +215,9 @@ operations:
   # lowering, execution and numerical qualification of the emitted compiler.
   host_dequantize_per_tensor:
     status: reviewed
+    evidence:
+      review_status: "authored, pending operator review"
+      change: "Generalized exact rank-agnostic host Q/DQ to ranks 0 through 5; not an extension of prior operator approval"
     ops: [quantized_decomposed.dequantize_per_tensor.default]
     placement: host
     ordered_operand_dtypes: [i8, f32, i64]

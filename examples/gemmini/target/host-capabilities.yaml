@@ -36,6 +36,7 @@ operations:
         boolean: source_boolean_algebra
         output_gate: native_eager_storage_bits_or_proved_exact_reduction_floor
       evidence:
+        review_status: "authored, pending operator review"
         basis: Phase B exact dtype family design; every source rewrite and compiled execution retains its own proof obligation
   - id: host_f32_elementwise_exact
     ops: [aten.mul.Tensor, aten.add.Tensor, aten.add.Scalar, aten.div.Tensor, aten.relu.default]
@@ -106,7 +107,7 @@ operations:
     numerical_contract:
       status: reviewed
       semantics: {formula: "clamp(RNE(exact(x) / exact(scale)) + zero_point, quant_min, quant_max)", rounding: round_half_to_even, scale_dtype: f64}
-      evidence: {reviewed_by: "operator exact-arithmetic decision 2026-10-17", basis: "frontend exact quantization retains the binary scale and its rational pair; single exact RNE required"}
+      evidence: {review_status: "authored, pending operator review", rank_extension: "Exact Q/DQ arithmetic is rank-agnostic; ranks 0 through 5 added; prior approval does not cover this widening", reviewed_by: "operator exact-arithmetic decision 2026-10-17", basis: "frontend exact quantization retains the binary scale and its rational pair; single exact RNE required"}
   - id: host_dequantize_per_tensor
     status: reviewed
     ops: [quantized_decomposed.dequantize_per_tensor.default]
@@ -117,6 +118,8 @@ operations:
       status: reviewed
       semantics: {formula: "f32(i8 - zero_point) * scale", scale_granularity: tensor, zero_point: 0}
       evidence:
+        review_status: "authored, pending operator review"
+        rank_extension: "Exact Q/DQ arithmetic is rank-agnostic; ranks 0 through 5 added; prior approval does not cover this widening"
         reviewed_by: "operator approval 2026-10-03 in this session"
         basis: "Fresh preselected sealed int8 captures of residual_cnn and causal_decoder have this exact typed signature. Independent rank-3 and rank-4 PyTorch probe captures and native-host qualifications matched their exact input goldens at zero tolerance. The selected standard-dialect lowering uses signed integer-to-f32 conversion, subtraction of the zero point, then multiplication by the f32 scale. These finite checks support this narrowly reviewed declaration, not RVV/device execution or every scale, shape and value."
   - id: host_embedding_gather
