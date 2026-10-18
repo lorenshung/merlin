@@ -258,6 +258,12 @@ def test_window_reduction_ignores_unread_shape_operand():
             assert len(op.inputs) == 2
             assert len(op.get_indexing_maps()) == 3
             assert not op.body.block.args[1].uses
+            plan = json.loads(op.attributes["test.limb"].data)
+            assert {entry["operand"] for entry in plan["inputs"]} == {0, 1}
+            data = next(entry for entry in plan["inputs"] if entry["operand"] == 0)
+            assert next(entry for entry in plan["inputs"] if entry["operand"] == 1) == dict(
+                operand=1, index=0, count=1, exponent=8 * data["index"] + data["exponent"]
+            )
 
 
 def test_proved_zero_digits_can_be_omitted_without_changing_exact_values():

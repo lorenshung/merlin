@@ -117,6 +117,23 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         return point([source], TensorType(i8, source.type.get_shape()), scalar)
 
     def mark(producer, entries, component=None):
+        from merlin.llvmlower.additive_regions import positive_zero_seed
+
+        entries = list(entries)
+        covered = {entry["operand"] for entry in entries}
+        zero_exponent = 8 * entries[0]["index"] + entries[0]["exponent"] if entries else 0
+        for index, value in enumerate(producer.inputs):
+            if (
+                index not in covered
+                and width(value) == 8
+                and not producer.body.block.args[index].uses
+                and positive_zero_seed(value)
+            ):
+                # An unread literal byte tensor still supplies its static loop
+                # domain. The plan must cover that operand as the exact one-byte
+                # zero representation at the data plane's binary exponent.
+                # Scaling zero by that exponent is exact for every limb index.
+                entries.append(dict(operand=index, index=0, count=1, exponent=zero_exponent))
         plan = dict(version=1, family="F2", radix=256, inputs=entries)
         if component is not None:
             plan.update(family="F4", component=component)
