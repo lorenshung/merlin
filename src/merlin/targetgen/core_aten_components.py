@@ -19,7 +19,7 @@ def require_component_identity(directory, plan):
 
 def unlowered_data_reductions(module, limb_attribute):
     """A device prelude cannot stand in for any retained floating data reduction."""
-    from xdsl.dialects.builtin import IntegerType
+    from xdsl.dialects.builtin import IndexType, IntegerType
 
     result = []
     for ordinal, op in enumerate(module.walk()):
@@ -46,7 +46,11 @@ def unlowered_data_reductions(module, limb_attribute):
             "arith.minsi",
             "arith.minui",
         }:
-            parent = op.parent_op()
+            # Index predicates select addresses or representation components;
+            # they are not retained numerical comparisons of tensor values.
+            if op.operands and all(isinstance(value.type, IndexType) for value in op.operands):
+                continue
+            parent = op
             while parent is not None and "merlin.exact_host_arithmetic" not in parent.attributes:
                 parent = parent.parent_op()
             if parent is None:

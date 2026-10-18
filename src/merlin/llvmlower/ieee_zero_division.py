@@ -9,7 +9,7 @@ arithmetic are replayed. Finite-grid admission remains a separate obligation.
 
 def rewrite_zero_division(module):
     from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, FloatAttr, IntegerAttr, IntegerType
+    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, FloatAttr, IntegerAttr, IntegerType, UnitAttr
     from xdsl.dialects.linalg import ops as L
     from xdsl.ir import Block, Region
     from xdsl.ir.affine import AffineMap
@@ -85,6 +85,7 @@ def rewrite_zero_division(module):
             iterator_types=op.get_iterator_types(),
             result_types=[typ],
         )
+        overlay.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
         Rewriter.replace_op(op, [one, ones, empty, numerator, destination, overlay], [overlay.results[0]])
         count += 1
     module.verify()
@@ -94,7 +95,7 @@ def rewrite_zero_division(module):
 def retain_nan_narrowing(module):
     """Make native CPU NaN narrowing bits explicit; finite conversions stay intact."""
     from xdsl.dialects import arith
-    from xdsl.dialects.builtin import IntegerAttr, IntegerType
+    from xdsl.dialects.builtin import IntegerAttr, IntegerType, UnitAttr
 
     from merlin.llvmlower.fixed_point_ir import FORMAT
 
@@ -121,6 +122,7 @@ def retain_nan_narrowing(module):
         raw = emit(arith.BitcastOp(source, wide))
         magnitude = emit(arith.AndIOp(raw, constant((1 << (sf + se)) - 1)))
         nan = emit(arith.CmpiOp(magnitude, constant(((1 << se) - 1) << sf), "ugt"))
+        nan.owner.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
         if str(target) == "bf16":
             bits = constant(0x7FC0, narrow)
         else:

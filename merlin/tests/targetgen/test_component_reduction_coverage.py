@@ -150,3 +150,12 @@ def test_an_unqualified_integer_comparison_remains_host():
         func.return %v : i1
       }}""")
     assert unlowered_data_reductions(module, "test.limb")
+
+
+def test_address_predicates_do_not_claim_remaining_numerical_arithmetic():
+    module = parse_mlir_text("""module {
+      func.func @forward(%i: index,%n: index) -> i1 {
+        %r=arith.cmpi ult, %i,%n : index
+        return %r : i1
+      }}""")
+    assert unlowered_data_reductions(module, "test.limb") == []

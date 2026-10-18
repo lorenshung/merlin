@@ -66,5 +66,8 @@ that every instantiated dtype or sample runs faster.
 
 Unqualified source comparisons and maxima/minima after a conversion also fail
 complete-operation coverage. Generated Boolean truth decoding and closed
-sign/clamp readouts carry their own exact host arithmetic proof markers; these
-readouts do not grant permission to retain arbitrary source predicates.
+sign/clamp, integer RNE, signed-zero and IEEE special-value readouts carry their
+own exact host arithmetic proof markers. Index predicates select addresses or
+representation components; numerical comparisons of tensor values remain
+guarded. These readouts do not grant permission to retain arbitrary source
+predicates.

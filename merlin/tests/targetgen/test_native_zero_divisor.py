@@ -61,4 +61,5 @@ def test_zero_divisor_falls_back_before_provider(tmp_path):
         is None
     )
     assert (tmp_path / "model.mlir").read_text() == original
-    assert "NaN-payload policy" in json.loads((tmp_path / "exact-dtype-refusal.json").read_text())["reason"]
+    refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
+    assert refusal["reason"] == "zero-divisor source is outside the closed IEEE pointwise family"

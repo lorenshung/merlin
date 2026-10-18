@@ -37,7 +37,7 @@ def has_literal_zero_divisor(module):
 
 def rewrite_integer_float_boundaries(module, input_bounds, *, output_grids=None):
     from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import ArrayAttr, IntegerAttr, TensorType, i128
+    from xdsl.dialects.builtin import ArrayAttr, IntegerAttr, TensorType, UnitAttr, i128
     from xdsl.dialects.linalg import ops as L
     from xdsl.ir import Block, Region
     from xdsl.rewriter import Rewriter
@@ -107,6 +107,7 @@ def rewrite_integer_float_boundaries(module, input_bounds, *, output_grids=None)
             iterator_types=op.get_iterator_types(),
             result_types=[op.results[0].type],
         )
+        converted.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
         if output_grids is not None:
             # Integer-to-float rounding preserves integrality. The rounded
             # magnitude is bounded by twice the original integer magnitude.

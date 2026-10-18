@@ -9,6 +9,7 @@ from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.fixed_point_ir import FORMAT
 from merlin.llvmlower.floating_components import rewrite_floating_components
 from merlin.llvmlower.ieee_zero_division import rewrite_zero_division
+from merlin.targetgen.core_aten_components import unlowered_data_reductions
 
 
 def scalar_bits(block, arguments):
@@ -82,6 +83,7 @@ def test_exact_zero_uses_ieee_rne_operand_signs(token, operation):
     source = module(token, operation)
     _, proofs = rewrite_floating_components(source, [(0, 1), (0, 1)])
     assert proofs
+    assert unlowered_data_reductions(source, "test.limb") == []
     final = list(op for op in source.walk() if op.name == "linalg.generic")[-1]
     f, e, bias = FORMAT[token]
     sign = 1 << (f + e)
@@ -101,6 +103,7 @@ def test_zero_divisor_overlay_depends_on_the_computed_numerator(token, divisor):
     source = module(token, "divf", divisor)
     assert rewrite_zero_division(source) == 1
     producers = list(op for op in source.walk() if op.name == "linalg.generic")
+    assert "merlin.exact_host_arithmetic" in producers[-1].attributes
     assert producers[-1].inputs[0].owner is producers[-2]
     f, e, bias = FORMAT[token]
     sign, inf = 1 << (f + e), ((1 << e) - 1) << f

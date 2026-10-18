@@ -1,7 +1,7 @@
 """Exact rational RNE and IEEE signed-zero epilogues over full integer readout."""
 
 from xdsl.dialects import arith, tensor
-from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, FloatAttr, IntegerAttr
+from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, FloatAttr, IntegerAttr, UnitAttr
 from xdsl.dialects.linalg import ops as L
 from xdsl.ir import Block, Region
 from xdsl.ir.affine import AffineMap
@@ -116,6 +116,7 @@ def component_readout(
                 iterator_types=op.get_iterator_types(),
                 result_types=[op.results[0].type],
             )
+            final.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
             operations.extend([empty, final])
             result = final.results[0]
         max_exponent = (2 * integer_bound).bit_length() - 1 + exponent if integer_bound else 0
