@@ -6,7 +6,7 @@ explicit modular host recombination. No floating conversion is involved.
 """
 
 
-def rewrite_native_sign_components(module, *, canonical_bf16_nan=False):
+def rewrite_native_sign_components(module, *, canonical_bf16_nan=False, defer_floating_negation=False):
     from xdsl.dialects import arith, tensor
     from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, IntegerAttr, IntegerType, TensorType, UnitAttr
     from xdsl.dialects.linalg import ops as L
@@ -55,6 +55,10 @@ def rewrite_native_sign_components(module, *, canonical_bf16_nan=False):
         source = op.inputs[0]
         bits = widths.get(str(source.type.element_type))
         floating = bits is not None
+        if negate and floating and defer_floating_negation:
+            # Keep the finite dyadic grid visible to following arithmetic.
+            # The floating component pass lowers negation with its zero sign.
+            continue
         if isinstance(source.type.element_type, IntegerType) and source.type.element_type.width.data in {8, 16, 32, 64}:
             bits = source.type.element_type.width.data
         if bits is None or source.type.element_type != op.results[0].type.element_type:

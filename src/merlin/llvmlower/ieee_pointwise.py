@@ -55,6 +55,7 @@ def dependence_proof(op):
         "arith.extf",
         "arith.truncf",
         "arith.constant",
+        "math.fma",
     }
 
     def visit(value):
@@ -113,7 +114,7 @@ def overlay(op, inputs, fallback, emit):
         return child.results[0]
 
     for child in list(op.body.block.ops)[:-1]:
-        if child.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf"}:
+        if child.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "math.fma"}:
             mapping[child.results[0]] = special_arithmetic(
                 child.name, [mapping[v] for v in child.operands], selected_emit
             )
@@ -184,6 +185,18 @@ def special_arithmetic(name, operands, emit):
     elif name == "arith.divf":
         invalid = binary(arith.AndIOp, infs[0], infs[1])
         sign = binary(arith.XOrIOp, signs[0], signs[1])
+    elif name == "math.fma":
+        product_sign = binary(arith.XOrIOp, signs[0], signs[1])
+        product_inf = binary(arith.OrIOp, infs[0], infs[1])
+        invalid_product = binary(
+            arith.OrIOp,
+            binary(arith.AndIOp, infs[0], eq(magnitudes[1], zero)),
+            binary(arith.AndIOp, infs[1], eq(magnitudes[0], zero)),
+        )
+        opposite = emit(arith.CmpiOp(product_sign, signs[2], "ne"))
+        invalid_sum = binary(arith.AndIOp, binary(arith.AndIOp, product_inf, infs[2]), opposite)
+        invalid = binary(arith.OrIOp, invalid_product, invalid_sum)
+        sign = choose(product_inf, product_sign, signs[2])
     else:
         raise ValueError("unproved IEEE scalar special operation: " + name)
     raw = choose(invalid, default, binary(arith.OrIOp, infinity, sign))
@@ -192,10 +205,14 @@ def special_arithmetic(name, operands, emit):
         raw = choose(binary(arith.AndIOp, infs[1], emit(arith.CmpiOp(magnitudes[0], infinity, "ult"))), sign, raw)
     # The independent source audit refuses unequal competing NaN words; either
     # operand then has the same propagated payload. BF16 opmath canonicalizes.
-    propagated = choose(nans[0], binary(arith.OrIOp, raws[0], quiet), binary(arith.OrIOp, raws[1], quiet))
+    propagated = binary(arith.OrIOp, raws[-1], quiet)
+    has_nan = nans[-1]
+    for nan, word in reversed(list(zip(nans[:-1], raws[:-1], strict=True))):
+        propagated = choose(nan, binary(arith.OrIOp, word, quiet), propagated)
+        has_nan = binary(arith.OrIOp, nan, has_nan)
     if str(typ) == "bf16":
         propagated = c(((1 << exponent) - 1) << fraction | (1 << (fraction - 1)))
-    raw = choose(binary(arith.OrIOp, *nans), propagated, raw)
+    raw = choose(has_nan, propagated, raw)
     return emit(arith.BitcastOp(raw, typ))
 
 

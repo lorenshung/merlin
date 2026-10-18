@@ -24,6 +24,10 @@ def expose_pointwise_primitives(module):
         "arith.cmpf",
         "arith.cmpi",
         "arith.select",
+        "math.fma",
+        "arith.extui",
+        "arith.extsi",
+        "arith.trunci",
         "arith.andi",
         "arith.ori",
         "arith.xori",
@@ -31,6 +35,12 @@ def expose_pointwise_primitives(module):
         "arith.shrui",
         "arith.extui",
         "arith.trunci",
+        "arith.cmpi",
+        "arith.cmpf",
+        "arith.select",
+        "arith.addi",
+        "arith.muli",
+        "linalg.index",
         "linalg.yield",
     }
     changed = 0

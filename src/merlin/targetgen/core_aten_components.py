@@ -144,6 +144,7 @@ def prepare_integer_components(
             "arith.mulf",
             "arith.divf",
             "arith.negf",
+            "math.fma",
             "linalg.matmul",
             "linalg.batch_matmul",
         }
@@ -296,12 +297,17 @@ def prepare_integer_components(
     unquantizable_float_words = any(
         dtype == "f32" and not np.isfinite(value).all() for dtype, value in zip(native_types, arrays, strict=True)
     )
+    mixed_finite_arithmetic = not has_special_inputs and any(
+        op.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "math.fma"} for op in module.walk()
+    )
     if unquantizable_float_words or (native_f32 and "f32" in native_types) or any(
         dtype in {"i8", "i16", "i32", "i64", "f16", "bf16", "f64", "complex<f32>"} for dtype in native_types
     ):
         from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
 
-        sign_bounds, sign_proofs = rewrite_native_sign_components(module, canonical_bf16_nan=ieee_enabled)
+        sign_bounds, sign_proofs = rewrite_native_sign_components(
+            module, canonical_bf16_nan=ieee_enabled, defer_floating_negation=mixed_finite_arithmetic
+        )
         known_bounds.update(sign_bounds)
     floating_proofs = []
     zero_limbs = {}
@@ -313,6 +319,7 @@ def prepare_integer_components(
             "arith.mulf",
             "arith.divf",
             "arith.negf",
+            "math.fma",
             "linalg.matmul",
             "linalg.batch_matmul",
         }

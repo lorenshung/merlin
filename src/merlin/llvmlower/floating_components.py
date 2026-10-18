@@ -117,7 +117,10 @@ def rewrite_floating_components(
         if getattr(op, "name", None) == "arith.constant":
             attr = op.properties.get("value", op.attributes.get("value"))
             values = list(attr.get_values()) if hasattr(attr, "get_values") else [attr.value.data]
-            return finite_grid(finite_values(values) if ieee_pointwise else values)
+            try:
+                return finite_grid(finite_values(values) if ieee_pointwise else values)
+            except (ValueError, OverflowError):
+                return None
         carriers = {
             "tensor.splat",
             "tensor.concat",
@@ -144,6 +147,25 @@ def rewrite_floating_components(
                     yielded = yielded.owner.operands[0]
                 if yielded is op.body.block.args[0]:
                     return grid(op.inputs[0])
+        if getattr(op, "name", None) == "linalg.generic":
+            children = list(op.body.block.ops)
+            if len(children) == 2 and children[0].name == "arith.select":
+                select = children[0]
+                args = op.body.block.args
+                if all(value in args[: len(op.inputs)] for value in select.operands):
+                    condition, left, right = [op.inputs[args.index(value)] for value in select.operands]
+                    predicate = condition.owner
+                    if getattr(predicate, "name", None) == "linalg.generic":
+                        body = list(predicate.body.block.ops)
+                        if (
+                            len(body) == 2
+                            and body[0].name == "arith.cmpf"
+                            and body[0].predicate.value.data == 14
+                            and all(grid(value) is not None for value in predicate.inputs)
+                        ):
+                            return grid(right)
+                    candidates = [grid(left), grid(right)]
+                    return combine(candidates) if all(g is not None for g in candidates) else None
         return None
 
     def pack(value, exponent, operations):
@@ -384,7 +406,7 @@ def rewrite_floating_components(
         arithmetic = [
             child
             for child in original.ops
-            if child.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "arith.negf"}
+            if child.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "arith.negf", "math.fma"}
         ]
         if not arithmetic:
             arithmetic = [child for child in original.ops if child.name in {"arith.extf", "arith.truncf"}]
@@ -401,6 +423,7 @@ def rewrite_floating_components(
                 "arith.negf",
                 "arith.extf",
                 "arith.truncf",
+                "math.fma",
                 "linalg.yield",
             }
             for child in original.ops
@@ -443,6 +466,10 @@ def rewrite_floating_components(
         packing_exponents = (
             [e for e, b in input_grids_here] if arithmetic.name == "arith.mulf" else [exponent] * len(args)
         )
+        if arithmetic.name == "math.fma":
+            product_exponent = sum(e for e, _ in input_grids_here[:2])
+            exponent = min(product_exponent, input_grids_here[2][0])
+            packing_exponents = [e for e, _ in input_grids_here[:2]] + [exponent]
         if arithmetic.name == "arith.divf":
             packing_exponents = [input_grids_here[0][0]]
             exponent = packing_exponents[0] - divisor_exponent
@@ -455,14 +482,16 @@ def rewrite_floating_components(
         integer_bound = (
             prod(b for value, b in packed) if arithmetic.name == "arith.mulf" else sum(b for value, b in packed)
         )
+        if arithmetic.name == "math.fma":
+            integer_bound = ((packed[0][1] * packed[1][1]) << (product_exponent - exponent)) + packed[2][1]
         if integer_bound.bit_length() >= reconstruction_limit:
             continue
         seed = zero(shape, operations)
-        if arithmetic.name == "arith.mulf":
+        if arithmetic.name in {"arith.mulf", "math.fma"}:
             # A K=1 batched contraction represents general pointwise products.
             # Broadcast the source operands into the original output map first.
             expanded = []
-            for (value, bound), arg in zip(packed, args, strict=True):
+            for (value, bound), arg in zip(packed[:2], args[:2], strict=True):
                 empty = tensor.EmptyOp([], TensorType(i64, shape))
                 body = Block(arg_types=[i64, i64])
                 body.add_op(L.YieldOp(body.args[0]))
@@ -511,6 +540,30 @@ def rewrite_floating_components(
             operations.append(integer)
             bounds[integer.results[0]] = integer_bound
             result = reshape(integer.results[0], shape, operations)
+            if arithmetic.name == "math.fma":
+                empty = tensor.EmptyOp([], TensorType(i128, shape))
+                body = Block(arg_types=[i128, i64, i128])
+                product = body.args[0]
+                if product_exponent != exponent:
+                    shift = arith.ConstantOp(IntegerAttr(product_exponent - exponent, i128))
+                    shifted = arith.ShLIOp(product, shift.result)
+                    body.add_ops([shift, shifted])
+                    product = shifted.result
+                extended = arith.ExtSIOp(body.args[1], i128)
+                added = arith.AddiOp(product, extended.result)
+                body.add_ops([extended, added, L.YieldOp(added.result)])
+                maps = list(op.get_indexing_maps())
+                final = L.GenericOp(
+                    inputs=[result, packed[2][0]],
+                    outputs=[empty.tensor],
+                    body=Region(body),
+                    indexing_maps=ArrayAttr([maps[-1], maps[args[2]], maps[-1]]),
+                    iterator_types=op.get_iterator_types(),
+                    result_types=[empty.tensor.type],
+                )
+                operations.extend([empty, final])
+                result = final.results[0]
+                bounds[result] = integer_bound
             publish(op, result, exponent, integer_bound, operations, arithmetic.results[0].type)
             continue
         body = Block(arg_types=[i64] * len(packed) + [i128])

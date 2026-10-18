@@ -111,6 +111,16 @@ def component_readout(
                         zero = emit(arith.ConstantOp(FloatAttr(0.0, value.type)))
                         is_zero = emit(arith.CmpfOp(value, zero, "oeq"))
                         negative = emit(arith.AndIOp(negative, is_zero))
+                elif scalar.name == "math.fma":
+                    product_sign = emit(arith.XOrIOp(sign(operands[0]), sign(operands[1])))
+                    negative = emit(arith.AndIOp(product_sign, sign(operands[2])))
+                    zeros = []
+                    for value in operands:
+                        zero = emit(arith.ConstantOp(FloatAttr(0.0, value.type)))
+                        zeros.append(emit(arith.CmpfOp(value, zero, "oeq")))
+                    product_zero = emit(arith.OrIOp(zeros[0], zeros[1]))
+                    both_zero = emit(arith.AndIOp(product_zero, zeros[2]))
+                    negative = emit(arith.AndIOp(negative, both_zero))
         positive_zero = emit(arith.ConstantOp(FloatAttr(0.0, output_type)))
         signed_zero = positive_zero
         if negative is not None:
@@ -182,7 +192,7 @@ def component_readout(
             dict(
                 source_operation=op.name,
                 source_data_arithmetic=any(
-                    child.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "arith.negf"}
+                    child.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "arith.negf", "math.fma"}
                     for child in op.body.walk()
                 ),
                 common_exponent=exponent,
