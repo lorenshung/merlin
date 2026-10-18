@@ -80,24 +80,22 @@ def restore_caller_layouts(module, original, fresh, semantic_path):
                 layout["results"][index].update(role="user_input_mutation", input_index=ordinal)
     expected = _tensor_documents(original["case"]["expected"]) if "expected" in original["case"] else []
     for document, index in zip(expected, fresh["output_indices"] if expected else [], strict=True):
-        # A size-1 dimension's stride addresses nothing. An owned result the recapture lays out with a
-        # different stride only there (a permute's readout) is the same storage as the caller's result,
-        # so it keeps the caller's spelling.
+        # Quantization may choose a different dense layout (for example its DQ
+        # loses channels-last storage). Restore the caller's complete owned result
+        # contract through result_layout, which allocates and copies to those
+        # real strides after bufferization. Aliases above retain their own proof.
         record, entry = layout["results"][index], boundary["outputs"][index]
         if record is None or record.get("alias_inputs") or entry.get("alias_inputs"):
             continue
         if (
-            any(record.get(key) != document.get(key) for key in ("dtype", "shape", "storage_offset"))
-            or record.get("stride") == document.get("stride")
+            any(record.get(key) != document.get(key) for key in ("dtype", "shape"))
             or len(record.get("stride") or ()) != len(document["shape"])
-            or any(
-                size != 1 and ours != theirs
-                for size, ours, theirs in zip(document["shape"], record["stride"], document["stride"], strict=True)
-            )
+            or any(type(stride) is not int or stride < 0 for stride in document["stride"])
         ):
             continue
         record["stride"] = list(document["stride"])
         entry["stride"] = list(document["stride"])
+        record["storage_offset"] = entry["storage_offset"] = document["storage_offset"]
     module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
     semantic_path.write_text(json.dumps(boundary, sort_keys=True) + "\n")
 
@@ -296,7 +294,7 @@ def prepare_spec_int8(
 
         def declaration_keys(site):
             def key(step):
-                row = next(row for row in site["steps"] if row["step"] == step)
+                row = next((row for row in site["steps"] if row["step"] == step), {})
                 return json.dumps(
                     {
                         authority: row[authority]["declaration"]
@@ -407,6 +405,11 @@ def prepare_spec_int8(
                 not captured_plan["sites"]
                 and bool(island_sites)
                 and all(site["status"] == "admitted" for site in island_sites)
+                and all(
+                    row[authority]["status"] == "admitted"
+                    for row in captured_plan["quantization_sites"]
+                    for authority in ("software", "host")
+                )
             )
             if (
                 continuity["status"] != "preserved"

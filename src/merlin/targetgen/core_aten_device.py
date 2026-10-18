@@ -95,7 +95,9 @@ def routing_for_bundle(directory: Path, target: str, package: Path, provider, fa
         return None, "provider declines captured contraction semantics"
     if routing.device != target or Path(routing.package_dir).resolve() != package.resolve():
         raise ValueError("provider routing differs from selected target/package")
-    if routing.select is not None or (routing.catalog_builder is None and routing.exact_selection is None):
+    if routing.select is not None or (
+        routing.catalog_builder is None and routing.exact_selection is None and routing.region_offload is None
+    ):
         raise ValueError("batch device mode requires source-bound catalog or exact selection")
     return routing, "provider selected source-bound contractions"
 

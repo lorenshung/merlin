@@ -61,6 +61,8 @@ operations:
     # Kept beside the standalone form because admission compares placement exactly.
     hardware: fused
   elementwise_map_standalone:
+    # Operator reviewed 2026-10-01; unchecked RTL paths remain declarations, not facts.
+    status: reviewed
     # The operand sum on the load path (accumulate_on_load). operand_sum is the recipe family it
     # quantizes. Its general form is the contract's: out = sat(RNE(s_o * act(sum_i w_i x_i + c)))
     # over at most two int8 tensors and one broadcast constant, per-tensor scales, act in
@@ -104,6 +106,8 @@ operations:
     hardware: standalone
     kinds: [sum]
   movement:
+    # Operator reviewed standalone copies/broadcasts; no fact-derived placement claim.
+    status: reviewed
     # Forms and their constraints are the contract's: copy, broadcast, zero_fill, permutation.
     hardware: standalone
     broadcasting: [none, outer]
@@ -138,6 +142,13 @@ operations:
     ops: [quantized_decomposed.quantize_per_tensor.default]
     placement: host
     ordered_operand_dtypes: [f32, f32, i64]
+    ordered_result_dtypes: [i8]
+    quantization_parameters: {zero_point: 0, quant_min: -128, quant_max: 127}
+  host_quantize_exact:
+    status: reviewed
+    ops: [quantized_decomposed.quantize_per_tensor.default]
+    placement: host
+    ordered_operand_dtypes: [f32, f64, i64]
     ordered_result_dtypes: [i8]
     quantization_parameters: {zero_point: 0, quant_min: -128, quant_max: 127}
   # Reviewed only for the exact typed rank-3/4 host operation. Phase 1 still owns

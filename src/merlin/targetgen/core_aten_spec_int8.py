@@ -581,8 +581,11 @@ def device_readout(op) -> dict | None:
     validate_quantization_attributes(reader, "integer_readout")
     if mq.op_name(reader) != "linalg.generic" or mq.attr_str(reader, "prov.role") != "readout":
         return None
-    if str(getattr(reader.results[0].type, "element_type", "")) != "i8":
-        return None  # an f32 acc_readout leaves the multiply to the host
+    output_dtype = str(getattr(reader.results[0].type, "element_type", ""))
+    if output_dtype not in {"i8", "f32"}:
+        return None
+    # Both boundaries execute on the host. The device only computes the closed
+    # integer MAC and returns all 32 bits; an exact f32 result rounds once there.
     attributes = reader.attributes
 
     def number(key):
@@ -616,6 +619,13 @@ def device_readout(op) -> dict | None:
         raise ValueError("device readout requires integer_readout numerics")
     parameters = {key: number(f"prov.quant.{key}") for key in ("zero_point", "quant_min", "quant_max")}
     relu = mq.attr_str(reader, "prov.quant.relu")
+    if output_dtype == "f32":
+        if mq.attr_str(reader, "prov.quant.arithmetic") != "exact":
+            raise ValueError("floating host readout requires exact rational arithmetic")
+        if any(value is not None for value in parameters.values()):
+            raise ValueError("floating host readout cannot carry integer quantization bounds")
+        parameters = {}
+        relu = relu or "false"
     if (
         (not scales and not ratios)
         or any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in scales)
@@ -623,9 +633,12 @@ def device_readout(op) -> dict | None:
         or relu not in {"true", "false"}
     ):
         raise ValueError("readout requires finite scales and canonical integer zero_point/quant_min/quant_max")
-    if not -128 <= parameters["quant_min"] <= parameters["zero_point"] <= parameters["quant_max"] <= 127:
+    if (
+        output_dtype == "i8"
+        and not -128 <= parameters["quant_min"] <= parameters["zero_point"] <= parameters["quant_max"] <= 127
+    ):
         raise ValueError("readout quantization bounds do not fit signed i8")
-    if mq.attr_str(reader, "prov.quant.storage_dtype") not in {None, "", "int8"}:
+    if mq.attr_str(reader, "prov.quant.storage_dtype") not in {None, "", "int8" if output_dtype == "i8" else "float32"}:
         raise ValueError("readout storage dtype does not match signed i8 admission")
     count = len(ratios or scales)
     granularity = "tensor" if count == 1 else "channel"
@@ -654,6 +667,7 @@ def device_readout(op) -> dict | None:
             raise ValueError(f"readout {key} requires finite numeric parameters")
         exact_parameters[key] = numbers
     return {
+        "output_dtype": output_dtype,
         "scales": [float(v) for v in scales],
         "scale_ratios": [{"numerator": str(v.numerator), "denominator": str(v.denominator)} for v in ratios],
         "scale_signs": [(v > 0) - (v < 0) for v in (ratios or scales)],
@@ -790,7 +804,7 @@ def quantized_islands(module) -> set[int]:
                     or id(owner) in candidates
                 )
                 for value in op.operands
-                if hasattr(value.type, "get_shape")
+                if hasattr(value.type, "get_shape") or str(value.type) == "f32"
             )
             consumed = all(
                 mq.op_name(use.operation) in _QUANTIZE_OPS or id(use.operation) in candidates
@@ -885,7 +899,11 @@ def non_contraction_sites(module, selection, *, contract=None, prospective=False
     def quantization_parameter(op) -> bool:
         """A scalar or a value read only by quantize/dequantize ops: a scale or zero point, not work."""
         results = list(op.results)
-        if results and all(not list(getattr(r.type, "get_shape", lambda: [0])()) for r in results):
+        if (
+            mq.op_name(op) in {"arith.constant", "tensor.splat"}
+            and results
+            and all(not list(getattr(r.type, "get_shape", lambda: [0])()) for r in results)
+        ):
             return True
         users = [use.operation for result in results for use in result.uses]
         return (
@@ -943,7 +961,11 @@ def non_contraction_sites(module, selection, *, contract=None, prospective=False
             signature.update(access_observations.primitive_signature(op))
         elif family == "movement":
             signature["broadcasting"] = (
-                access_observations.primitive_signature(op)["broadcasting"] if form == "broadcast" else "none"
+                "outer"
+                if name == "tensor.splat" and form == "broadcast"
+                else access_observations.primitive_signature(op)["broadcasting"]
+                if form == "broadcast"
+                else "none"
             )
         if form is not None:
             signature["form"] = form

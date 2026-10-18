@@ -76,7 +76,7 @@ def _maps(op):
     from merlin.kernels import shapes as KS
 
     maps, kinds = KS.indexing_maps(op), KS._iterator_types(op)  # noqa: SLF001
-    if not maps or not kinds:
+    if not maps or kinds is None:
         return None, None
     positions = []
     for results in maps:
@@ -157,8 +157,17 @@ def primitive_signature(op) -> dict[str, Any]:
     body = getattr(op, "body", None)
     if body is not None and len(body.blocks) == 1:
         block = body.block
+
         # A scalar expression's degree in tensor inputs; constants have degree 0.
-        degree = {arg: 1 if i < n_in else None for i, arg in enumerate(block.args)}
+        def constant_tensor(value):
+            owner = getattr(value, "owner", None)
+            if getattr(owner, "name", None) == "tensor.splat":
+                owner = getattr(owner.operands[0], "owner", None)
+            return getattr(owner, "name", None) == "arith.constant"
+
+        degree = {
+            arg: (0 if constant_tensor(op.operands[i]) else 1) if i < n_in else None for i, arg in enumerate(block.args)
+        }
         for inner in block.ops:
             name = mq.op_name(inner)
             ds = [degree.get(value) for value in inner.operands]
@@ -192,6 +201,10 @@ def primitive_signature(op) -> dict[str, Any]:
                 d = None
             for value in inner.results:
                 degree[value] = d
+    from merlin.xdsl_dialects.lowering.contraction_coverage import is_compare_select_relu
+
+    if is_compare_select_relu(op):
+        expression = "affine"
     return {"tensor_operands": count, "expression": expression, "broadcasting": broadcasting}
 
 

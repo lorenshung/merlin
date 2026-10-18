@@ -152,5 +152,6 @@ def test_a_size_one_stride_difference_keeps_the_caller_spelling(tmp_path):
     boundary = json.loads(path.read_text())
     # Only the size-1 dimension's stride differed: the same storage, in the caller's spelling.
     assert layout["results"][0]["stride"] == [3, 3, 1] and boundary["outputs"][0]["stride"] == [3, 3, 1]
-    # A genuinely different layout is never relabelled.
-    assert layout["results"][1]["stride"] == [1, 3, 2] and boundary["outputs"][1]["stride"] == [1, 3, 2]
+    # A different owned layout is restored too. result_layout enforces these
+    # strides with an allocation and copy, rather than relabelling existing storage.
+    assert layout["results"][1]["stride"] == [3, 3, 1] and boundary["outputs"][1]["stride"] == [3, 3, 1]
