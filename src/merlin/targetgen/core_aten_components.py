@@ -71,8 +71,15 @@ def prepare_integer_components(directory, report, selection, provider, package, 
     if not functions:
         return None
     native_types = [abi["dtype"] for record in report["cases"] for abi in record.get("input_abi", [])]
-    if any(dtype == "bf16" and np.isnan(value).any() for dtype, value in zip(native_types, arrays)) and any(
-        op.name == "arith.negf" and str(op.results[0].type) == "bf16" for op in module.walk()
+    ieee_policy = selection.get("host", {}).get("native_ieee_special_values", {})
+    ieee_enabled = (
+        ieee_policy.get("schema") == "merlin.native_ieee_special_values.v1" and ieee_policy.get("enabled") is True
+    )
+
+    if (
+        not ieee_enabled
+        and any(dtype == "bf16" and np.isnan(value).any() for dtype, value in zip(native_types, arrays))
+        and any(op.name == "arith.negf" and str(op.results[0].type) == "bf16" for op in module.walk())
     ):
         (directory / "exact-dtype-refusal.json").write_text(
             json.dumps(
@@ -102,27 +109,59 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         or (op.name == "linalg.generic" and any(it.data.value == "reduction" for it in op.get_iterator_types()))
         for op in module.walk()
     )
+    # A finite rational reduction proof does not define the CPU NaN bits
+    # produced by intermediate IEEE overflow. Detect this closed source
+    # situation independently of eager answers before granting a native floor.
+    # Unsupported source interpreters provide no additional admission evidence.
+    if (
+        order_dependent
+        and any(dtype in {"f16", "bf16", "f64", "complex<f32>"} for dtype in native_types)
+        and all(np.isfinite(value).all() for value in arrays)
+    ):
+        from merlin.targetgen.core_aten_w8a8_reference import evaluate
+
+        try:
+            observed, _ = evaluate(module, arrays, [], quant_min=-128, quant_max=127, eps=2**-12)
+            source_nan = any(bool(value.is_floating_point() and value.isnan().any()) for value in observed)
+        except (ValueError, KeyError, TypeError, NotImplementedError):
+            source_nan = False
+        if source_nan:
+            (directory / "exact-dtype-refusal.json").write_text(
+                json.dumps(
+                    dict(
+                        family="F2",
+                        code="ieee_intermediate_nonfinite_policy_unproved",
+                        reason="finite source has IEEE overflow/invalid intermediates; native NaN propagation lacks a closed proof",
+                    )
+                )
+                + "\n"
+            )
+            return None
     known_bounds, boolean_count = rewrite_boolean_components(module)
     from merlin.llvmlower.integer_float_boundaries import has_literal_zero_divisor, rewrite_integer_float_boundaries
-
-    if has_literal_zero_divisor(module):
-        (directory / "exact-dtype-refusal.json").write_text(
-            json.dumps(dict(family="F2", reason="native zero-divisor readout lacks a CPU NaN-payload policy")) + "\n"
-        )
-        return None
 
     conversion_grids = {}
     conversion_bounds, conversion_count = rewrite_integer_float_boundaries(
         module, bounds, output_grids=conversion_grids
     )
     known_bounds.update(conversion_bounds)
+    from merlin.llvmlower.ieee_zero_division import rewrite_zero_division
+
+    zero_division_count = rewrite_zero_division(module) if ieee_enabled else 0
+    if has_literal_zero_divisor(module):
+        (directory / "exact-dtype-refusal.json").write_text(
+            json.dumps(dict(family="F2", reason="zero-divisor source is outside the closed IEEE pointwise family"))
+            + "\n"
+        )
+        return None
     sign_proofs = []
     if any(dtype in {"i8", "i16", "i32", "i64", "f16", "bf16", "f64", "complex<f32>"} for dtype in native_types):
         from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
 
-        sign_bounds, sign_proofs = rewrite_native_sign_components(module)
+        sign_bounds, sign_proofs = rewrite_native_sign_components(module, canonical_bf16_nan=ieee_enabled)
         known_bounds.update(sign_bounds)
     floating_proofs = []
+    zero_limbs = {}
     remaining_float_arithmetic = any(
         op.name
         in {
@@ -140,7 +179,12 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         # Raw IEEE words need no finite numerical grid, even for signaling NaNs.
         bounds = [0 if b is None else b for b in bounds]
     elif any(b is None for b in bounds) or (conversion_count and native_arithmetic):
-        if not conversion_count and not any(dtype in {"f16", "bf16", "f64", "complex<f32>"} for dtype in native_types):
+        widening = any(op.name == "arith.extf" and str(op.result.type) == "f64" for op in module.walk())
+        if (
+            not conversion_count
+            and not widening
+            and not any(dtype in {"f16", "bf16", "f64", "complex<f32>"} for dtype in native_types)
+        ):
             return None
         from merlin.llvmlower.fixed_point_ir import finite_grid
         from merlin.llvmlower.floating_components import rewrite_floating_components
@@ -157,6 +201,8 @@ def prepare_integer_components(directory, report, selection, provider, package, 
             complex_inputs=complex_indices,
             allow_reassociation=order_dependent,
             known_grids=conversion_grids,
+            input_values=arrays,
+            zero_limbs=zero_limbs,
         )
         known_bounds.update(floating_bounds)
         if not floating_proofs and not boolean_count:
@@ -186,8 +232,16 @@ def prepare_integer_components(directory, report, selection, provider, package, 
             json.dumps(dict(family="F2", reason="integer conversion alone is not a device reduction")) + "\n"
         )
         return None
+    if zero_division_count:
+        from merlin.llvmlower.ieee_zero_division import retain_nan_narrowing
+
+        retain_nan_narrowing(module)
     plans = rewrite_integer_components(
-        module, limb_attribute=limb_attribute, input_bounds=bounds, known_bounds=known_bounds
+        module,
+        limb_attribute=limb_attribute,
+        input_bounds=bounds,
+        known_bounds=known_bounds,
+        known_zero_limbs=zero_limbs,
     )
     if not plans:
         return None
@@ -317,7 +371,22 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         schedule_proof=proof,
         limb_plans=plans,
         floating_representation_proofs=floating_proofs,
+        zero_limb_omission_proof=dict(
+            method="complete_recorded_input_dyadic_coefficients",
+            producer_count=len(zero_limbs),
+            omitted_digits=sum(len(v) for v in zero_limbs.values()),
+        ),
         native_sign_proofs=sign_proofs,
+        ieee_special_family=(
+            dict(
+                kind="literal_zero_division",
+                producer="complete_integer_numerator",
+                count=zero_division_count,
+                invalid_nan="x86_negative_quiet_bfloat16_positive_canonical",
+            )
+            if zero_division_count
+            else None
+        ),
         boolean_semantics={"source": "closed_boolean_or_and", "integer_components": boolean_count},
         integer_float_boundaries={"count": conversion_count, "rounding": "source_sitofp_before_host_epilogue"},
         input_bound_proof=dict(

@@ -6,7 +6,16 @@ from math import prod
 from merlin.llvmlower.fixed_point_ir import FORMAT, encode_fixed_integer, finite_grid
 
 
-def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow_reassociation=False, known_grids=None):
+def rewrite_floating_components(
+    module,
+    input_grids,
+    *,
+    complex_inputs=(),
+    allow_reassociation=False,
+    known_grids=None,
+    input_values=None,
+    zero_limbs=None,
+):
     """Return new integer bounds and closed finite representation proofs.
 
     Source packing uses exact power-of-two scaling in binary64, bounded to
@@ -23,6 +32,7 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
         IntegerAttr,
         IntegerType,
         TensorType,
+        UnitAttr,
         f64,
         i64,
         i128,
@@ -51,6 +61,58 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
     bounds = {}
     proofs = []
     raw_forms = {}
+
+    payloads = dict(zip(function.body.block.args, input_values or ()))
+
+    def payload(value):
+        import numpy as np
+
+        if value in payloads:
+            return payloads[value]
+        owner = value.owner
+        if getattr(owner, "name", None) == "linalg.generic" and len(owner.inputs) == 1:
+            body = list(owner.body.block.ops)
+            if all(child.name in {"arith.extf", "linalg.yield"} for child in body):
+                yielded = body[-1].operands[0]
+                while getattr(yielded.owner, "name", None) == "arith.extf":
+                    yielded = yielded.owner.operands[0]
+                if yielded is not owner.body.block.args[0]:
+                    return None
+                data = payload(owner.inputs[0])
+                if data is None:
+                    return None
+                amap, outmap = [a.data for a in owner.get_indexing_maps()]
+                shape = value.type.get_shape()
+                if outmap != AffineMap.identity(len(shape)):
+                    return None
+                result = np.empty(shape, dtype=object)
+                for index in np.ndindex(shape):
+                    result[index] = data[amap.eval(index, ())]
+                payloads[value] = result
+                return result
+        if getattr(owner, "name", None) in {"tensor.reshape", "tensor.expand_shape", "tensor.collapse_shape"}:
+            data = payload(owner.operands[0])
+            if data is not None:
+                return data.reshape(value.type.get_shape())
+        return None
+
+    def record_zero_limbs(result, source, exponent):
+        if not wide_packing or zero_limbs is None:
+            return
+        data = payload(source)
+        if data is None:
+            return
+        coefficients = [Fraction.from_float(float(v)) / Fraction(2) ** exponent for v in data.flat]
+        if any(v.denominator != 1 for v in coefficients):
+            raise ValueError("recorded zero-limb premise is not an exact dyadic integer")
+        remaining = [v.numerator for v in coefficients]
+        omitted = set()
+        for j in range(i64.width.data // 8):
+            digits = [((v + 128) % 256) - 128 for v in remaining]
+            if not any(digits):
+                omitted.add(j)
+            remaining = [(v - d) // 256 for v, d in zip(remaining, digits, strict=True)]
+        zero_limbs[result] = omitted
 
     def floating(value):
         return hasattr(value.type, "element_type") and str(value.type.element_type) in FORMAT
@@ -128,7 +190,11 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
             return combine(values) if values and all(v is not None for v in values) else None
         if getattr(op, "name", None) == "linalg.generic" and len(op.inputs) == 1:
             if all(child.name in {"arith.extf", "linalg.yield"} for child in op.body.block.ops):
-                return grid(op.inputs[0])
+                yielded = op.body.block.last_op.operands[0]
+                while getattr(yielded.owner, "name", None) == "arith.extf":
+                    yielded = yielded.owner.operands[0]
+                if yielded is op.body.block.args[0]:
+                    return grid(op.inputs[0])
         return None
 
     def point(inputs, typ, fn, operations):
@@ -150,6 +216,7 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
             iterator_types=ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * len(typ.get_shape())),
             result_types=[typ],
         )
+        generic.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
         operations.extend([empty, generic])
         return generic.results[0]
 
@@ -225,6 +292,7 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
 
         result = point([value], TensorType(i64, value.type.get_shape()), scalar, operations)
         bounds[result] = aligned
+        record_zero_limbs(result, value, exponent)
         return result, aligned
 
     def zero(shape, operations):
@@ -242,6 +310,8 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
         operations.extend([literal, changed])
         if value in bounds:
             bounds[changed.result] = bounds[value]
+        if zero_limbs is not None and value in zero_limbs:
+            zero_limbs[changed.result] = zero_limbs[value]
         return changed.result
 
     def publish(op, integer, exponent, integer_bound, operations, compute_type=None, denominator=1):
@@ -574,6 +644,8 @@ def rewrite_floating_components(module, input_grids, *, complex_inputs=(), allow
                 operations.extend([empty, carrier])
                 expanded.append(carrier.results[0])
                 bounds[carrier.results[0]] = bound
+                if zero_limbs is not None and value in zero_limbs:
+                    zero_limbs[carrier.results[0]] = zero_limbs[value]
             batch_shape = [prod(shape), 1, 1]
             expanded = [reshape(v, batch_shape, operations) for v in expanded]
             batch_seed = zero(batch_shape, operations)

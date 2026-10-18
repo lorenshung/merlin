@@ -12,7 +12,7 @@ from __future__ import annotations
 from math import prod
 
 
-def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known_bounds=None):
+def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known_bounds=None, known_zero_limbs=None):
     import json
 
     from xdsl.dialects import arith, tensor
@@ -37,6 +37,11 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
     bounds = dict(zip(functions[0].body.block.args, input_bounds))
     bounds.update(known_bounds or {})
     plans = []
+
+    def indices(value, digits):
+        omitted = (known_zero_limbs or {}).get(value, set())
+        selected = [j for j in range(digits) if j not in omitted]
+        return selected or [0]
 
     def width(value):
         typ = value.type
@@ -219,15 +224,15 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         counts = [count(v, mathematical=bits > width(v)) for v in op.operands[:2]]
         digits = []
         for source, n in zip(op.operands[:2], counts, strict=True):
-            values = []
-            for index in range(n):
+            values = {}
+            for index in indices(source, n):
                 split_ops, limb = digit(source, index)
                 operations.extend(split_ops)
-                values.append(limb)
+                values[index] = limb
             digits.append(values)
         maps = list(op.get_indexing_maps())
-        for j, lhs in enumerate(digits[0]):
-            for k, rhs in enumerate(digits[1]):
+        for j, lhs in digits[0].items():
+            for k, rhs in digits[1].items():
                 exponent = 8 * (j + k)
                 if exponent >= bits:
                     continue
@@ -285,7 +290,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         bits = width(op.results[0])
         digits = count(source, mathematical=bits > width(source))
         operations, result = [], seed
-        for index in range(digits):
+        for index in indices(source, digits):
             if 8 * index >= bits:
                 continue
             split_ops, limb = digit(source, index)
@@ -328,7 +333,9 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
     for op in original:
         if len(op.results) != 1 or width(op.results[0]) not in (1, 8, 16, 32, 64, 128, 512, 1024):
             continue
-        if any(k.startswith("prov.quant.") or k == limb_attribute for k in op.attributes):
+        if "merlin.exact_host_arithmetic" in op.attributes or any(
+            k.startswith("prov.quant.") or k == limb_attribute for k in op.attributes
+        ):
             continue
         if "merlin.exact_additive" in op.attributes:
             from merlin.llvmlower.additive_regions import data_sources, retype_additive
@@ -385,7 +392,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         for i, coefficient in terms.items():
             source = op.inputs[i]
             digits = count(source, mathematical=bits > width(source))
-            for index in range(digits):
+            for index in indices(source, digits):
                 if 8 * index >= bits:
                     continue
                 split_ops, limb = digit(source, index)
