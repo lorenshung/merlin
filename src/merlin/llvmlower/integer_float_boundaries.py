@@ -35,7 +35,7 @@ def has_literal_zero_divisor(module):
     return any(op.name == "arith.divf" and zero(op.operands[1], set()) for op in module.walk())
 
 
-def rewrite_integer_float_boundaries(module, input_bounds):
+def rewrite_integer_float_boundaries(module, input_bounds, *, output_grids=None):
     from xdsl.dialects import arith, tensor
     from xdsl.dialects.builtin import ArrayAttr, IntegerAttr, TensorType, i128
     from xdsl.dialects.linalg import ops as L
@@ -56,10 +56,14 @@ def rewrite_integer_float_boundaries(module, input_bounds):
         if any(it.data != L.IteratorType.PARALLEL for it in op.get_iterator_types()):
             continue
         body = list(op.body.block.ops)
-        if len(body) != 2 or body[0].name != "arith.sitofp" or body[0].operands[0] is not op.body.block.args[0]:
+        if (
+            len(body) != 2
+            or body[0].name not in {"arith.sitofp", "arith.uitofp"}
+            or body[0].operands[0] is not op.body.block.args[0]
+        ):
             continue
         source = op.inputs[0]
-        if str(source.type.element_type) not in {"i8", "i16", "i32", "i64"}:
+        if str(source.type.element_type) not in {"i1", "i8", "i16", "i32", "i64"}:
             continue
         if str(op.results[0].type.element_type) not in FORMAT:
             continue
@@ -71,7 +75,10 @@ def rewrite_integer_float_boundaries(module, input_bounds):
         constant = arith.ConstantOp(IntegerAttr(0, i128))
         seed = tensor.SplatOp(constant.result, [], integer_type)
         block = Block(arg_types=[source.type.element_type, i128])
-        extend = arith.ExtSIOp(block.args[0], i128)
+        unsigned = body[0].name == "arith.uitofp"
+        if unsigned and str(source.type.element_type) != "i1":
+            continue
+        extend = (arith.ExtUIOp if unsigned else arith.ExtSIOp)(block.args[0], i128)
         block.add_ops([extend, L.YieldOp(extend.result)])
         integer = L.GenericOp(
             inputs=[source],
@@ -100,6 +107,10 @@ def rewrite_integer_float_boundaries(module, input_bounds):
             iterator_types=op.get_iterator_types(),
             result_types=[op.results[0].type],
         )
+        if output_grids is not None:
+            # Integer-to-float rounding preserves integrality. The rounded
+            # magnitude is bounded by twice the original integer magnitude.
+            output_grids[converted.results[0]] = (0, 2 * magnitude)
         Rewriter.replace_op(op, [constant, seed, integer, empty, converted], [converted.results[0]])
         count += 1
     module.verify()

@@ -111,7 +111,10 @@ def prepare_integer_components(directory, report, selection, provider, package, 
         )
         return None
 
-    conversion_bounds, conversion_count = rewrite_integer_float_boundaries(module, bounds)
+    conversion_grids = {}
+    conversion_bounds, conversion_count = rewrite_integer_float_boundaries(
+        module, bounds, output_grids=conversion_grids
+    )
     known_bounds.update(conversion_bounds)
     sign_proofs = []
     if any(dtype in {"i8", "i16", "i32", "i64", "f16", "bf16", "f64", "complex<f32>"} for dtype in native_types):
@@ -136,8 +139,8 @@ def prepare_integer_components(directory, report, selection, provider, package, 
     if any(b is None for b in bounds) and sign_proofs and not remaining_float_arithmetic:
         # Raw IEEE words need no finite numerical grid, even for signaling NaNs.
         bounds = [0 if b is None else b for b in bounds]
-    elif any(b is None for b in bounds):
-        if not any(dtype in {"f16", "bf16", "f64", "complex<f32>"} for dtype in native_types):
+    elif any(b is None for b in bounds) or (conversion_count and native_arithmetic):
+        if not conversion_count and not any(dtype in {"f16", "bf16", "f64", "complex<f32>"} for dtype in native_types):
             return None
         from merlin.llvmlower.fixed_point_ir import finite_grid
         from merlin.llvmlower.floating_components import rewrite_floating_components
@@ -149,10 +152,18 @@ def prepare_integer_components(directory, report, selection, provider, package, 
             return None
         complex_indices = [i for i, dtype in enumerate(native_types) if dtype == "complex<f32>"]
         floating_bounds, floating_proofs = rewrite_floating_components(
-            module, grids, complex_inputs=complex_indices, allow_reassociation=order_dependent
+            module,
+            grids,
+            complex_inputs=complex_indices,
+            allow_reassociation=order_dependent,
+            known_grids=conversion_grids,
         )
         known_bounds.update(floating_bounds)
         if not floating_proofs and not boolean_count:
+            if conversion_count:
+                (directory / "exact-dtype-refusal.json").write_text(
+                    json.dumps(dict(family="F2", reason="integer conversion alone is not a device reduction")) + "\n"
+                )
             return None
         if (
             floating_proofs
@@ -191,8 +202,7 @@ def prepare_integer_components(directory, report, selection, provider, package, 
                 dict(
                     family="F2",
                     reason=(
-                        "native bilinear reduction remains in host source; "
-                        "partial preludes do not place the operation"
+                        "native bilinear reduction remains in host source; partial preludes do not place the operation"
                     ),
                     source_operation_ordinals=remaining_products,
                 )

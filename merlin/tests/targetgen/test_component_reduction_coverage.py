@@ -25,7 +25,8 @@ def test_integer_conversion_does_not_admit_a_retained_host_float_sum(tmp_path):
           indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->()>],iterator_types=["reduction"]
         } ins(%cast : tensor<4xf32>) outs(%seed : tensor<f32>) {
         ^bb1(%a: f32,%b: f32):
-          %v=arith.addf %a,%b : f32
+          %nonlinear=math.exp %a : f32
+          %v=arith.addf %nonlinear,%b : f32
           linalg.yield %v : f32
         } -> tensor<f32>
         func.return %sum : tensor<f32>
@@ -81,7 +82,8 @@ def test_device_pointwise_prelude_does_not_hide_a_host_bilinear_loop(tmp_path):
             %xf=arith.extf %x : f16 to f32
             %yf=arith.extf %y : f16 to f32
             %p=arith.mulf %xf,%yf : f32
-            %v=arith.addf %s,%p : f32
+            %cube=arith.mulf %p,%yf : f32
+            %v=arith.addf %s,%cube : f32
             scf.yield %v : f32
           }
           linalg.yield %sum : f32
