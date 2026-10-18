@@ -85,7 +85,7 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
     }
     function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
     env = {
-        arg: torch.from_numpy(array.copy()).to(dtypes[str(arg.type.element_type)])
+        arg: torch.from_numpy(array.copy()).to(dtypes[str(arg.type.element_type)]).reshape(arg.type.get_shape())
         for arg, array in zip(function.body.block.args, arrays, strict=True)
     }
     scales = []
@@ -139,6 +139,8 @@ def evaluate(module, arrays, selected, *, quant_min, quant_max, eps, dispatch=No
                 y = xs[0] / xs[1]
             elif name == "arith.negf":
                 y = -xs[0]
+            elif name == "math.absf":
+                y = torch.abs(xs[0])
             elif name == "linalg.index":
                 y = torch.tensor(point[inner.dim.value.data], dtype=torch.int64)
             elif name == "arith.cmpi":

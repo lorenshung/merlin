@@ -142,7 +142,8 @@ def test_native_source_unsigned_byte_conversion_has_no_sign_extension(tmp_path):
 
 
 @pytest.mark.parametrize("right_word,ambiguous", [(0x7FC00000, False), (0xFFC00000, True)])
-def test_special_audit_refuses_competing_nan_signs(tmp_path, right_word, ambiguous):
+@pytest.mark.parametrize("rank", [0, 1])
+def test_special_audit_refuses_competing_nan_signs(tmp_path, right_word, ambiguous, rank):
     python = os.environ.get("MERLIN_M2M_PYTHON")
     if not python or not Path(python).is_file():
         pytest.skip("declared capture interpreter unavailable")
@@ -158,6 +159,12 @@ def test_special_audit_refuses_competing_nan_signs(tmp_path, right_word, ambiguo
         } -> tensor<1xf32>
         return %r : tensor<1xf32>
       }}"""
+    if rank == 0:
+        source = (
+            source.replace("tensor<1xf32>", "tensor<f32>")
+            .replace("affine_map<(d0)->(d0)>", "affine_map<()->()>")
+            .replace('iterator_types=["parallel"]', "iterator_types=[]")
+        )
     (tmp_path / "model.mlir").write_text(source)
     np.savez(
         tmp_path / "inputs.npz",
