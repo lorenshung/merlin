@@ -312,6 +312,81 @@ def _recipe_operators(torch: Any) -> dict[str, tuple[Any, ...]]:
 _CONSTANT_MOVEMENT = ("full_like.default", "fill.Scalar", "full.default")
 
 
+#: Floating widths a quantized graph reads a result out at, other than the recipe's own float32 grid.
+_READOUT_WIDTHS = ("float64", "float16", "bfloat16")
+
+
+def read_out_floating_widths(graph_module: Any, moves: set[Any]) -> list[dict[str, Any]]:
+    """Move a float dtype conversion or a non-float32 fill to the readout of a quantized graph.
+
+    On the int8 grid a value is its code and its scale; its floating WIDTH is chosen only when it is
+    dequantized. So a ``_to_copy`` that changes nothing but the float dtype is, in the quantized
+    domain, a copy of the codes, and a ``full``/``full_like`` of a float64 constant is a constant fill
+    of codes on its output grid. PT2E quantizes float32 edges only, so each such operation is spelt
+    at float32 here -- a conversion as a ``clone`` (the copy it is on codes), a fill with
+    ``dtype=float32`` -- followed by one ``_to_copy`` to the
+    requested width that reads the dequantized result out. That widening is exact (float32 is a
+    subset of float64); a narrowing rounds once, exactly where eager rounds after the same value.
+
+    Only operations the recipe's movement family covers move, and only when every tensor input is
+    float32 (a float64 INPUT cannot be quantized). Returns one record per rewritten node, which the
+    quantization stats carry as the rewrite's provenance (a re-export drops node metadata).
+    """
+    import torch
+
+    aten = torch.ops.aten
+    widths = {getattr(torch, name) for name in _READOUT_WIDTHS}
+    graph = graph_module.graph
+    rewritten = []
+    for node in list(graph.nodes):
+        value = node.meta.get("val")
+        if node.op != "call_function" or not isinstance(value, torch.Tensor) or value.dtype not in widths:
+            continue
+        if node.target in (aten._to_copy.default, aten.to.dtype) and aten.clone.default in moves:
+            # _to_copy(x, *, dtype, ...) after decomposition; to.dtype(x, dtype, ...) before it.
+            source = node.args[0] if node.args else None
+            positional = node.args[2:] if node.target == aten.to.dtype else node.args[1:]
+            extra = [v for key, v in node.kwargs.items() if key != "dtype"]
+            if (
+                not isinstance(source, torch.fx.Node)
+                or not isinstance(source.meta.get("val"), torch.Tensor)
+                or source.meta["val"].dtype != torch.float32
+                or any(v not in (None, False, torch.preserve_format, torch.strided) for v in [*positional, *extra])
+            ):
+                continue
+            with graph.inserting_before(node):
+                computed = graph.call_function(aten.clone.default, args=(source,))
+            computed.meta = {**node.meta, "val": source.meta["val"].clone()}
+        elif node.target in moves and str(node.target).endswith(("full_like.default", "full.default")):
+            if node.kwargs.get("dtype") != value.dtype:
+                continue
+            kwargs = {**node.kwargs, "dtype": torch.float32}
+            with graph.inserting_before(node):
+                computed = graph.call_function(node.target, args=node.args, kwargs=kwargs)
+            args = torch.fx.map_arg(node.args, lambda n: n.meta["val"])
+            computed.meta = {**node.meta, "val": node.target(*args, **kwargs)}
+        else:
+            continue
+        computed.meta["_m2m_source_aten"] = str(node.target)
+        with graph.inserting_after(computed):
+            readout = graph.call_function(aten._to_copy.default, args=(computed,), kwargs={"dtype": value.dtype})
+        readout.meta = {**node.meta, "val": computed.meta["val"].to(value.dtype), "merlin_readout_width": True}
+        node.replace_all_uses_with(readout)
+        graph.erase_node(node)
+        rewritten.append(
+            {
+                "node": node.name,
+                "operator": str(node.target),
+                "quantized_as": str(computed.target),
+                "readout_dtype": str(value.dtype).removeprefix("torch."),
+            }
+        )
+    if rewritten:
+        graph.lint()
+        graph_module.recompile()
+    return rewritten
+
+
 def _has_floating_recipe_work(exported: Any, recipe: Mapping[str, Any]) -> bool:
     """Whether an integral-input graph still computes a floating recipe operation inside."""
     import torch
@@ -656,6 +731,7 @@ def build_quantizer(
             self.refused_rewrites: list[dict[str, Any]] = []
             self.software_decisions = software_decisions
             self.fold_candidates = fold_candidates or []
+            self.readout_widths: list[dict[str, Any]] = []
 
         def transform_for_annotation(self, graph_module: Any) -> Any:
             # TorchAO calls this after folding Conv+BN and before inserting
@@ -665,6 +741,8 @@ def build_quantizer(
                 from m2m.capture.trace import attach_pt2e_conv_bn_folds
 
                 attach_pt2e_conv_bn_folds(graph_module, self.fold_candidates)
+            if moves:
+                self.readout_widths = read_out_floating_widths(graph_module, moves)
             # Normalize eligible functional overloads to the existing Model2MLIR
             # integerizer's canonical contractions before observer insertion.
             graph = graph_module.graph
@@ -1432,6 +1510,8 @@ def apply_recipe(
         "annotated_means": quantizer.annotated_means,
         "annotated_affine_maps": quantizer.annotated_maps,
         "annotated_movements": quantizer.annotated_moves,
+        # Float dtype conversions and fills spelt at float32 and read out at their requested width.
+        "floating_readout_widths": quantizer.readout_widths,
         # The exact integer form of every quantized affine map and movement, from its observed scales.
         "integer_recipes": integer_recipes(quantized),
         # Sums and means the recipe's families cover and the graph does not requantize: left alone.

@@ -668,6 +668,10 @@ def _nested_in_linalg(op) -> bool:
     return False
 
 
+#: Floating element types a prospective screen reads as the int8 work the static recipe makes of them.
+_PROSPECTIVE_FLOATS = ("f32", "f64", "f16", "bf16")
+
+
 def non_contraction_sites(module, selection, *, contract=None, prospective=False):
     """Screen every top-level non-contraction site of an integer program for device placement.
 
@@ -755,14 +759,18 @@ def non_contraction_sites(module, selection, *, contract=None, prospective=False
         kind = cc.reduction_kind(op) if family == "reduction" else None
         in_dtype = precision(tensors[0]) if tensors else (operand_dtypes[0] if operand_dtypes else None)
         out_dtype = result_dtypes[0] if result_dtypes else None
-        quantized = id(op) in islands or (prospective and "f32" in result_dtypes)
+        # Prospectively, a float64/float16 result is int8 work too: the recipe spells a float dtype
+        # conversion or a fill at float32 and reads its result out at the requested width
+        # (_recipe_quantizer.read_out_floating_widths).
+        grid = _PROSPECTIVE_FLOATS if prospective else ("f32",)
+        quantized = id(op) in islands or (prospective and any(dtype in grid for dtype in result_dtypes))
         if quantized:
             # Int8 work in the frontend's floating spelling (dequantize -> op -> quantize): its codes are
             # int8 on both edges, so it is screened as the int8 operation the island computes.
-            operand_dtypes = ["i8" if dtype == "f32" else dtype for dtype in operand_dtypes]
-            result_dtypes = ["i8" if dtype == "f32" else dtype for dtype in result_dtypes]
-            in_dtype = "i8" if in_dtype in (None, "f32") else in_dtype
-            out_dtype = "i8" if out_dtype == "f32" else out_dtype
+            operand_dtypes = ["i8" if dtype in grid else dtype for dtype in operand_dtypes]
+            result_dtypes = ["i8" if dtype in grid else dtype for dtype in result_dtypes]
+            in_dtype = "i8" if in_dtype is None or in_dtype in grid else in_dtype
+            out_dtype = "i8" if out_dtype in grid else out_dtype
         signature = {
             "family": family,
             "operand_dtype": in_dtype,
