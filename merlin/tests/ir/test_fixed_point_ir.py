@@ -4,7 +4,7 @@ import random
 from fractions import Fraction
 
 import pytest
-from xdsl.dialects.builtin import IntegerType, bf16, f16, f32, f64, i128
+from xdsl.dialects.builtin import IntegerType, bf16, f16, f32, f64
 from xdsl.ir import Block
 
 from merlin.llvmlower.fixed_point_ir import FORMAT, encode_fixed_integer, finite_grid
@@ -36,8 +36,8 @@ def reference_bits(numerator, exponent, denominator, token):
     return sign | candidate
 
 
-def emitted_bits(numerator, exponent, denominator, dtype):
-    block = Block(arg_types=[i128])
+def emitted_bits(numerator, exponent, denominator, dtype, width=128):
+    block = Block(arg_types=[IntegerType(width)])
     operations = []
 
     def emit(op):
@@ -45,7 +45,7 @@ def emitted_bits(numerator, exponent, denominator, dtype):
         return op.results[0]
 
     result = encode_fixed_integer(block.args[0], exponent, dtype, emit, denominator=denominator)
-    values = {block.args[0]: numerator & ((1 << 128) - 1)}
+    values = {block.args[0]: numerator & ((1 << width) - 1)}
 
     def signed(value, typ):
         width = typ.width.data
@@ -77,7 +77,7 @@ def emitted_bits(numerator, exponent, denominator, dtype):
                     left >= right,
                 ][predicate]
             )
-        elif name in {"arith.trunci", "arith.bitcast"}:
+        elif name in {"arith.trunci", "arith.extui", "arith.bitcast"}:
             value = args[0]
         else:
             left, right = args
@@ -85,6 +85,7 @@ def emitted_bits(numerator, exponent, denominator, dtype):
                 assert 0 <= right < op.operands[0].type.width.data, (name, right)
             value = {
                 "arith.addi": lambda: left + right,
+                "arith.muli": lambda: left * right,
                 "arith.subi": lambda: left - right,
                 "arith.andi": lambda: left & right,
                 "arith.ori": lambda: left | right,
@@ -124,5 +125,16 @@ def test_complete_dyadic_grid_refuses_nonfinite_or_unbounded_alignment():
     assert finite_grid([256.0, -512.0]) == (8, 2)
     with pytest.raises(ValueError, match="nonfinite"):
         finite_grid([1.0, float("inf")])
-    with pytest.raises(ValueError, match="52-bit"):
-        finite_grid([1.0, 2.0**-100])
+    assert finite_grid([1.0, 2.0**-100]) == (-100, 1 << 100)
+    with pytest.raises(ValueError, match="512-bit"):
+        finite_grid([1.0, 2.0**-600])
+
+
+@pytest.mark.parametrize("dtype", [f16, bf16, f32, f64])
+def test_wide_reconstruction_rounds_without_wide_division_runtime(dtype):
+    for n in (0, 1, -1, (1 << 280) + 1, -(1 << 556) + 17, (1 << 1000) - 1):
+        for exponent in (-1100, -300, -149, 0):
+            for denominator in (1, 3, 65537):
+                assert emitted_bits(n, exponent, denominator, dtype, width=1024) == reference_bits(
+                    n, exponent, denominator, str(dtype)
+                )

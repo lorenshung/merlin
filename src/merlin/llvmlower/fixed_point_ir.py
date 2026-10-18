@@ -19,8 +19,9 @@ def encode_fixed_integer(value, exponent, result_type, emit, *, denominator=1):
         raise ValueError("unsupported exact IEEE boundary")
     fraction_bits, exponent_bits, bias = FORMAT[str(result_type)]
     wide = value.type
-    if str(wide) != "i128":
-        raise ValueError("exact IEEE conversion requires a bounded i128 numerator")
+    if not isinstance(wide, IntegerType) or wide.width.data not in (128, 1024):
+        raise ValueError("exact IEEE conversion requires a bounded i128 or i1024 numerator")
+    width = wide.width.data
     bits = IntegerType(1 + fraction_bits + exponent_bits)
 
     def c(v):
@@ -37,7 +38,7 @@ def encode_fixed_integer(value, exponent, result_type, emit, *, denominator=1):
     magnitude = choose(negative, binary(arith.SubiOp, zero, value), value)
     # Leading bit search on a positive, bounded integer, with defined zero behavior.
     leading = zero
-    for step in (64, 32, 16, 8, 4, 2, 1):
+    for step in (1 << n for n in reversed(range(width.bit_length() - 1))):
         trial = binary(arith.AddiOp, leading, c(step))
         nonzero = emit(arith.CmpiOp(binary(arith.ShRUIOp, magnitude, trial), zero, "ne"))
         leading = choose(nonzero, trial, leading)
@@ -52,7 +53,7 @@ def encode_fixed_integer(value, exponent, result_type, emit, *, denominator=1):
     exponent_value = binary(arith.AddiOp, leading, c(exponent))
     drop = binary(arith.SubiOp, leading, c(fraction_bits))
     minimum_drop = 1 - bias - fraction_bits - exponent
-    if minimum_drop + divisor_bits >= 121:
+    if minimum_drop + divisor_bits >= width - 7:
         # The input bound makes every magnitude strictly smaller than half a subnormal.
         raw = choose(negative, c(1 << (fraction_bits + exponent_bits)), zero)
         return emit(arith.BitcastOp(emit(arith.TruncIOp(raw, bits)), result_type))
@@ -61,8 +62,29 @@ def encode_fixed_integer(value, exponent, result_type, emit, *, denominator=1):
     left = choose(emit(arith.CmpiOp(drop, zero, "slt")), binary(arith.SubiOp, zero, drop), zero)
     numerator = binary(arith.ShLIOp, magnitude, left)
     divisor = binary(arith.ShLIOp, divisor, right)
-    quotient = binary(arith.DivUIOp, numerator, divisor)
-    remainder = binary(arith.RemUIOp, numerator, divisor)
+    if denominator == 1:
+        quotient = binary(arith.ShRUIOp, numerator, right)
+        remainder = binary(arith.SubiOp, numerator, binary(arith.ShLIOp, quotient, right))
+    else:
+        # Base-2**32 division by a <=31-bit literal uses at most 63-bit
+        # partial dividends. All divisions stay at native i64 width; no
+        # compiler-rt i128 or wider division symbol is required on the host.
+        from xdsl.dialects.builtin import i64
+
+        small_divisor = emit(arith.ConstantOp(IntegerAttr(denominator, i64)))
+        residue = emit(arith.ConstantOp(IntegerAttr(0, i64)))
+        shift32 = emit(arith.ConstantOp(IntegerAttr(32, i64)))
+        quotient_full = zero
+        for offset in reversed(range(0, width, 32)):
+            word = binary(arith.AndIOp, binary(arith.ShRUIOp, numerator, c(offset)), c((1 << 32) - 1))
+            word = emit(arith.TruncIOp(word, i64))
+            chunk = binary(arith.OrIOp, binary(arith.ShLIOp, residue, shift32), word)
+            digit = binary(arith.DivUIOp, chunk, small_divisor)
+            residue = binary(arith.RemUIOp, chunk, small_divisor)
+            extended = emit(arith.ExtUIOp(digit, wide))
+            quotient_full = binary(arith.OrIOp, quotient_full, binary(arith.ShLIOp, extended, c(offset)))
+        quotient = binary(arith.ShRUIOp, quotient_full, right)
+        remainder = binary(arith.SubiOp, numerator, binary(arith.MuliOp, quotient, divisor))
     twice = binary(arith.ShLIOp, remainder, one)
     above = emit(arith.CmpiOp(twice, divisor, "ugt"))
     tie = emit(arith.CmpiOp(twice, divisor, "eq"))
@@ -99,6 +121,6 @@ def finite_grid(values):
         powers = [(abs(value.numerator) & -abs(value.numerator)).bit_length() - 1 for value in fractions if value]
         exponent = min(powers, default=0)
     bound = max((abs(int(value / Fraction(2) ** exponent)) for value in fractions), default=0)
-    if bound.bit_length() > 52:
-        raise ValueError("finite source exponent span exceeds the proved 52-bit fixed-point packing bound")
+    if bound.bit_length() > 512:
+        raise ValueError("finite source exponent span exceeds the proved 512-bit fixed-point packing bound")
     return exponent, bound
