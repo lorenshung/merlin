@@ -283,3 +283,15 @@ def test_scalar_output_reduction_is_not_confused_with_scalar_work(extent, status
     assert result["status"] == status
     if status == "device":
         assert result["family"] == "reduction"
+
+
+def test_reshape_dimension_tensor_does_not_create_nonscalar_data_work():
+    module = parse_mlir_text("""module {
+      func.func @forward(%x: tensor<1xf32>) -> tensor<1x1xf32> {
+        %shape=arith.constant dense<[1,1]> : tensor<2xi64>
+        %r=tensor.reshape %x(%shape) : (tensor<1xf32>,tensor<2xi64>) -> tensor<1x1xf32>
+        func.return %r : tensor<1x1xf32>
+      }}""")
+    declaration, facts = inputs()
+    plan = dict(numerical_family="F1", sites=[dict(status="admitted", family="movement")])
+    assert estimate_reference(module, plan, declaration, facts)["reason_code"] == "scalar_work_retained_host"

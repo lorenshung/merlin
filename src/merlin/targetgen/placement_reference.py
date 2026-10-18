@@ -77,7 +77,14 @@ def estimate_reference(original, plan, declaration, facts):
         while pending:
             value = pending.pop()
             owner = value.owner
-            for operand in getattr(owner, "operands", ()):
+            operands = getattr(owner, "operands", ())
+            if getattr(owner, "name", None) == "tensor.reshape":
+                operands = operands[:1]  # The other tensor contains dimensions.
+            elif getattr(owner, "name", None) in {"tensor.dim", "tensor.rank"}:
+                operands = ()  # A descriptor query reads no tensor elements.
+            elif getattr(owner, "name", None) == "linalg.generic":
+                operands = [v for v, arg in zip(operands, owner.body.block.args, strict=True) if arg.uses]
+            for operand in operands:
                 if operand not in dependencies:
                     dependencies.add(operand)
                     pending.append(operand)
