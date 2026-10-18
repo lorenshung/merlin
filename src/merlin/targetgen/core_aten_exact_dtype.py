@@ -1,0 +1,141 @@
+"""Source-bound native dtype admission, independent of quantized recipes."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from pathlib import Path
+
+
+def bitwise_catalog_coverage(module, manifest):
+    """Require complete selector lineage, not a token device copy beside host math."""
+    if manifest.get("source_sha256") != hashlib.sha256(str(module).encode()).hexdigest():
+        raise ValueError("bitwise provider proof is for different source bytes")
+    operations = list(module.walk())
+    functions = [op for op in operations if op.name == "func.func" and op.sym_name.data == "forward"]
+    if len(functions) != 1:
+        raise ValueError("bitwise admission requires one forward definition")
+    function = functions[0]
+    returns = [op for op in function.body.block.ops if op.name == "func.return"]
+    if len(returns) != 1:
+        raise ValueError("bitwise admission requires one terminal return")
+    bindings = {}
+    for binding in manifest.get("bindings", []):
+        numeric = binding.get("numeric", {})
+        if numeric.get("family") != "F1":
+            raise ValueError("native movement catalog includes a non-bitwise binding")
+        kernel = next((k for k in manifest["kernels"] if k["symbol"] == binding["symbol"]), None)
+        if kernel is None or (
+            numeric.get("quantization") != "none"
+            or numeric.get("exact_arithmetic") is not True
+            or numeric.get("byte_order") != "little"
+            or kernel["meta"].get("proof") != "closed_static_element_selectors"
+            or kernel["meta"].get("readout") != "scratchpad_bytes"
+        ):
+            raise ValueError("native movement lacks an exact byte-selector kernel proof")
+        ordinal = binding["root_ordinal"]
+        if type(ordinal) is not int or not 0 <= ordinal < len(operations) or ordinal in bindings:
+            raise ValueError("invalid or duplicate movement root ordinal")
+        bindings[ordinal] = binding
+    if not bindings:
+        raise ValueError("no source-bound bitwise movement kernel")
+    visited = set()
+
+    def covered(value):
+        if value in function.body.block.args:
+            return
+        owner = value.owner
+        ordinal = operations.index(owner)
+        if ordinal in visited:
+            return
+        if ordinal not in bindings:
+            raise ValueError(f"native result depends on unbound {owner.name} at ordinal {ordinal}")
+        visited.add(ordinal)
+        for source in bindings[ordinal]["operands"].values():
+            if "func_arg" in source:
+                continue
+            producer = operations[source["op_ordinal"]]
+            # Static literals carry their declared exact storage encoding.
+            if producer.name == "arith.constant":
+                continue
+            covered(producer.results[source["result"]])
+
+    for value in returns[0].operands:
+        covered(value)
+    return sorted(visited)
+
+
+def _expose_literal_movement(module):
+    """Expose uniform tensor literals as explicit selectors without changing bits."""
+    from xdsl.dialects import arith, tensor
+    from xdsl.dialects.builtin import DenseIntOrFPElementsAttr, TensorType
+    from xdsl.rewriter import Rewriter
+
+    for op in list(module.walk()):
+        if op.name != "arith.constant" or not isinstance(op.results[0].type, TensorType):
+            continue
+        value = op.properties.get("value") or op.attributes.get("value")
+        if not isinstance(value, DenseIntOrFPElementsAttr) or not value.is_splat():
+            continue
+        scalar = arith.ConstantOp(value.get_attrs()[0])
+        splat = tensor.SplatOp(scalar.result, [], op.results[0].type)
+        Rewriter.replace_op(op, [scalar, splat])
+
+
+def prepare_bitwise(directory, report, selection, provider, package, module):
+    """Try a complete F1 program; unsupported arithmetic retains other routes."""
+    from merlin.targetgen.software_spec import admit_operation
+    from merlin.targetgen.transfer_contracts import screen_transfer_contract
+
+    if not callable(getattr(provider, "core_aten_catalog", None)):
+        return None
+    if any(k.startswith("prov.quant.") for op in module.walk() for k in op.attributes):
+        return None
+    # These operations cannot be byte selectors even when a later copy matches.
+    if any(op.name in {"linalg.matmul", "linalg.batch_matmul", "linalg.reduce"}
+           or op.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "arith.negf",
+                          "arith.extf", "arith.truncf", "arith.sitofp", "arith.fptosi"}
+           for op in module.walk()):
+        return None
+    _expose_literal_movement(module)
+    module.verify()
+    source = str(module)
+    stage = directory / "dtype-preflight"
+    stage.mkdir(exist_ok=True)
+    path = stage / "model.mlir"
+    path.write_text(source)
+    try:
+        manifest_path, _ = provider.core_aten_catalog(path, stage, package=package)
+        manifest = json.loads(Path(manifest_path).read_text())
+        roots = bitwise_catalog_coverage(module, manifest)
+    except (ValueError, RuntimeError) as exc:
+        (stage / "refusal.json").write_text(json.dumps({"reason": str(exc)}) + "\n")
+        return None
+    sites = []
+    operations = list(module.walk())
+    for ordinal in roots:
+        typ = operations[ordinal].results[0].type
+        signature = dict(family="movement", numerical_family="F1", operand_dtype=str(typ.element_type),
+                         rank=len(typ.get_shape()), layout="row_major_contiguous",
+                         aliasing="disjoint_inputs_outputs")
+        decision = admit_operation(selection["spec"], "movement", signature, "accelerator")
+        host = admit_operation(selection["host"], "movement", signature, "host")
+        if decision["status"] != "admitted" or host["status"] != "admitted":
+            return None
+        sites.append(dict(source_operation_ordinal=ordinal, family="movement", status="admitted", software=decision))
+    for origin, destination in (("host", "accelerator"), ("accelerator", "host")):
+        transfer = screen_transfer_contract(selection["spec"], source_placement=origin,
+                                            destination_placement=destination, operand_dtype="i8", result_dtype="i8",
+                                            operand_layout="row_major_contiguous", result_layout="row_major_contiguous")
+        if transfer["status"] != "admitted":
+            return None
+    plan = dict(status="admitted", numerical_family="F1", quantized_contractions=0,
+                native_contractions=0, quantized_non_contraction_sites=0,
+                exact_dtype_sites=len(sites), sites=sites, provider_catalog=manifest,
+                host_floor=dict(status="required", comparison="native_eager_bits_every_boundary_result"))
+    document = {"selection": selection, **plan}
+    (directory / "model.mlir").write_text(source + "\n")
+    (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
+    for record in report["cases"]:
+        record.update(numeric_admission=plan, numeric_selection=selection["identities"])
+    return document

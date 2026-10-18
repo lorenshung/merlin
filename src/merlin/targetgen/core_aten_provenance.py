@@ -45,6 +45,8 @@ def batch_provenance(
             "targetgen/core_aten_input_storage.py",
             "targetgen/capture_refusals.py",
             "targetgen/core_aten_numeric.py",
+            "targetgen/core_aten_exact_dtype.py",
+            "targetgen/core_aten_host_floor.py",
             "targetgen/operation_numerics.py",
             "targetgen/core_aten_spec_int8.py",
             "targetgen/software_spec.py",

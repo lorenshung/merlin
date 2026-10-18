@@ -145,7 +145,13 @@ def prepare_spec_int8(
     preparation = prepare(directory, target=target, facts=facts) if prepare is not None else {}
     module = parse_mlir_file(directory / "model.mlir")
     from merlin.kernels.shapes import observe_contractions
+    from merlin.targetgen.core_aten_exact_dtype import prepare_bitwise
 
+    bitwise = prepare_bitwise(directory, report, selection, provider, package, module)
+    if bitwise is not None:
+        return bitwise
+    # An unsuccessful candidate must not change the original source or its ordinals.
+    module = parse_mlir_file(directory / "model.mlir")
     native = any(shape.dtypes == ("i8", "i8", "i32") for _, shape in observe_contractions(module))
     if native:
         proof = None

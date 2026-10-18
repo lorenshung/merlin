@@ -19,6 +19,24 @@ exact_readout:
   api: merlin.runtime.exact_readout.requantize_int32
   rounding: half_to_even
 operations:
+  - id: host_exact_native_boundary
+    status: reviewed
+    families: [movement, elementwise_map, reduction, contraction]
+    placement: host
+    signature:
+      numerical_family: [F1, F2, F4, F5]
+      dtypes: [i1, int8, i16, f16, bf16, i32, f32, i64, f64, complex<f32>]
+    numerical_contract:
+      status: reviewed
+      semantics:
+        movement: opaque_little_endian_bytes
+        integer: exact_components_with_declared_twos_complement_wraparound
+        floating: exact_dyadic_components_then_source_dtype_rounding
+        complex: explicit_real_imaginary_components
+        boolean: source_boolean_algebra
+        output_gate: native_eager_storage_bits_or_proved_exact_reduction_floor
+      evidence:
+        basis: Phase B exact dtype family design; every source rewrite and compiled execution retains its own proof obligation
   - id: host_f32_elementwise_exact
     ops: [aten.mul.Tensor, aten.add.Tensor, aten.add.Scalar, aten.div.Tensor, aten.relu.default]
     families: [elementwise_map]

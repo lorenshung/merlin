@@ -113,6 +113,23 @@ operations:
     broadcasting: [none, outer]
     layouts: [row_major_contiguous]
     aliasing: [disjoint_inputs_outputs]
+  movement_bitwise:
+    status: reviewed
+    families: [movement]
+    placement: accelerator
+    signature:
+      numerical_family: [F1]
+      operand_dtypes: [i1, int8, i16, f16, bf16, i32, f32, i64, f64, complex<f32>]
+      layouts: [row_major_contiguous]
+      aliasing: [disjoint_inputs_outputs]
+    numerical_contract:
+      family: F1
+      arithmetic: none
+      representation: opaque_little_endian_bytes
+      proof: closed_static_element_selectors
+      quantization: none
+      device_transfer_dtype: int8
+      comparison: native_eager_bits
   host_only:
     families: [reduction, normalization, attention, softmax]
     placement: host

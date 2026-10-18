@@ -123,3 +123,17 @@ def float_reference(mdl, inputs, torch, input_abi, output_abi, to_native) -> dic
         np.random.set_state(states[1])
         torch.set_rng_state(states[2])
     return {"outputs": values[0] if len(values) == 1 else values, "output_abi": abi, "leaves": leaves}
+
+
+def raw_tensor_boundary(outputs, inputs):
+    """Native eager storage bits, independent of compiler execution and Q/DQ."""
+    import torch
+
+    def raw(tensor):
+        return tensor.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes().hex()
+
+    return {
+        "authority": "untransformed_native_cpu_eager",
+        "output_bytes": [raw(tensor) for tensor in outputs],
+        "post_input_bytes": [raw(tensor) for tensor in inputs],
+    }

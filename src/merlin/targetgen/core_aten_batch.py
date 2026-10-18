@@ -605,6 +605,8 @@ def build_core_aten_batch(
             }
         record.update(
             status="bundled",
+            native_eager_boundary=meta.get("native_eager_boundary"),
+            native_eager_indices={"outputs": user_indices, "posts": post_indices if contract is not None else []},
             capture_status=capture.get("status"),
             input_indices=list(range(first_input, len(inputs))),
             output_indices=user_indices,

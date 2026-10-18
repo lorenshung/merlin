@@ -48,6 +48,7 @@ _SIGNATURE_FIELDS = frozenset(
         "kinds",
         "max_tensor_operands",
         "expressions",
+        "numerical_family",
     }
 )
 
@@ -615,6 +616,7 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
             ("scale_granularity", "scale_granularity"),
             ("kinds", "kind"),
             ("expressions", "expression"),
+            ("numerical_family", "numerical_family"),
         ):
             if key not in constraints:
                 continue

@@ -1349,7 +1349,6 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
     # host torch-eager reference — THE golden. Run the (cast/quantized) model the compiler must reproduce.
     with torch.no_grad():
         y = mdl(*inputs)
-    # The census of the forward that produced the golden, taken before anything runs the model again.
     act_sites = act_census.to_dict() if act_census is not None else None
     nl_sites = nl_census.to_dict() if nl_census is not None else None
     output_leaves, output_abi = _output_abi(y)
@@ -1360,7 +1359,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
     input_leaves, input_abi = pre_call_leaves, pre_call_abi
     input_prov = pre_call_values
     sys.path.insert(0, str(Path(__file__).resolve().parent))
-    from _capture_result_contract import exported_contract
+    from _capture_result_contract import exported_contract, raw_tensor_boundary
 
     result_contract = exported_contract(res, input_leaves)
 
@@ -1377,6 +1376,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         "ok": bool(res.ok) and precision_exact,
         "precision_realization": precision if precision else {"status": "unknown"},
         "precision_conversion": precision_conversion,
+        "native_eager_boundary": raw_tensor_boundary(output_leaves, input_leaves) if recipe is None else None,
         **({"static_metadata_specialization": static_metadata} if static_metadata is not None else {}),
         **({"fp32_staging": fp32_staging} if fp32_staging is not None else {}),
         "opaque": int(n_opaque),

@@ -287,6 +287,13 @@ def grade_core_aten_batch(
             verdict["calibration"] = admission.get(
                 "calibration", {"source": "calibration-on-evaluation-input", "performed": False}
             )
+            if admission.get("host_floor", {}).get("status") == "required":
+                from merlin.targetgen.core_aten_host_floor import grade_native_bits
+
+                floor = grade_native_bits(record, output_bytes, execution_error=execution_error)
+                verdict["host_floor"] = floor
+                if floor["status"] != "pass":
+                    verdict.update(status=floor["status"], numeric_status=floor["status"], reason=floor["reason"])
             reference = admission.get("integer_reference", {})
             if reference.get("status") == "prepared" and output_bytes is not None and execution_error is None:
                 comparisons = []
@@ -347,6 +354,9 @@ def grade_core_aten_batch(
             verdict["numeric_qualification"] = (
                 "original host fallback; no spec-int8 result" if host else "unqualified spec-int8 execution"
             )
+        if routing.get("lane") == "device" and verdict.get("host_floor", {}).get("status") == "pass":
+            verdict["numeric_execution_policy"] = "native_host_exact"
+            verdict["numeric_qualification"] = "native eager storage bits and complete semantic boundary checked"
         if record.get("source_preparation"):
             verdict["source_preparation"] = record["source_preparation"]
         if routing.get("lane") == "device" and record["status"] == "bundled":
