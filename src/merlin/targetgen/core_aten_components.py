@@ -180,6 +180,10 @@ def prepare_integer_components(directory, report, selection, provider, package, 
     )
     if not plans:
         return None
+    from merlin.llvmlower.entry_weight_projection import _pure_dce
+
+    for function in functions:
+        _pure_dce(function)
     remaining_products = unlowered_data_products(module, limb_attribute)
     if remaining_products:
         (directory / "exact-dtype-refusal.json").write_text(
