@@ -111,21 +111,25 @@ def test_exclusions_are_selected_by_the_targets_numeric_contract():
 
 def test_precomputed_result_tables_do_not_accelerate_their_construction():
     def table(values):
-        return parse_mlir_text('''module {
+        return parse_mlir_text(
+            """module {
           func.func @forward() -> tensor<3xf32> {
-            %v=arith.constant dense<''' + values + '''> : tensor<3xf32>
+            %v=arith.constant dense<"""
+            + values
+            + """> : tensor<3xf32>
             func.return %v : tensor<3xf32>
-          }}''')
+          }}"""
+        )
 
-    generated = construction_evidence(table('[1.0,3.0,5.0]'))
-    assert generated['status'] == 'host'
-    assert generated['evidence'][0]['reason'] == 'nonuniform_literal_result_construction'
-    assert construction_evidence(table('2.0'))['status'] == 'eligible'
-    assert construction_evidence(table('[1.0,3.0,5.0]'), excluded=[])['status'] == 'eligible'
+    generated = construction_evidence(table("[1.0,3.0,5.0]"))
+    assert generated["status"] == "host"
+    assert generated["evidence"][0]["reason"] == "nonuniform_literal_result_construction"
+    assert construction_evidence(table("2.0"))["status"] == "eligible"
+    assert construction_evidence(table("[1.0,3.0,5.0]"), excluded=[])["status"] == "eligible"
 
 
 def test_literal_address_tables_are_native_movement():
-    module = parse_mlir_text('''module {
+    module = parse_mlir_text("""module {
       func.func @forward(%x: tensor<3xf32>) -> tensor<3xf32> {
         %table=arith.constant dense<[2,1,0]> : tensor<3xindex>
         %e=tensor.empty() : tensor<3xf32>
@@ -138,5 +142,24 @@ def test_literal_address_tables_are_native_movement():
             linalg.yield %a : f32
           } -> tensor<3xf32>
         func.return %r : tensor<3xf32>
-      }}''')
-    assert construction_evidence(module)['status'] == 'eligible'
+      }}""")
+    assert construction_evidence(module)["status"] == "eligible"
+
+
+def test_literal_uniformity_uses_storage_bits_for_nan_and_zero():
+    from xdsl.dialects import arith, func
+    from xdsl.dialects.builtin import BytesAttr, DenseIntOrFPElementsAttr, ModuleOp, TensorType, f32
+
+    def table(words):
+        data = DenseIntOrFPElementsAttr(
+            TensorType(f32, [len(words)]), BytesAttr(b"".join(w.to_bytes(4, "little") for w in words))
+        )
+        constant = arith.ConstantOp(data)
+        function = func.FuncOp("forward", ([], [constant.result.type]))
+        function.body.block.add_ops([constant, func.ReturnOp(constant.result)])
+        return ModuleOp([function])
+
+    assert construction_evidence(table([0x7FC01234, 0x7FC01234]))["status"] == "eligible"
+    assert construction_evidence(table([0, 0x80000000]))["status"] == "host"
+    assert construction_evidence(table([0x7FC01234, 0x7FC05678]))["status"] == "host"
+    assert construction_evidence(table([]))["status"] == "eligible"

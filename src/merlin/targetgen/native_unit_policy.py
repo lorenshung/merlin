@@ -80,7 +80,13 @@ def construction_evidence(module, *, excluded=None):
         name = getattr(owner, "name", None)
         if name == "arith.constant":
             data = owner.properties.get("value", owner.attributes.get("value"))
-            return isinstance(data, DenseIntOrFPElementsAttr) and not data.is_splat()
+            if not isinstance(data, DenseIntOrFPElementsAttr):
+                return False
+            # Numeric equality conflates signed zeros and treats repeated NaNs
+            # as unequal. Literal movement is a storage-bit contract instead.
+            width = data.get_element_type().compile_time_size
+            raw = data.data.data
+            return any(raw[i : i + width] != raw[:width] for i in range(width, len(raw), width))
         if name == "linalg.generic":
             return literal_table_payload(owner.body.block.last_op.operands[value.index])
         if name is None and hasattr(owner, "parent_op"):

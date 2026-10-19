@@ -400,7 +400,7 @@ def test_descriptor_fold_retains_host_while_real_scalar_tensor_work_qualifies(tm
 def test_scalar_movement_result_has_no_innermost_output_axis():
     from merlin.targetgen.placement_reference import movement_pattern
 
-    module = parse_mlir_text('''module {
+    module = parse_mlir_text("""module {
       func.func @forward(%x: tensor<2xf32>) -> tensor<f32> {
         %e=tensor.empty() : tensor<f32>
         %r=linalg.generic {
@@ -410,9 +410,10 @@ def test_scalar_movement_result_has_no_innermost_output_axis():
             linalg.yield %a : f32
           } -> tensor<f32>
         func.return %r : tensor<f32>
-      }}''')
+      }}""")
     pattern, evidence, operations = movement_pattern(module)
-    assert pattern == 'element_gather'
-    assert evidence == [dict(operation='linalg.generic', input_map='affine_map<() -> (0)>',
-                             reason='nonunit_inner_selector')]
+    assert pattern == "element_gather"
+    assert evidence == [
+        dict(operation="linalg.generic", input_map="affine_map<() -> (0)>", reason="nonunit_inner_selector")
+    ]
     assert operations == 0
