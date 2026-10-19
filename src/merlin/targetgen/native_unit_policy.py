@@ -50,7 +50,26 @@ def construction_evidence(module):
                 return literal(parent.inputs[value.index], seen)
         return False
 
+    def index_payload(value, seen=None):
+        seen = set() if seen is None else set(seen)
+        if value in seen:
+            return False
+        seen.add(value)
+        owner = value.owner
+        name = getattr(owner, "name", None)
+        if name == "linalg.index":
+            return True
+        if name in {None, "tensor.extract", "arith.constant"}:
+            return False
+        # Selection predicates are addresses; selected values are payloads.
+        operands = owner.operands[1:] if name == "arith.select" else owner.operands
+        return any(index_payload(v, seen) for v in operands)
+
     for ordinal, op in enumerate(module.walk()):
+        if not contractions and op.name == "linalg.generic":
+            yielded = op.body.block.last_op.operands
+            if any(str(v.type) != "i1" and index_payload(v) for v in yielded):
+                evidence.append(dict(ordinal=ordinal, operation=op.name, reason="index_generated_payload_arithmetic"))
         if op.name in {"math.floor", "math.ceil", "math.trunc", "math.round", "math.roundeven"}:
             if not literal(op.operands[0]):
                 evidence.append(dict(ordinal=ordinal, operation=op.name, reason="nonlinear_rounding_construction"))

@@ -56,3 +56,10 @@ def test_literal_expression_is_not_mistaken_for_runtime_multiplier():
         construction_evidence(source("%n=arith.negf %b : f32\n%v=arith.mulf %a,%n : f32", literal=True))["status"]
         == "eligible"
     )
+
+
+def test_index_arithmetic_is_not_accelerated_by_copying_its_host_literal_table():
+    ramp = source("%i=linalg.index 0 : index\n%j=arith.index_cast %i : index to i64\n%v=arith.sitofp %j : i64 to f32")
+    literal = source("%i=linalg.index 0 : index\n%v=arith.constant 2.0 : f32")
+    assert construction_evidence(ramp)["evidence"][0]["reason"] == "index_generated_payload_arithmetic"
+    assert construction_evidence(literal)["status"] == "eligible"
