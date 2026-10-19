@@ -46,14 +46,18 @@ import torch
 scope={{}}
 exec({source!r},scope)
 model,inputs=scope['get_model_and_inputs']()
-for dtype in (torch.complex64,torch.complex128):
- for real in (0.,-0.,1.,-2.,float('inf'),-float('inf'),float('nan')):
-  for imag in (0.,-0.,3.,float('inf'),float('nan')):
-   x=torch.tensor(complex(real,imag),dtype=dtype)
-   expected=torch.ops.aten.prod.default(x)
-   actual=model(x)
-   assert actual.shape == expected.shape == torch.Size([])
-   assert torch.equal(actual.reshape(-1).view(torch.uint8),expected.reshape(-1).view(torch.uint8)), (x,actual,expected)
-   assert actual.untyped_storage()._cdata != x.untyped_storage()._cdata
+for overload,tail,kwargs in [('default',[],{{}}),('dim_int',[0,False],{{}}),('dim_int',[-1,True],{{}})]:
+ scope['_DOCUMENT']['overload']='aten.prod.'+overload
+ scope['_DOCUMENT']['arguments']['args']['items'] = [{{'input_index':0}}, *tail]
+ scope['_DOCUMENT']['arguments']['kwargs'] = kwargs
+ for dtype in (torch.complex64,torch.complex128):
+  for real in (0.,-0.,1.,-2.,float('inf'),-float('inf'),float('nan')):
+   for imag in (0.,-0.,3.,float('inf'),float('nan')):
+    x=torch.tensor(complex(real,imag),dtype=dtype)
+    expected=getattr(torch.ops.aten.prod,overload)(x,*tail,**kwargs)
+    actual=model(x)
+    assert actual.shape == expected.shape == torch.Size([])
+    assert torch.equal(actual.reshape(-1).view(torch.uint8),expected.reshape(-1).view(torch.uint8)), (x,actual,expected)
+    assert actual.untyped_storage()._cdata != x.untyped_storage()._cdata
 '''
     subprocess.run([str(capture_python()), '-c', script], check=True)
