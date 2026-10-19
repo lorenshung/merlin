@@ -808,6 +808,8 @@ def compare(
     golden, or the INDEPENDENT source (e.g. ``specir_refmodel_fp8_bf16``) when it was read from
     ``golden.yaml`` rather than recomputed."""
     mode = policy.get("compare", "exact_int")
+    if mode == "exact_bits":
+        raise ValueError("exact_bits requires full-call storage-boundary grading, not decoded numeric values")
     rep: dict[str, Any] = {
         "policy": mode,
         "golden_source": golden_source,

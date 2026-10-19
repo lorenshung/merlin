@@ -179,6 +179,12 @@ def _write_case(task):
         shutil.copyfile(source / "capsule.pytorch.py", destination / "capsule.pytorch.py")
         # The public ABI contains no expected results, mutation observations or answers.
         record = report["cases"][0]
+        # Full-call native results use storage bits, even when the source corpus
+        # carries a looser diagnostic comparison. Do not mutate that corpus.
+        record["case"] = {
+            **record["case"],
+            "comparison_parameters": {"rtol": 0, "atol": 0, "storage_bits": True},
+        }
         _json(
             destination / "call.json",
             {
@@ -206,9 +212,7 @@ def _write_case(task):
             },
         )
         binding = {filename: _sha(answers / filename) for filename in FILES if (answers / filename).is_file()}
-        parameters = case.get("comparison_parameters") or {}
         dtypes = [item["dtype"] for item in record["output_abi"]]
-        floating = any(dtype.startswith(("f", "complex<")) for dtype in dtypes)
         policy_dtype = next((dtype for dtype in dtypes if dtype.startswith(("f", "complex<"))), dtypes[0])
         if policy_dtype.startswith("complex<"):
             policy_dtype = policy_dtype.removeprefix("complex<").removesuffix(">")
@@ -227,10 +231,10 @@ def _write_case(task):
                 },
             },
             "numeric_policy": {
-                "compare": "tolerance_float" if floating else "exact_int",
+                "compare": "exact_bits",
                 "dtype": policy_dtype,
-                "rtol": float(parameters.get("rtol", 0)),
-                "atol": float(parameters.get("atol", 0)),
+                "rtol": 0.0,
+                "atol": 0.0,
             },
             "expected": {"instruction_classes": []},
             "required_oracle_tiers": list(tiers),
@@ -239,7 +243,7 @@ def _write_case(task):
         if numeric_flow is not None:
             declaration["operation"]["attributes"]["numeric_flow"] = numeric_flow["policy"]
             declaration["numeric_policy"].update(
-                compare="exact_int",
+                compare="exact_bits",
                 rtol=0.0,
                 atol=0.0,
             )

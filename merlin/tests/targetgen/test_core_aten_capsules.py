@@ -669,3 +669,25 @@ def test_numeric_refusal_diagnostic_omits_repeated_inputs_and_expected_bytes():
     assert "selection" not in error.plan and "provider_catalog" not in error.plan
     assert "private-answer" not in str(error)
     assert plan["integer_reference"]["expected_output_bytes"] == {"0": "private-answer"}
+
+
+def test_writer_requires_native_storage_comparison(packaged):
+    capsule, raw, _, _, _ = packaged
+    assert capsule["numeric_policy"]["compare"] == "exact_bits"
+    assert capsule["numeric_policy"]["rtol"] == capsule["numeric_policy"]["atol"] == 0
+    record = C.load_private(capsule)["batch_map"]["cases"][0]
+    assert record["case"]["comparison_parameters"] == dict(rtol=0, atol=0, storage_bits=True)
+    from merlin.targetgen.core_aten_batch_grade import _grade_output
+
+    # A sub-ULP-looking error must not pass because the corpus carried a tolerance.
+    wrong = np.array([1.0, np.nextafter(np.float32(2), np.float32(3))], np.float32).tobytes()
+    expected = record["case"]["expected"]
+    assert _grade_output(raw[0], record["output_abi"][0], expected, record["case"])["status"] == "pass"
+    assert _grade_output(wrong, record["output_abi"][0], expected, record["case"])["status"] == "mismatch"
+
+
+def test_decoded_float_comparison_cannot_claim_storage_bits():
+    from merlin.targetgen.capsule_golden import compare
+
+    with pytest.raises(ValueError, match="storage-boundary"):
+        compare({"x": [0.0]}, {"x": [-0.0]}, dict(compare="exact_bits", dtype="f32"))
