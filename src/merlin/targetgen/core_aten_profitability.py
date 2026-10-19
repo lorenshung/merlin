@@ -82,6 +82,12 @@ def prepare(directory, report, implementation, **kwargs):
         if policy == "reference_scale"
         else dict(strict)
     )
+    from merlin.targetgen.native_unit_policy import construction_evidence
+
+    native = construction_evidence(parse_mlir_text(original_files["model.mlir"].decode()))
+    cost["native_unit_policy"] = native
+    if native["status"] == "host":
+        cost.update(status="host", reason_code="non_native_unit_construction")
     cost["strict_policy"] = strict
     plan["placement_cost"] = cost
     if cost["status"] != "device":

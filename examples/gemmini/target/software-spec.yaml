@@ -50,6 +50,12 @@ placement_cost_model:
 # dequantization declaration is limited to its stated operand/result types and
 # ranks; it does not declare device execution or arbitrary shapes.
 numerical_semantics:
+  native_unit_contract:
+    eligibility: source_scalar_dataflow_and_reduction_domains
+    allowed_representation: exact_signed_byte_limbs_and_retained_ieee_host_readout
+    excluded_constructions: [nonlinear_rounding, parallel_runtime_products, saturation_comparators, readout_offset_rounding]
+    source_overload_dispatch: forbidden
+    evidence: {review_status: "authored, pending operator review"}
   model:
     engine: integer_reference
   operand_dtype: int8
