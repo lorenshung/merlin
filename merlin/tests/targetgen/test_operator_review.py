@@ -184,3 +184,16 @@ def test_numerical_contract_without_explicit_review_status_is_not_accepted(monke
     monkeypatch.setenv(ACCEPT_ENV, "1")
     result = _explicit_contract(dict(semantics=dict(arithmetic="exact_integer"), evidence=dict(basis="authored")))
     assert result["status"] == "unknown" and "review_status" in result["unknowns"]
+
+
+@pytest.mark.parametrize("missing", ["spec_review", "unchecked_row_review"])
+def test_missing_required_review_cannot_be_accepted_implicitly(monkeypatch, missing):
+    monkeypatch.setenv(ACCEPT_ENV, "1")
+    spec = specification()
+    if missing == "spec_review":
+        spec.pop("status")
+    else:
+        row = spec["operations"][0]
+        row.pop("status")
+        row["admission_basis"] = "declared_unchecked"
+    assert decision(spec)["status"] == "unknown"

@@ -489,7 +489,8 @@ def exact_declarations(spec: dict, op: str, signature: dict) -> tuple[list[dict]
         declared = row.get("signature") or {}
         if (
             row.get("placement") == "host"
-            and review_accepted(spec, row)
+            and review_accepted(spec, default="unreviewed")
+            and review_accepted(row)
             and "hardware" not in row
             and not (set(declared) - _SIGNATURE_FIELDS)
             and not ({"restriction", "semantics"} & set(declared))
@@ -553,7 +554,7 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
     for row in candidates:
         constraints = row["signature"]
         missing, refused = [], []
-        if row.get("admission_basis") == "declared_unchecked" and not review_accepted(row):
+        if row.get("admission_basis") == "declared_unchecked" and not review_accepted(row, default="unreviewed"):
             missing.append("unchecked declaration requires explicit operation review")
         missing.extend(sorted(set(constraints) - _SIGNATURE_FIELDS))
         for declaration_key in ("restriction", "semantics"):
@@ -713,7 +714,9 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
                     or (comparison == "multiple_of" and observed % bound)
                 ):
                     refused.append(f"dimension {axis}={observed} violates {comparison}={bound}")
-        review = review_record(spec, row)
+        review = review_record(
+            {"status": spec.get("status", "unreviewed"), "evidence": spec.get("evidence", {})}, row
+        )
         if refused:
             status, reason = "unsupported", "; ".join(refused)
         elif missing or not review["operator_accepted"]:
