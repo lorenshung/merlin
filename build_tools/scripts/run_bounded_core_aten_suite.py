@@ -33,7 +33,8 @@ from merlin.targetgen.core_aten_capture import case_capture_name
 
 
 def git(path, *args):
-    return subprocess.check_output(["git", "-C", str(path), *args], text=True).strip()
+    result = subprocess.run(["git", "-C", str(path), *args], text=True, capture_output=True)
+    return result.stdout.strip() if result.returncode == 0 else None
 
 
 def stamp(args):

@@ -82,12 +82,25 @@ def test_pinned_cross_repo_bounded_device_results(tmp_path):
     if os.environ.get("MERLIN_EXACTNESS_E2E") != "1":
         pytest.skip("set MERLIN_EXACTNESS_E2E=1 with the selected provider, facts and native toolchain")
     data = fixture()
+    from merlin.common.yaml import load_yaml
+
+    software = load_yaml(repo_root() / "examples/gemmini/target/software-spec.yaml")
+    assert data["gemmini_mlir_revision"] == software["execution_provider_revision"]
     m2m, package = [Path(os.environ[k]) for k in ("MERLIN_M2M_DIR", "MERLIN_EXACTNESS_DEVICE_PACKAGE")]
     for root, key in ((m2m, "model2mlir_revision"), (package, "gemmini_mlir_revision")):
-        assert subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip() == data[key]
-        assert not subprocess.check_output(
-            ["git", "-C", str(root), "status", "--porcelain", "--untracked-files=no"], text=True
-        )
+        if (root / ".git").exists():
+            assert (
+                subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip() == data[key]
+            )
+            assert not subprocess.check_output(["git", "-C", str(root), "status", "--porcelain"], text=True)
+        else:
+            # The run10 archives intentionally have no Git directory. Bind the
+            # complete exported source bytes instead of trusting a path or label.
+            from pinned_exports import export_digest
+
+            pinned = data["source_exports"][key.removesuffix("_revision")]
+            assert pinned["revision"] == data[key]
+            assert export_digest(root) == pinned["sha256"]
     suffixes = (
         "0515658725071550",
         "49068d51af4bfe8d",
@@ -133,6 +146,12 @@ def test_pinned_cross_repo_bounded_device_results(tmp_path):
         "spec_int8",
         "--workers",
         "4",
+        "--arena-mb",
+        "16",
+        "--dram-mb",
+        "256",
+        "--execution-timeout",
+        "600",
         "--limit",
         str(len(cases)),
     ]
@@ -142,7 +161,7 @@ def test_pinned_cross_repo_bounded_device_results(tmp_path):
         env={**os.environ, "PYTHONPATH": os.pathsep.join([str(root / "src"), os.environ.get("PYTHONPATH", "")])},
         text=True,
         capture_output=True,
-        timeout=600,
+        timeout=1500,
     )
     assert result.returncode == 0, result.stdout + result.stderr
     responses = json.loads((tmp_path / "run/gate/response.json").read_text())["results"]
@@ -154,3 +173,27 @@ def test_pinned_cross_repo_bounded_device_results(tmp_path):
         assert all(row["status"] == "pass" for row in verdict["integer_reference"]["results"])
         execution = evidence["routing"]["execution_evidence"]
         assert execution["status"] == "measured" and execution["executed_instructions"] > 0
+
+
+def test_gate_provider_revision_matches_selected_spec():
+    from merlin.common.yaml import load_yaml
+
+    selected = load_yaml(repo_root() / "examples/gemmini/target/software-spec.yaml")
+    data = fixture()
+    assert data["gemmini_mlir_revision"] == selected["execution_provider_revision"]
+    assert data["source_exports"]["gemmini_mlir"]["revision"] == data["gemmini_mlir_revision"]
+    assert data["source_exports"]["model2mlir"]["revision"] == data["model2mlir_revision"]
+
+
+def test_export_pin_detects_source_and_link_edits(tmp_path):
+    from pinned_exports import export_digest
+
+    (tmp_path / "source.py").write_text("original")
+    (tmp_path / "link.py").symlink_to("source.py")
+    before = export_digest(tmp_path)
+    (tmp_path / "source.py").write_text("changed")
+    assert export_digest(tmp_path) != before
+    (tmp_path / "source.py").write_text("original")
+    (tmp_path / "link.py").unlink()
+    (tmp_path / "link.py").symlink_to("other.py")
+    assert export_digest(tmp_path) != before

@@ -1,7 +1,7 @@
 {
   "schema": "merlin.exactness_final_gate.v1",
   "model2mlir_revision": "dc4b28a9647658e6ae43c8acee524bd9e5a45640",
-  "gemmini_mlir_revision": "4e84356172646921ab6eaf031063681cc780ed65",
+  "gemmini_mlir_revision": "ec084f03516125e03eac239a508b246ccdb3dd61",
   "selected_cases": [
     {
       "arguments": {
@@ -8150,5 +8150,15 @@
       "rng_seed": 0,
       "schema": "aten::relu(Tensor self) -> Tensor"
     }
-  ]
+  ],
+  "source_exports": {
+    "model2mlir": {
+      "revision": "dc4b28a9647658e6ae43c8acee524bd9e5a45640",
+      "sha256": "8ae8537f979b47c4dce27aaebc9a67de0721dbfc5b4a2d8d7c7eaf92bad984cc"
+    },
+    "gemmini_mlir": {
+      "revision": "ec084f03516125e03eac239a508b246ccdb3dd61",
+      "sha256": "9a65382aaec79afb0c93699c8f77e72294cfa44194d2e154936a20cc1d03474f"
+    }
+  }
 }

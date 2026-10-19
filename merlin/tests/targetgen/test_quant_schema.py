@@ -5,6 +5,7 @@ import json
 import os
 import subprocess
 import warnings
+from pathlib import Path
 
 import pytest
 
@@ -37,29 +38,35 @@ def test_quant_schema_matches_pinned_frontend_and_live_export():
         check=True,
     )
     root = result.stdout.strip().splitlines()[-1]
-    observed = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
-    assert observed.stdout.strip() == pin["revision"], "MERLIN_M2M_PYTHON must use the pinned test snapshot"
-    dirty = subprocess.run(
-        ["git", "-C", root, "status", "--porcelain", "--untracked-files=normal", "--", "m2m"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    assert not dirty.stdout.strip(), "MERLIN_M2M_PYTHON imports a modified frontend; use a clean pinned snapshot"
-    pinned = subprocess.run(["git", "-C", root, "show", pin["revision"] + ":" + pin["path"]], capture_output=True)
-    if pinned.returncode:
-        warnings.warn(
-            "QUANT SCHEMA PIN INCOMPLETE: model2mlir export is not committed at "
-            + pin["revision"]
-            + "; live-export equality is checked, but revision attribution remains unqualified.",
-            RuntimeWarning,
-            stacklevel=1,
+    if (Path(root) / ".git").exists():
+        observed = subprocess.run(["git", "-C", root, "rev-parse", "HEAD"], capture_output=True, text=True, check=True)
+        assert observed.stdout.strip() == pin["revision"], "MERLIN_M2M_PYTHON must use the pinned test snapshot"
+        dirty = subprocess.run(
+            ["git", "-C", root, "status", "--porcelain", "--untracked-files=normal", "--", "m2m"],
+            capture_output=True,
+            text=True,
+            check=True,
         )
-        assert pin["status"] == "exported_uncommitted"
+        assert not dirty.stdout.strip(), "MERLIN_M2M_PYTHON imports a modified frontend; use a clean pinned snapshot"
+        pinned = subprocess.run(["git", "-C", root, "show", pin["revision"] + ":" + pin["path"]], capture_output=True)
+        if pinned.returncode:
+            warnings.warn(
+                "QUANT SCHEMA PIN INCOMPLETE: model2mlir export is not committed at "
+                + pin["revision"]
+                + "; live-export equality is checked, but revision attribution remains unqualified.",
+                RuntimeWarning,
+                stacklevel=1,
+            )
+            assert pin["status"] == "exported_uncommitted"
+        else:
+            assert pinned.stdout == vendor, "vendored quant schema drifts from the pinned model2mlir revision"
     else:
-        assert pinned.stdout == vendor, "vendored quant schema drifts from the pinned model2mlir revision"
-    from pathlib import Path
+        from pinned_exports import export_digest
 
+        fixture = json.loads((repo_root() / "merlin/tests/data/exactness/bounded_final_gate.json").read_text())
+        exported = fixture["source_exports"]["model2mlir"]
+        assert exported["revision"] == pin["revision"]
+        assert export_digest(root) == exported["sha256"], "pinned frontend source export changed"
     assert (Path(root) / pin["path"]).read_bytes() == vendor, "live frontend quant schema drift"
     schema = quantization_schema()
     assert schema["schema_version"] == 1
