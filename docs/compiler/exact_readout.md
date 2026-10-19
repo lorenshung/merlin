@@ -4,7 +4,9 @@ The xDSL preprocessing stage `xdsl-exact-readouts` specializes the frontend's
 exact readout scalar bodies before LLVM legalization. It checks the complete
 scalar body, maps and iterators against the independent structural specification
 in `exact_readout_source.py`. Changed or unsupported bodies retain the original
-exact arithmetic. Provenance alone never authorizes a replacement.
+exact arithmetic. Provenance alone never authorizes a replacement. Three scalar trace
+annotations (source IDs, origin IDs and trace role) are ignored in a cloned
+comparison; arithmetic properties and every other attribute remain checked.
 
 For a signed int32 accumulator and rational coefficient num/den, choose
 M=ceil(abs(num)*2^s/den), E=M*den-abs(num)*2^s, A=2^31.
@@ -30,8 +32,18 @@ operation and retained in the preprocessing audit IR. Per-channel parameters
 use indexed constant tables rather than one arithmetic body per channel.
 
 Floating readouts require one IEEE rounding rather than byte requantization.
-Their specialized path bounds the exact dyadic product plus every finite f32
-bias, finds the leading bits using native-width limb searches, and constructs
+For unbiased dyadics, the normal/finite certificate proves that an exact u128
+integer product can become a u64 value with a guard/sticky representation:
+when the high word is nonzero, shift right 32 and set the low bit iff any
+lost bit was nonzero. At least 32 significant bits remain, so all 24 output
+bits, the guard and sticky bits survive. One u64-to-f32 RNE then makes the
+only rounding decision. Multiplication by the appropriate power of two is
+proved exact and normal/finite over the complete int32 domain. Boundary
+checks cover powers of two and the switch between 64-bit representations.
+This uses the ordinary LLVM/default IEEE RNE host floating environment.
+
+Other floating readouts bound the exact dyadic product plus every finite f32
+bias, find the leading bits using native-width limb searches, and construct
 the IEEE result from the exact quotient and remainder. Nonfinite bias retains
 the original assertion. Quantized readouts with runtime float bias and
 unsupported rational widths retain the original exact implementation.
@@ -47,7 +59,8 @@ timing; old and new implementations use identical inputs. No Verilator run.
 | Epilogue | Elements | Old instructions/element | New instructions/element |
 |---|---:|---:|---:|
 | conv_readout | 200,704 | 904.81 | 461.76 |
-| mm_readout | 1,000 | 177.29 | 119.79 |
+| conv_readout_unbiased | 200,704 | 185.11 | 32.02 |
+| mm_readout | 1,000 | 177.29 | 35.68 |
 | conv_requantize | 200,704 | 102.07 | 34.51 |
 | mean_dim | 2,048 | 82.60 | 36.51 |
 | add_Tensor | 802,816 | 69.59 | 22.53 |

@@ -77,10 +77,27 @@ def scalar(block, arguments):
             return a[0]
         if name == "arith.constant":
             v = op.value.value.data
+            if str(op.results[0].type) == "f32":
+                import struct
+
+                v = int.from_bytes(struct.pack("<f", v), "little")
         elif name == "arith.select":
             v = a[1] if a[0] else a[2]
         elif name in {"arith.trunci", "arith.extui", "arith.bitcast"}:
             v = a[0]
+        elif name == "arith.uitofp":
+            import struct
+
+            from merlin.targetgen.exact_arithmetic import round_binary
+
+            v = int.from_bytes(struct.pack("<f", round_binary(Fraction(a[0]))), "little")
+        elif name == "arith.mulf":
+            import struct
+
+            from merlin.targetgen.exact_arithmetic import round_binary
+
+            floats = [struct.unpack("<f", int(bits).to_bytes(4, "little"))[0] for bits in a]
+            v = int.from_bytes(struct.pack("<f", round_binary(Fraction(floats[0]) * Fraction(floats[1]))), "little")
         elif name == "arith.extsi":
             v = signed(a[0], op.operands[0].type)
         elif name in {"llvm.call_intrinsic", "llvm.intr.ctlz"}:
@@ -173,7 +190,14 @@ def test_complete_small_numerator_domain():
 
 @pytest.mark.parametrize("bias", [False, True])
 @pytest.mark.parametrize(
-    "scale", [Fraction(1, 2), Fraction(-0.03) * Fraction(0.02), Fraction(2) ** -149, Fraction(2) ** 110]
+    "scale",
+    [
+        Fraction(1, 2),
+        Fraction(-0.03) * Fraction(0.02),
+        Fraction(float(np.float32(-0.03))) * Fraction(float(np.float32(0.02))),
+        Fraction(2) ** -149,
+        Fraction(2) ** 110,
+    ],
 )
 def test_float_readout_bits(scale, bias):
     import struct
@@ -222,7 +246,11 @@ def test_native_readout_against_rational_reference(tmp_path, floating, bias):
     from merlin.targetgen.exact_arithmetic import round_binary
     from merlin.xdsl_dialects._common import text
 
-    scales = [Fraction(0.03) * Fraction(0.02), Fraction(-0.017), Fraction(1, 8)]
+    scales = [
+        Fraction(float(np.float32(0.03))) * Fraction(float(np.float32(0.02))),
+        Fraction(float(np.float32(-0.017))),
+        Fraction(1, 8),
+    ]
     if not floating:
         scales = [s / Fraction(0.01) for s in scales]
     module, reader = fixture(scales, floating=floating, bias=bias)
@@ -250,3 +278,35 @@ def test_native_readout_against_rational_reference(tmp_path, floating, bias):
     arrays = [data, *([biases] if bias else []), actual]
     HostModel.load(str(lib))([(x.ctypes.data, x.shape) for x in arrays])
     assert actual.tobytes() == expected.tobytes()
+
+
+@pytest.mark.parametrize("floating", [False, True])
+def test_captured_trace_annotations_do_not_change_scalar_semantics(floating):
+    from xdsl.dialects.builtin import ArrayAttr, StringAttr
+
+    module, reader = fixture([Fraction(1, 2)], floating=floating)
+    for inner in reader.body.walk():
+        inner.attributes.update(
+            {
+                "prov.source_node_ids": ArrayAttr([StringAttr("source:5")]),
+                "prov.origin_node_ids": ArrayAttr([StringAttr("origin:2")]),
+                "prov.trace_role": StringAttr("lowering"),
+            }
+        )
+    assert lower_exact_readouts(module) == 1
+    assert json.loads(reader.attributes["merlin.exact_readout_proof"].data)["method"] != "source_exact"
+    module.verify()
+
+
+def test_unknown_scalar_attribute_is_not_ignored():
+    from xdsl.dialects.builtin import UnitAttr
+
+    module, reader = fixture([Fraction(1, 2)])
+    reader.body.block.first_op.attributes["unknown.arithmetic_contract"] = UnitAttr()
+    assert lower_exact_readouts(module) == 0
+
+
+def test_normal_dyadic_certificate_refuses_a_coefficient_above_uint64():
+    from merlin.llvmlower.exact_readout import normal_dyadic_plan
+
+    assert normal_dyadic_plan([Fraction((1 << 64) + 1, 1 << 64)]) is None

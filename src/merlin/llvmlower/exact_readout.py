@@ -224,11 +224,19 @@ def lower_exact_readouts(module):
             continue
         source_ops, source = build_readout(op.inputs[0], scales, **params)
         expected = source.owner
+        # Capture tracing annotates scalar operations without changing their
+        # semantics. Compare a clone with precisely those trace keys removed;
+        # arithmetic properties and all other attributes remain load-bearing.
+        compared = op.body.clone()
+        for inner in compared.walk():
+            for key in ("prov.source_node_ids", "prov.origin_node_ids", "prov.trace_role"):
+                inner.attributes.pop(key, None)
         matches = (
-            op.body.block.is_structurally_equivalent(expected.body.block)
+            compared.block.is_structurally_equivalent(expected.body.block)
             and op.indexing_maps == expected.indexing_maps
             and op.iterator_types == expected.iterator_types
         )
+        compared.drop_all_references()
         # Delete detached validation operations so they do not leave ghost SSA uses.
         for item in reversed(source_ops):
             item.drop_all_references()
@@ -329,6 +337,97 @@ def emit_dyadic_float(b, value, exponent, out_type):
     return b.emit(arith.BitcastOp(b.cast(bits, i32, unsigned=True), out_type))
 
 
+def normal_dyadic_plan(scales):
+    """Prove a sticky u64 conversion followed by EXACT power-of-two scaling.
+
+    At most 95 product bits permit discarding 32 low bits when any high word
+    is nonzero. That branch retains >=32 significant bits, including all 24
+    result bits, guard and sticky. Setting bit zero iff discarded bits exist
+    preserves every RNE decision. The integer-to-f32 conversion is the ONLY
+    rounding. Both subsequent power-of-two scalings are proved normal/finite.
+    """
+    base = min(1 - s.denominator.bit_length() for s in scales)
+    coeffs = [int(s / Fraction(2) ** base) for s in scales]
+    if (
+        base < -126
+        or base + 32 > 127
+        or max(abs(c) for c in coeffs) >= 1 << 64
+        or max(abs(c) for c in coeffs) * (1 << 31) >= 1 << 96
+        or min(abs(s) for s in scales) < Fraction(2) ** -126
+        or max(abs(s) for s in scales) * (1 << 31) > Fraction(2) ** 127
+    ):
+        return None
+    from merlin.targetgen.exact_arithmetic import round_binary
+
+    count = 0
+    for scale, coefficient in zip(scales, coeffs, strict=True):
+        points = {0, -1, 1, -(1 << 31), (1 << 31) - 1}
+        for power in range(96):
+            edge = (1 << power) // abs(coefficient)
+            points.update(v for x in (edge, -edge) for v in range(x - 2, x + 3) if -(1 << 31) <= v < 1 << 31)
+        for value in points:
+            product = abs(value * coefficient)
+            high = product >= 1 << 64
+            narrowed = ((product >> 32) | int(bool(product & ((1 << 32) - 1)))) if high else product
+            result = Fraction(round_binary(narrowed)) * Fraction(2) ** (base + (32 if high else 0))
+            if value * coefficient < 0:
+                result = -result
+            if result != Fraction(round_binary(value * scale)):
+                return None
+            count += 1
+    return base, coeffs, count
+
+
+def normal_dyadic_body(op, scales, plan):
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import FloatAttr, IntegerType, f32, i32, i64
+    from xdsl.dialects.linalg import ops as linalg
+    from xdsl.ir import Block
+
+    base, coeffs, count = plan
+    block = Block(arg_types=[v.type for v in op.body.block.args])
+    b = Scalar()
+    index = b.emit(linalg.IndexOp(len(op.results[0].type.get_shape()) - 1)) if len(set(coeffs)) > 1 else None
+    value = b.cast(block.args[0], i64)
+    neg = b.cmp(value, b.c(0, i64), "slt")
+    magnitude = b.select(neg, b.neg(value), value)
+    wide = IntegerType(128) if max(abs(c) for c in coeffs) * (1 << 31) >= 1 << 64 else i64
+    coefficient = table_lookup(b, [abs(c) for c in coeffs], index, i64)
+    product = b.mul(b.cast(magnitude, wide, unsigned=True), b.cast(coefficient, wide, unsigned=True))
+    low = b.cast(product, i64, unsigned=True)
+    factor = b.emit(arith.ConstantOp(FloatAttr(float(Fraction(2) ** base), f32)))
+    if wide != i64:
+        high = b.cmp(b.shr(product, b.c(64, wide)), b.c(0, wide), "ne")
+        tail = b.cmp(b.band(low, b.c((1 << 32) - 1, i64)), b.c(0, i64), "ne")
+        top = b.cast(b.shr(product, b.c(32, wide)), i64, unsigned=True)
+        top = b.bor(top, b.cast(tail, i64, unsigned=True))
+        low = b.select(high, top, low)
+        other = b.emit(arith.ConstantOp(FloatAttr(float(Fraction(2) ** (base + 32)), f32)))
+        factor = b.select(high, other, factor)
+    rounded = b.emit(arith.UIToFPOp(low, f32))
+    rounded = b.emit(arith.MulfOp(rounded, factor))
+    sign = table_lookup(b, [int(c < 0) for c in coeffs], index, IntegerType(1))
+    neg = b.emit(arith.XOrIOp(neg, sign))
+    neg = b.band(neg, b.cmp(magnitude, b.c(0, i64), "ne"))
+    raw = b.emit(arith.BitcastOp(rounded, i32))
+    raw = b.bor(raw, b.select(neg, b.c(1 << 31, i32), b.c(0, i32)))
+    result = b.emit(arith.BitcastOp(raw, f32))
+    block.add_ops([*b.ops, linalg.YieldOp(result)])
+    return block, dict(
+        method="exact_normal_dyadic_multiply_shift",
+        exponent=base,
+        coefficients=[str(c) for c in coeffs],
+        accumulator_min=-(1 << 31),
+        accumulator_max=(1 << 31) - 1,
+        product_bits=(max(abs(c) for c in coeffs) * (1 << 31)).bit_length(),
+        tested_values=count,
+        proof=(
+            "discarded 32 bits collapsed to sticky only with >=32 retained bits; "
+            "one uint64->f32 RNE; power-of-two multiply exact normal/finite"
+        ),
+    )
+
+
 def floating_body(op, scales, params):
     from xdsl.dialects.builtin import IntegerType, i64
     from xdsl.dialects.linalg import ops as linalg
@@ -337,6 +436,10 @@ def floating_body(op, scales, params):
     from merlin.llvmlower.exact_readout_source import readout_plan
 
     bias = params["bias"]
+    if bias is None:
+        normal = normal_dyadic_plan(scales)
+        if normal is not None:
+            return normal_dyadic_body(op, scales, normal)
     base, coeffs, beta_coeff, bias_unit, _, width = readout_plan(
         scales, params["beta"], None if bias is None else bias.type.element_type, None
     )
