@@ -351,8 +351,24 @@ def _prepare_spec_int8(
     )
     scalarized = scalarized_contraction_candidates(module)
     plan["scalarized_contraction_recapture_candidates"] = scalarized
+    from merlin.llvmlower.quantized_guard_domain import Unproved, prove_affine
+
+    domain_candidates = []
+    for ordinal, operation in enumerate(module.walk()):
+        if operation.name != "linalg.generic":
+            continue
+        try:
+            candidate = prove_affine(operation, conditional=True)
+        except (Unproved, ValueError, OverflowError, ZeroDivisionError):
+            continue
+        domain_candidates.append(dict(source_operation_ordinal=ordinal, **candidate))
+    # This requests conversion only. Actual admission must discharge the
+    # finite-domain obligations against the newly frozen program qparams.
+    plan["conditional_quantized_affine_candidates"] = domain_candidates
     non_contraction = (
-        not selected and not views and (any(site["status"] == "admitted" for site in prospective) or bool(scalarized))
+        not selected
+        and not views
+        and (any(site["status"] == "admitted" for site in prospective) or bool(scalarized) or bool(domain_candidates))
     )
     recipes = [
         r
@@ -488,6 +504,13 @@ def _prepare_spec_int8(
             from merlin.llvmlower.scalar_tensor_carriers import fold_scalar_tensor_roundtrips
 
             scalar_carriers = fold_scalar_tensor_roundtrips(prepared_module)
+            from merlin.llvmlower.quantized_guard_domain import canonicalize_quantized_affine
+
+            domain_proofs = canonicalize_quantized_affine(
+                prepared_module,
+                exact_rational=selection["spec"].get("numerical_semantics", {}).get("model", {}).get("engine")
+                == "integer_reference",
+            )
             capture_proof = None
             capture_proof_error = None
             if callable(getattr(provider, "admit_numeric_schedule", None)):
@@ -499,6 +522,7 @@ def _prepare_spec_int8(
                     capture_proof_error = str(exc)
             captured_plan = admission_plan(prepared_module, selection, captured=True, provider_proof=capture_proof)
             captured_plan["scalar_tensor_carriers_folded"] = scalar_carriers
+            captured_plan["quantized_affine_domain_proofs"] = domain_proofs
             if capture_proof_error:
                 captured_plan["provider_refusal"] = capture_proof_error
             from merlin.targetgen.core_aten_spec_int8 import source_declaration_continuity
