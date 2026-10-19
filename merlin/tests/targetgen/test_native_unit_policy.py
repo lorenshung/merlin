@@ -63,3 +63,39 @@ def test_index_arithmetic_is_not_accelerated_by_copying_its_host_literal_table()
     literal = source("%i=linalg.index 0 : index\n%v=arith.constant 2.0 : f32")
     assert construction_evidence(ramp)["evidence"][0]["reason"] == "index_generated_payload_arithmetic"
     assert construction_evidence(literal)["status"] == "eligible"
+
+
+def test_structured_address_selection_is_movement_not_index_payload_math():
+    module = parse_mlir_text("""module {
+      func.func @forward(%x: tensor<3xf32>,%y: tensor<3xf32>) -> tensor<3xf32> {
+        %e=tensor.empty() : tensor<3xf32>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          outs(%e : tensor<3xf32>) {
+          ^bb0(%unused: f32):
+            %i=linalg.index 0 : index
+            %z=arith.constant 0 : index
+            %p=arith.cmpi eq,%i,%z : index
+            %v=scf.if %p -> (f32) {
+              %a=tensor.extract %x[%i] : tensor<3xf32>
+              scf.yield %a : f32
+            } else {
+              %b=tensor.extract %y[%i] : tensor<3xf32>
+              scf.yield %b : f32
+            }
+            linalg.yield %v : f32
+          } -> tensor<3xf32>
+        func.return %r : tensor<3xf32>
+      }}""")
+    assert construction_evidence(module)["status"] == "eligible"
+
+
+def test_shared_index_dag_is_analyzed_without_expanding_its_tree():
+    lines = ["%i=linalg.index 0 : index"]
+    previous = "%i"
+    for index in range(70):
+        current = f"%d{index}"
+        lines.append(f"{current}=arith.addi {previous},{previous} : index")
+        previous = current
+    lines.extend([f"%n=arith.index_cast {previous} : index to i64", "%v=arith.sitofp %n : i64 to f32"])
+    result = construction_evidence(source("\n".join(lines)))
+    assert result["status"] == "host"
