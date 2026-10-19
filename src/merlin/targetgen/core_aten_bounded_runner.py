@@ -44,13 +44,17 @@ def atomic_json(path: Path, document: object) -> None:
 class JsonRecordMapping(MutableMapping):
     """Read/write complete per-case JSON records without retaining their payloads."""
 
-    def __init__(self, directory, paths=None, *, field=None):
+    def __init__(self, directory, paths=None, *, field=None, missing_value=None):
         self.directory = Path(directory)
         self.paths = dict(paths or {})
         self.field = field
+        self.missing_value = missing_value
 
     def __getitem__(self, key):
-        value = json.loads(self.paths[key].read_text())
+        path = self.paths[key]
+        if not path.exists() and self.missing_value is not None:
+            return copy.deepcopy(self.missing_value)
+        value = json.loads(path.read_text())
         return value[self.field] if self.field else value
 
     def __setitem__(self, key, value):

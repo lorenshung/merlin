@@ -303,12 +303,12 @@ def response(args, corpus, block):
         case["case_id"]: args.output / args.label / "shards" / case_capture_name(case) / "result.json"
         for case in corpus["selected_cases"]
     }
-    missing = [key for key, path in paths.items() if not path.exists()]
-    if missing:
-        # Per-case result files are the resumable checkpoints. No multi-GB
-        # duplicate response is needed every fifty completions.
-        return {"schema_version": 1, "results": {}, "pending_count": len(missing), "provenance": block}
-    results = JsonRecordMapping(args.output / args.label, paths, field="observation")
+    results = JsonRecordMapping(
+        args.output / args.label,
+        paths,
+        field="observation",
+        missing_value={"status": "not_run", "reason": "execution pending", "evidence": {"lane": "unassigned"}},
+    )
     document = {"schema_version": 1, "results": results, "provenance": block}
     if not args.evaluate_only:
         atomic_json(args.output / args.label / "response.json", document)

@@ -88,6 +88,24 @@ def prepare(directory, report, implementation, **kwargs):
     cost["native_unit_policy"] = native
     if native["status"] == "host":
         cost.update(status="host", reason_code="non_native_unit_construction")
+    # Static descriptor queries are exported through a tensor wrapper, but
+    # carry no tensor data. A capture-owned proof distinguishes them from real
+    # literal fills and rank-zero tensor arithmetic without an overload roster.
+    from merlin.targetgen.core_aten_capture import descriptor_specialization_matches
+
+    folds = []
+    for record in original_report["cases"]:
+        if record.get("status") not in {None, "bundled"} or not record.get("capture_directory"):
+            continue
+        from pathlib import Path
+
+        receipt_path = Path(record["capture_directory"]) / "capture.json"
+        receipt = json.loads(receipt_path.read_text())
+        specialization = receipt.get("capture_meta", {}).get("static_metadata_specialization")
+        if specialization and descriptor_specialization_matches(record["case"], receipt):
+            folds.append(specialization)
+    if folds:
+        cost.update(status="host", reason_code="constant_metadata_fold_no_tensor_data", descriptor_folds=folds)
     cost["strict_policy"] = strict
     plan["placement_cost"] = cost
     if cost["status"] != "device":

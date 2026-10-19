@@ -576,3 +576,11 @@ def test_disk_backed_records_keep_the_complete_response_protocol(tmp_path):
     assert projected["one"] == 2
     with pytest.raises(TypeError, match="read-only"):
         projected["two"] = 3
+
+
+def test_unfinished_disk_response_preserves_explicit_missing_case(tmp_path):
+    from merlin.targetgen.core_aten_bounded_runner import JsonRecordMapping
+
+    records = JsonRecordMapping(tmp_path, {"pending": tmp_path / "missing.json"}, missing_value={"status": "not_run"})
+    assert dict(records) == {"pending": {"status": "not_run"}}
+    assert not (tmp_path / "missing.json").exists()

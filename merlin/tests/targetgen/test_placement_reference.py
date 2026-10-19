@@ -358,3 +358,40 @@ def test_reshape_dimension_tensor_does_not_create_nonscalar_data_work():
     declaration, facts = inputs()
     plan = dict(numerical_family="F1", sites=[dict(status="admitted", family="movement")])
     assert estimate_reference(module, plan, declaration, facts)["status"] == "device"
+
+
+def test_descriptor_fold_retains_host_while_real_scalar_tensor_work_qualifies(tmp_path):
+    import json
+
+    import yaml
+
+    from merlin.targetgen.core_aten_profitability import prepare
+
+    declaration, facts = inputs()
+    module = movement()
+    (tmp_path / "model.mlir").write_text(str(module))
+    capture = tmp_path / "capture"
+    capture.mkdir()
+    descriptor = dict(shape=[7], stride=[1], storage_offset=0)
+    case = dict(
+        overload="aten.sym_numel.default",
+        arguments=dict(args=dict(kind="tuple", items=[dict(kind="tensor", **descriptor)]), kwargs={}),
+    )
+    proof = dict(
+        authority="static_capture_input_descriptors",
+        inputs=[descriptor],
+        queries=[dict(operator=case["overload"], value=7)],
+    )
+    (capture / "capture.json").write_text(json.dumps(dict(capture_meta=dict(static_metadata_specialization=proof))))
+    specification = tmp_path / "spec.yaml"
+    specification.write_text(yaml.safe_dump(dict(placement_cost_model=declaration)))
+    report = dict(cases=[dict(status="bundled", case=case, capture_directory=str(capture))])
+    result = prepare(
+        tmp_path,
+        report,
+        lambda *a, **k: dict(candidate(module, "movement", "F1"), exact_dtype_sites=1, selection=dict(identities={})),
+        software_spec=specification,
+        facts=facts,
+    )
+    assert result["refusal_code"] == "constant_metadata_fold_no_tensor_data"
+    assert result["placement_cost"]["descriptor_folds"] == [proof]
