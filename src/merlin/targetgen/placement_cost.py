@@ -121,6 +121,12 @@ def estimate(original, prepared, plan, declaration, facts):
     try:
         if declaration.get("schema") != "merlin.placement_cost.v1":
             raise ValueError("unrecognized placement cost declaration")
+        from merlin.targetgen.operator_review import review_record
+
+        review = review_record(declaration)
+        result["operator_review"] = review
+        if not review["operator_accepted"]:
+            raise ValueError("authored placement cost declaration requires operator acceptance")
         rates = declaration["rates"]
         if any(type(v) not in {int, float} or v < 0 or not math.isfinite(v) for v in rates.values()):
             raise ValueError("invalid placement cost rates")

@@ -16,6 +16,8 @@ from merlin.targetgen.host_linkage_contract import (
     validate_linkage_contract,
     validate_source_linkage_contract,
 )
+from merlin.targetgen.operator_review import STATUSES as REVIEW_STATUSES
+from merlin.targetgen.operator_review import review_accepted
 from merlin.targetgen.software_spec import admit_operation, validate_quantization_parameters
 
 SCHEMA = "merlin.host_capabilities.v1"
@@ -26,7 +28,7 @@ def validate_host_capabilities(
 ) -> dict:
     if not isinstance(document, dict) or document.get("schema") != SCHEMA:
         raise ValueError(f"host capability spec must declare schema {SCHEMA}")
-    if document.get("status") not in {"reviewed", "unreviewed"}:
+    if document.get("status") not in REVIEW_STATUSES:
         raise ValueError("host capability spec must declare review status")
     readout = document.get("exact_readout")
     if readout is not None and (
@@ -74,7 +76,7 @@ def validate_host_capabilities(
         if not isinstance(row, dict) or not isinstance(row.get("id"), str) or not row["id"] or row["id"] in seen:
             raise ValueError("host capability operations require unique IDs")
         seen.add(row["id"])
-        if row.get("status", "reviewed") not in {"reviewed", "unreviewed"}:
+        if row.get("status", "reviewed") not in REVIEW_STATUSES:
             raise ValueError(f"host capability {row['id']} has an invalid review status")
         if row.get("placement") != "host" or not isinstance(row.get("signature"), dict) or not row["signature"]:
             raise ValueError("host capability operations require host placement and typed signature constraints")
@@ -572,6 +574,7 @@ def admit_host_operation(
                     "status": "unknown",
                     "reviewed": False,
                     "review_status": "unknown",
+                    "operator_accepted": False,
                     "reason": "host profile has no operation capability declaration",
                 }
             )
@@ -618,7 +621,7 @@ def admit_host_operation(
         status = verdict["status"] if verdict else "unsupported"
         reason = verdict["reason"] if verdict else "no host operation declaration admits the observed signature"
         if (
-            document["status"] != "reviewed" or (verdict and verdict["review_status"] != "reviewed")
+            not review_accepted(document) or (verdict and not verdict.get("operator_accepted", False))
         ) and status == "unsupported":
             status, reason = "unknown", "unreviewed host declarations cannot establish absence of operation support"
         if not pinned:
@@ -629,6 +632,9 @@ def admit_host_operation(
                 "status": status,
                 "reason": reason,
                 "review_status": verdict["review_status"] if verdict else document["status"],
+                "operator_accepted": review_accepted(document)
+                and pinned
+                and (verdict is None or verdict.get("operator_accepted", False)),
                 "reviewed": document["status"] == "reviewed"
                 and pinned
                 and (verdict is None or verdict["review_status"] == "reviewed"),
@@ -657,10 +663,13 @@ def admit_host_operation(
             "status": "unsupported" if profiles else "unknown",
             "review_status": "unknown",
             "reviewed": False,
+            "operator_accepted": False,
             "reason": "no selected host profile admits the observed operation signature",
         }
     return {
-        **copy.deepcopy({key: verdict[key] for key in ("status", "review_status", "reviewed", "reason")}),
+        **copy.deepcopy(
+            {key: verdict[key] for key in ("status", "review_status", "reviewed", "operator_accepted", "reason")}
+        ),
         "profiles": profiles,
         "qualification": "selected declaration screen; host lowering remains unverified",
         **(
@@ -684,7 +693,7 @@ def admit_host_operation(
                 }
             }
             if verdict.get("status") == "admitted"
-            and verdict.get("reviewed") is True
+            and verdict.get("operator_accepted", verdict.get("reviewed")) is True
             and "source_body_proof" in verdict
             and "linkage_requirement" in verdict
             else {}

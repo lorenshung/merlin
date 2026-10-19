@@ -106,9 +106,14 @@ def prepare(directory, report, implementation, **kwargs):
         if policy == "reference_scale"
         else dict(strict)
     )
+    from merlin.targetgen.operator_review import review_record
+
+    cost["native_unit_operator_review"] = review_record(native_contract)
     cost["native_unit_policy"] = native
     if native["status"] == "host":
         cost.update(status="host", reason_code="non_native_unit_construction")
+    if not cost["native_unit_operator_review"]["operator_accepted"]:
+        cost.update(status="host", reason_code="native_unit_operator_acceptance_required")
     # Static descriptor queries are exported through a tensor wrapper, but
     # carry no tensor data. A capture-owned proof distinguishes them from real
     # literal fills and rank-zero tensor arithmetic without an overload roster.

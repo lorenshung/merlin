@@ -121,8 +121,12 @@ def prepare_integer_components(
     records = [record for record in report["cases"] if record.get("status") in {None, "bundled"}]
     native_types = [abi["dtype"] for record in records for abi in record.get("input_abi", [])]
     ieee_policy = selection.get("host", {}).get("native_ieee_special_values", {})
+    from merlin.targetgen.operator_review import review_accepted
+
     ieee_enabled = (
-        ieee_policy.get("schema") == "merlin.native_ieee_special_values.v1" and ieee_policy.get("enabled") is True
+        ieee_policy.get("schema") == "merlin.native_ieee_special_values.v1"
+        and ieee_policy.get("enabled") is True
+        and review_accepted(ieee_policy)
     )
     from merlin.llvmlower.integer_float_boundaries import has_literal_zero_divisor
 

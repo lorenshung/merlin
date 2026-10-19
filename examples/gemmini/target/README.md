@@ -64,6 +64,20 @@ the current file:
 A change that widens any of these rows needs a new decision recorded the same way. Editing the
 spec's status alone is not enough.
 
+Rows whose evidence is still authored are marked `authored_pending_operator_review`, including
+new native component families, widened host signatures, the CPU special-value policy, and the
+placement cost/reference/native-unit declarations. They are not operator-reviewed facts.
+`MERLIN_ACCEPT_AUTHORED_PENDING_OPERATOR_REVIEW=1` explicitly accepts these pending declarations
+for screening; the default is `1` for compatibility with the existing placement policy. Set it
+to `0` to refuse pending declarations. Other values are errors. Unreviewed declarations are
+never promoted by this switch. Admission records retain the pending review status and report
+`operator_accepted` plus whether the compatibility default or an explicit environment selection
+was used. Numerical, source-coverage, compiler and execution gates remain mandatory.
+
+`execution_provider_revision` selects the provider revision used by the pinned E2E gate. It is
+separate from `placement_cost_model.reference_scale.movement_measurements.evidence.provider_commit`,
+which identifies the historical RTL measurement and must not be relabeled after a provider update.
+
 The selected integer RTL has 8-bit signed operands, a 20-bit MAC result and
 32-bit accumulator storage. Those are different quantities. A mathematical
 int32 golden needs proof that internal partial sums cannot overflow, or an

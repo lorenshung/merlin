@@ -1,17 +1,21 @@
 # Authored software semantics. RTL geometry/protocol and qualification are generated evidence.
 schema: merlin.software_spec.v1
 target: gemmini
+execution_provider_revision: ec084f03516125e03eac239a508b246ccdb3dd61
 status: reviewed
 placement_cost_model:
+  status: authored_pending_operator_review
   schema: merlin.placement_cost.v1
   default_policy: reference_scale
   comparison: strictly_lower_estimated_cycles
   # Select strict_per_shape with MERLIN_PLACEMENT_POLICY for paper-model runs.
   # Reference scale qualifies the family, not the tiny test instantiation.
   reference_scale:
+    status: authored_pending_operator_review
     admitted_movement_patterns: [row_contiguous, element_gather]
     movement_policy: admitted_pattern_coverage_with_informational_cycle_estimate
     movement_measurements:
+      status: authored_pending_operator_review
       patterns:
         row_contiguous:
           payload_bytes: 16
@@ -206,6 +210,7 @@ placement_cost_model:
 # ranks; it does not declare device execution or arbitrary shapes.
 numerical_semantics:
   native_unit_contract:
+    status: authored_pending_operator_review
     eligibility: source_scalar_dataflow_and_reduction_domains
     allowed_representation: exact_signed_byte_limbs_and_retained_ieee_host_readout
     excluded_constructions: [nonlinear_rounding_construction, parallel_runtime_product_construction, index_generated_payload_arithmetic, nonuniform_literal_result_construction, saturation_comparators, readout_offset_rounding, multi_op_identity]
@@ -240,6 +245,7 @@ numerical_semantics:
     hardware_integer_shift_rounding: rne
     shift: operation_parameter
 quantization_contract:
+  status: authored_pending_operator_review
   storage: [int8, uint8]
   ranges: declared_byte_subranges
   zero_points: retained_exact_integer_centering
@@ -328,7 +334,7 @@ operations:
     layouts: [row_major_contiguous]
     aliasing: [disjoint_inputs_outputs]
   movement_bitwise:
-    status: reviewed
+    status: authored_pending_operator_review
     evidence:
       review_status: "authored, pending operator review"
       scope: "Authored family admission screen; source/provider proofs and exact execution gates remain mandatory"
@@ -348,7 +354,7 @@ operations:
       device_transfer_dtype: int8
       comparison: native_eager_bits
   component_linear:
-    status: reviewed
+    status: authored_pending_operator_review
     evidence:
       review_status: "authored, pending operator review"
       scope: "Authored family admission screen; source/provider proofs and exact execution gates remain mandatory"
@@ -366,7 +372,7 @@ operations:
       readout: full_i32
       recombination: retained_source_host_exact_integer
   component_bilinear:
-    status: reviewed
+    status: authored_pending_operator_review
     evidence:
       review_status: "authored, pending operator review"
       scope: "Authored family admission screen; source/provider proofs and exact execution gates remain mandatory"
@@ -416,7 +422,7 @@ operations:
     ordered_result_dtypes: [i8]
     quantization_parameters: {zero_point: 0, quant_min: -128, quant_max: 127}
   host_quantize_exact:
-    status: reviewed
+    status: authored_pending_operator_review
     evidence:
       review_status: "authored, pending operator review"
       change: "Generalized exact rank-agnostic host Q/DQ to ranks 0 through 5; not an extension of prior operator approval"
@@ -427,7 +433,7 @@ operations:
   # Exact host dequantization is independent of rank. Phase 1 still owns
   # lowering, execution and numerical qualification of the emitted compiler.
   host_dequantize_per_tensor:
-    status: reviewed
+    status: authored_pending_operator_review
     evidence:
       review_status: "authored, pending operator review"
       change: "Generalized exact rank-agnostic host Q/DQ to ranks 0 through 5; not an extension of prior operator approval"

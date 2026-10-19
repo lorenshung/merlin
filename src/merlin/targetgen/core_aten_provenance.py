@@ -60,6 +60,7 @@ def batch_provenance(
             "targetgen/operation_numerics.py",
             "targetgen/core_aten_spec_int8.py",
             "targetgen/software_spec.py",
+            "targetgen/operator_review.py",
             "targetgen/core_aten_readout.py",
             "targetgen/_recipe_quantizer.py",
             "targetgen/quant_recipe.py",

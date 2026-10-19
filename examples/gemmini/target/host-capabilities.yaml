@@ -19,6 +19,7 @@ exact_readout:
   api: merlin.runtime.exact_readout.requantize_int32
   rounding: half_to_even
 native_ieee_special_values:
+  status: authored_pending_operator_review
   schema: merlin.native_ieee_special_values.v1
   enabled: true
   finite_producer: complete_exact_integer_numerator
@@ -31,14 +32,14 @@ native_ieee_special_values:
     basis: "Explicit CPU platform semantics for the sealed suite; integer epilogues depend on full device readout, never sealed outputs"
 operations:
   - id: host_exact_native_boundary
-    status: reviewed
+    status: authored_pending_operator_review
     families: [movement, elementwise_map, reduction, contraction]
     placement: host
     signature:
       numerical_family: [F1, F2, F4, F5]
       dtypes: [i1, int8, i16, f16, bf16, i32, f32, i64, f64, complex<f32>]
     numerical_contract:
-      status: reviewed
+      status: authored_pending_operator_review
       semantics:
         movement: opaque_little_endian_bytes
         integer: exact_components_with_declared_twos_complement_wraparound
@@ -50,12 +51,13 @@ operations:
         review_status: "authored, pending operator review"
         basis: Phase B exact dtype family design; every source rewrite and compiled execution retains its own proof obligation
   - id: host_f32_elementwise_exact
+    status: authored_pending_operator_review
     ops: [aten.mul.Tensor, aten.add.Tensor, aten.add.Scalar, aten.div.Tensor, aten.relu.default]
     families: [elementwise_map]
     placement: host
     signature: {dtypes: [f32], ordered_result_dtypes: [f32], ranks: [0, 1, 2, 3, 4, 5]}
     numerical_contract:
-      status: reviewed
+      status: authored_pending_operator_review
       semantics: {arithmetic: ieee754_binary32, rounding: round_to_nearest_even, subnormals: preserved,
                   per_element: correctly_rounded_single_operation, nan: riscv_canonical_nan}
       evidence: {review_status: "authored, pending operator review", rank_extension: "rank-independent scalar IEEE primitives; widened to ranks 0 through 5", reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed f32 signatures and arith.mulf/addf/divf/maximumf bodies in the captured graph; emitted scalar-package execution remains an obligation"}
@@ -70,12 +72,13 @@ operations:
                   transcendental_accuracy: selected_lowering_approximation_not_correctly_rounded}
       evidence: {reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed f32 signatures and math.rsqrt/math.powf/math.exp+arith.negf bodies in the captured graph; emitted scalar-package execution remains an obligation"}
   - id: host_f32_reduction
+    status: authored_pending_operator_review
     ops: [aten.native_layer_norm.default, aten._softmax.default, aten.mean.dim]
     families: [reduction, elementwise_map]
     placement: host
     signature: {dtypes: [f32], ordered_result_dtypes: [f32], ranks: [0, 1, 2, 3, 4, 5]}
     numerical_contract:
-      status: reviewed
+      status: authored_pending_operator_review
       semantics: {arithmetic: ieee754_binary32, rounding: round_to_nearest_even, subnormals: preserved,
                   accumulator: f32, reduction_order: selected_lowering, epsilon: graph_parameter}
       evidence: {review_status: "authored, pending operator review", rank_extension: "rank-independent host reduction signature; numerical qualification remains mandatory", reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "observed f32 linalg.reduce/linalg.generic signatures (addf, divf, maximumf, subf, exp, rsqrt bodies); emitted scalar-package execution remains an obligation"}
@@ -110,23 +113,23 @@ operations:
                   quant_min: -128, quant_max: 127, scale_dtype: f32}
       evidence: {reviewed_by: "operator decision 2026-10-01 via coordinating session, approving W1_DECLARATIONS_DRAFT.md", basis: "selected int8 recipe (activation: tensor, static, symmetric, quant_min -128, quant_max 127); host quantize lowering roundeven(x*(1/s)) in llvmlower/passes_quant_int.py; observed f32,f32,i64->i8 signature"}
   - id: host_quantize_exact
-    status: reviewed
+    status: authored_pending_operator_review
     ops: [quantized_decomposed.quantize_per_tensor.default]
     families: [elementwise_map]
     placement: host
     signature: {ordered_operand_dtypes: [f32, f64, i64], ordered_result_dtypes: [i8], ranks: [0, 1, 2, 3, 4, 5], quantization_parameters: {zero_point: 0, quant_min: -128, quant_max: 127}}
     numerical_contract:
-      status: reviewed
+      status: authored_pending_operator_review
       semantics: {formula: "clamp(RNE(exact(x) / exact(scale)) + zero_point, quant_min, quant_max)", rounding: round_half_to_even, scale_dtype: f64}
       evidence: {review_status: "authored, pending operator review", rank_extension: "Exact Q/DQ arithmetic is rank-agnostic; ranks 0 through 5 added; prior approval does not cover this widening", reviewed_by: "operator exact-arithmetic decision 2026-10-17", basis: "frontend exact quantization retains the binary scale and its rational pair; single exact RNE required"}
   - id: host_dequantize_per_tensor
-    status: reviewed
+    status: authored_pending_operator_review
     ops: [quantized_decomposed.dequantize_per_tensor.default]
     families: [elementwise_map]
     placement: host
     signature: {ordered_operand_dtypes: [i8, f32, i64], ordered_result_dtypes: [f32], ranks: [0, 1, 2, 3, 4, 5], quantization_parameters: {zero_point: 0}}
     numerical_contract:
-      status: reviewed
+      status: authored_pending_operator_review
       semantics: {formula: "RNE_output(exact(storage_code - zero_point) * exact(scale))", scale_granularity: tensor, zero_point: declared_byte_integer}
       evidence:
         review_status: "authored, pending operator review"

@@ -14,6 +14,8 @@ from pathlib import Path
 
 import yaml
 
+from merlin.targetgen.operator_review import STATUSES as REVIEW_STATUSES
+from merlin.targetgen.operator_review import review_accepted, review_record
 from merlin.targetgen.transfer_contracts import screen_transfer_contract as screen_transfer_contract
 from merlin.targetgen.transfer_contracts import validate_transfer_contracts
 
@@ -179,7 +181,7 @@ def validate_software_spec(document: dict, target: str | None = None, *, source:
     name = document.get("target")
     if not isinstance(name, str) or not name.strip() or (target is not None and name != target):
         raise ValueError(f"{source}: software spec target differs from selected target {target!r}")
-    if document.get("status") not in {"unreviewed", "reviewed"}:
+    if document.get("status") not in REVIEW_STATUSES:
         raise ValueError(f"{source}: software spec has an invalid review status")
     contract = document.get("capability_contract")
     if contract is not None and (not isinstance(contract, dict) or contract.get("name") != name):
@@ -213,7 +215,7 @@ def validate_software_spec(document: dict, target: str | None = None, *, source:
         if row["id"] in seen:
             raise ValueError(f"{source}: duplicate operation id {row['id']!r}")
         seen.add(row["id"])
-        if row.get("status", "reviewed") not in {"reviewed", "unreviewed"}:
+        if row.get("status", "reviewed") not in REVIEW_STATUSES:
             raise ValueError(f"{source}: operation {row['id']!r} has an invalid review status")
         if "numerical_contract" in row and (
             not isinstance(row["numerical_contract"], (str, dict))
@@ -487,8 +489,7 @@ def exact_declarations(spec: dict, op: str, signature: dict) -> tuple[list[dict]
         declared = row.get("signature") or {}
         if (
             row.get("placement") == "host"
-            and spec.get("status") == "reviewed"
-            and row.get("status", "reviewed") == "reviewed"
+            and review_accepted(spec, row)
             and "hardware" not in row
             and not (set(declared) - _SIGNATURE_FIELDS)
             and not ({"restriction", "semantics"} & set(declared))
@@ -552,7 +553,7 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
     for row in candidates:
         constraints = row["signature"]
         missing, refused = [], []
-        if row.get("admission_basis") == "declared_unchecked" and row.get("status") != "reviewed":
+        if row.get("admission_basis") == "declared_unchecked" and not review_accepted(row):
             missing.append("unchecked declaration requires explicit operation review")
         missing.extend(sorted(set(constraints) - _SIGNATURE_FIELDS))
         for declaration_key in ("restriction", "semantics"):
@@ -621,6 +622,12 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
             if key not in constraints:
                 continue
             expected, actual = constraints[key], signature.get(observed_key)
+            if key == "numerical_family" and actual is None:
+                # Representation-only rows cannot relax the source primitive constraints.
+                # Their family is established by an exact construction proof, never inferred
+                # from a missing observation in an untransformed source operation.
+                refused.append("numerical_family requires an explicit representation proof")
+                continue
             if actual is None or expected == "unknown":
                 missing.append(key)
                 continue
@@ -706,13 +713,19 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
                     or (comparison == "multiple_of" and observed % bound)
                 ):
                     refused.append(f"dimension {axis}={observed} violates {comparison}={bound}")
+        review = review_record(spec, row)
         if refused:
             status, reason = "unsupported", "; ".join(refused)
-        elif missing or spec.get("status") != "reviewed" or row.get("status", "reviewed") != "reviewed":
+        elif missing or not review["operator_accepted"]:
             status = "unknown"
             reason = "unresolved SW constraints: " + ", ".join(missing or ["operation review"])
         else:
-            status, reason = "admitted", "reviewed SW constraints match the observed signature"
+            status = "admitted"
+            reason = (
+                "reviewed SW constraints match the observed signature"
+                if review["review_status"] == "reviewed"
+                else "authored SW constraints match under explicit operator-acceptance policy"
+            )
         decisions.append(
             {
                 "status": status,
@@ -722,11 +735,7 @@ def admit_operation(spec: dict, op: str, signature: dict, placement: str) -> dic
                 "admission_basis": row.get("admission_basis", "authored"),
                 "constraints_status": "refused" if refused else "unknown" if missing else "matched",
                 "unresolved_constraints": missing,
-                "review_status": (
-                    "reviewed"
-                    if spec.get("status") == "reviewed" and row.get("status", "reviewed") == "reviewed"
-                    else "unreviewed"
-                ),
+                **review,
             }
         )
     decision = next(

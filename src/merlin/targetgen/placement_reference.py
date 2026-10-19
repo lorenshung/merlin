@@ -66,6 +66,12 @@ def estimate_reference(original, plan, declaration, facts, *, logical_boundary_s
     result = dict(schema="merlin.placement_reference.v1", status="host", policy="reference_scale")
     try:
         reference = declaration["reference_scale"]
+        from merlin.targetgen.operator_review import review_record
+
+        review = review_record(declaration, reference)
+        result["operator_review"] = review
+        if not review["operator_accepted"]:
+            raise ValueError("authored placement cost declaration requires operator acceptance")
         rates = reference["rates"]
         if any(type(v) not in {int, float} or not math.isfinite(v) or v <= 0 for v in rates.values()):
             raise ValueError("reference throughput rates must be finite and positive")

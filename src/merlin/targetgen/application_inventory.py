@@ -840,7 +840,7 @@ def _application_operation_inventory(
             )
             if (
                 admission["host_admission"]["status"] == "admitted"
-                and admission["host_admission"]["reviewed"]
+                and admission["host_admission"].get("operator_accepted", admission["host_admission"]["reviewed"])
                 and admission["accelerator_admission"]["status"] != "admitted"
                 and any(
                     row["status"] == "admitted" and row["placement"] == "host"
