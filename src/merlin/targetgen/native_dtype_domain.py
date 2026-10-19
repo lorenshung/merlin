@@ -63,7 +63,7 @@ def dtype_domain(dtype):
     return dict(dtype=dtype, absolute_bound=None, finite_grid=(minimum, maximum), ieee_special_values=True)
 
 
-def component_semantics(module):
+def _storage_component_semantics(module):
     """Prove closed storage/ring primitives, or state the missing theorem.
 
     Integer add/sub/multiply and signed extensions are equations in Z/(2**w).
@@ -222,3 +222,12 @@ def component_semantics(module):
         input_domain="all_storage_bit_patterns",
         runtime_input_observations=False,
     )
+
+
+def component_semantics(module):
+    proof = _storage_component_semantics(module)
+    if proof["status"] == "proven":
+        return proof
+    from merlin.targetgen.native_typed_semantics import prove
+
+    return prove(module)

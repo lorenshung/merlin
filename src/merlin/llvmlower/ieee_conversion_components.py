@@ -1,0 +1,119 @@
+"""Typed storage conversions with complete word producers and integer RNE readout."""
+
+
+def rewrite_ieee_conversions(module, *, copy_profiles=None):
+    from xdsl.dialects import arith, tensor
+    from xdsl.dialects.builtin import IntegerAttr, IntegerType, TensorType
+    from xdsl.dialects.linalg import ops as L
+    from xdsl.ir import Block, Region
+    from xdsl.rewriter import Rewriter
+
+    from merlin.llvmlower.floating_component_ir import point
+    from merlin.llvmlower.ieee_dyadic_ir import decode, encode
+    from merlin.llvmlower.ieee_pointwise import special_conversion
+
+    bounds, proofs = {}, []
+    for op in list(module.walk()):
+        if op.name != "linalg.generic" or len(op.inputs) != 1 or len(op.results) != 1:
+            continue
+        body = list(op.body.block.ops)
+        source, target = op.inputs[0], op.results[0].type.element_type
+        if (
+            len(body) != 2
+            or body[0].name not in {"arith.extf", "arith.truncf"}
+            or body[0].operands[0] is not op.body.block.args[0]
+            or any(it.data.value != "parallel" for it in op.get_iterator_types())
+            or str(source.type.element_type) not in {"f16", "bf16", "f32"}
+            or str(target) not in {"f16", "bf16", "f32"}
+        ):
+            continue
+        storage = IntegerType(source.type.element_type.bitwidth)
+        operations = []
+        packed = point(
+            [source],
+            TensorType(storage, source.type.get_shape()),
+            lambda args, emit: emit(arith.BitcastOp(args[0], storage)),
+            operations,
+        )
+        bounds[packed] = 1 << (storage.width.data - 1)
+        empty = tensor.EmptyOp([], TensorType(storage, op.results[0].type.get_shape()))
+        block = Block(arg_types=[storage, storage])
+        zero = arith.ConstantOp(IntegerAttr(0, storage))
+        copied = arith.AddiOp(block.args[0], zero.result)
+        block.add_ops([zero, copied, L.YieldOp(copied.result)])
+        integer = L.GenericOp(
+            inputs=[packed],
+            outputs=[empty.tensor],
+            body=Region(block),
+            indexing_maps=op.get_indexing_maps(),
+            iterator_types=op.get_iterator_types(),
+            result_types=[empty.tensor.type],
+        )
+        operations.extend([empty, integer])
+        bounds[integer.results[0]] = 1 << (storage.width.data - 1)
+
+        def readout(args, emit):
+            original = emit(arith.BitcastOp(args[0], source.type.element_type))
+            significand, exponent, negative = decode(original, emit)
+            finite = encode(significand, exponent, target, emit, zero_negative=negative)
+            result = special_conversion(body[0].name, original, target, emit, finite_fallback=finite)
+            context = (copy_profiles or {}).get(source)
+            if context is not None and (str(source.type.element_type), str(target)) in {
+                ("f16", "f32"),
+                ("f32", "bf16"),
+            }:
+                from merlin.llvmlower.native_cpu_layout import vector_predicate
+
+                integer = IntegerType(target.bitwidth)
+                source_storage = IntegerType(source.type.element_type.bitwidth)
+                sf = 10 if str(source.type.element_type) == "f16" else 23
+                se = 5 if sf == 10 else 8
+                raw = emit(arith.BitcastOp(original, source_storage))
+                magnitude = emit(
+                    arith.AndIOp(raw, emit(arith.ConstantOp(IntegerAttr((1 << (sf + se)) - 1, source_storage))))
+                )
+                nan = emit(
+                    arith.CmpiOp(
+                        magnitude, emit(arith.ConstantOp(IntegerAttr(((1 << se) - 1) << sf, source_storage))), "ugt"
+                    )
+                )
+                if str(target) == "bf16":
+                    replacement = emit(arith.BitcastOp(emit(arith.ConstantOp(IntegerAttr(-1, integer))), target))
+                else:
+                    # Dense copy uses eight float lanes; the software tail
+                    # selects +all-payload NaN. Strided copies use F16C too.
+                    if not context["dense"]:
+                        return result
+                    from xdsl.dialects.builtin import i1
+
+                    vector = vector_predicate(context, emit)
+                    scalar = emit(arith.XOrIOp(vector, emit(arith.ConstantOp(IntegerAttr(1, i1)))))
+                    nan = emit(arith.AndIOp(nan, scalar))
+                    replacement = emit(
+                        arith.BitcastOp(emit(arith.ConstantOp(IntegerAttr(0x7FFFFFFF, integer))), target)
+                    )
+                result = emit(arith.SelectOp(nan, replacement, result))
+            if str(target) == "bf16" and "merlin.cpu_storage_profile" in op.attributes:
+                import json
+
+                from merlin.llvmlower.ieee_pointwise import canonical_bf16_storage
+
+                result = canonical_bf16_storage(
+                    result, json.loads(op.attributes["merlin.cpu_storage_profile"].data), emit
+                )
+            return result
+
+        result = point([integer.results[0]], op.results[0].type, readout, operations)
+        Rewriter.replace_op(op, operations, [result])
+        proofs.append(
+            dict(
+                form="typed_storage_conversion",
+                source=str(source.type.element_type),
+                target=str(target),
+                domain="all_source_storage_words",
+                rounding="integer_RNE; explicit_NaN_bit_readout; source_path_guards_retained",
+                context="tensor_copy" if copy_profiles is not None else "typed_opmath",
+            )
+        )
+    module.verify()
+    return bounds, proofs

@@ -6,7 +6,9 @@ explicit modular host recombination. No floating conversion is involved.
 """
 
 
-def rewrite_native_sign_components(module, *, canonical_bf16_nan=False, defer_floating_negation=False):
+def rewrite_native_sign_components(
+    module, *, canonical_bf16_nan=False, defer_floating_negation=False, cpu_profiles=None
+):
     from xdsl.dialects import arith, tensor
     from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, IntegerAttr, IntegerType, TensorType, UnitAttr
     from xdsl.dialects.linalg import ops as L
@@ -63,6 +65,12 @@ def rewrite_native_sign_components(module, *, canonical_bf16_nan=False, defer_fl
             bits = source.type.element_type.width.data
         if bits is None or source.type.element_type != op.results[0].type.element_type:
             continue
+        cpu_profile = (
+            (cpu_profiles or {}).get(source) if floating and str(source.type.element_type) in {"f16", "bf16"} else None
+        )
+        if floating and str(source.type.element_type) in {"f16", "bf16"} and cpu_profiles is not None:
+            if cpu_profile is None:
+                continue
         element = IntegerType(bits)
         shape = source.type.get_shape() if clamp else op.results[0].type.get_shape()
         identity = AffineMapAttr(AffineMap.identity(len(source.type.get_shape())))
@@ -101,6 +109,32 @@ def rewrite_native_sign_components(module, *, canonical_bf16_nan=False, defer_fl
         block = Block(arg_types=[element, source.type.element_type])
         if floating:
             raw = block.args[0]
+            if cpu_profile is not None and str(source.type.element_type) in {"f16", "bf16"}:
+                from merlin.llvmlower.native_cpu_layout import vector_predicate
+
+                def put(child):
+                    block.add_op(child)
+                    return child.results[0]
+
+                def c(v):
+                    return put(arith.ConstantOp(IntegerAttr(v, element)))
+
+                fraction = 7 if str(source.type.element_type) == "bf16" else 10
+                infinity = 0x7F80 if fraction == 7 else 0x7C00
+                magnitude = put(arith.AndIOp(raw, c(0x7FFF)))
+                nan = put(arith.CmpiOp(magnitude, c(infinity), "ugt"))
+                vector = vector_predicate(cpu_profile, put)
+                corrected = (
+                    c(0x7FC0 if negate else 0xFFFF) if fraction == 7 else put(arith.OrIOp(raw, c(1 << (fraction - 1))))
+                )
+                # Sign change's scalar C10 path converts; threshold's vector
+                # path converts. The other path retains the original word.
+                if negate:
+                    from xdsl.dialects.builtin import i1
+
+                    vector = put(arith.XOrIOp(vector, put(arith.ConstantOp(IntegerAttr(1, i1)))))
+                flag = put(arith.AndIOp(nan, vector))
+                raw = put(arith.SelectOp(flag, corrected, raw))
             if negate and canonical_bf16_nan and str(source.type.element_type) == "bf16":
                 mask = arith.ConstantOp(IntegerAttr(0x7FFF, element))
                 infinity = arith.ConstantOp(IntegerAttr(0x7F80, element))
@@ -139,12 +173,15 @@ def rewrite_native_sign_components(module, *, canonical_bf16_nan=False, defer_fl
                 width=bits,
                 arithmetic="sign_bit_offset_modulo_storage_width" if negate else "source_compare_select_retained_host",
                 nan_payload=(
-                    "canonical_positive_quiet"
+                    "exhaustive_CPU_scalar_vector_storage_forms"
+                    if cpu_profile is not None
+                    else "canonical_positive_quiet"
                     if negate and canonical_bf16_nan and str(source.type.element_type) == "bf16"
                     else "preserved"
                     if negate
                     else "source_predicate_semantics"
                 ),
+                **({"cpu_storage_profile": cpu_profile} if cpu_profile is not None else {}),
             )
         )
     module.verify()

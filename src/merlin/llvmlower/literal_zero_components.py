@@ -11,6 +11,7 @@ def fold_literal_zero_components(module, limb_attribute):
 
     unknown = object()
     memo = {}
+    depth = 0
 
     def scalar(op, values):
         name = op.name
@@ -66,6 +67,19 @@ def fold_literal_zero_components(module, limb_attribute):
         return unknown
 
     def uniform(value):
+        nonlocal depth
+        # This optional source-literal optimization must not exhaust Python's
+        # stack on complete full-dtype limb reconstruction chains. Unknown
+        # retains the original exact producer; it never changes admission.
+        if depth >= 128:
+            return unknown
+        depth += 1
+        try:
+            return visit(value)
+        finally:
+            depth -= 1
+
+    def visit(value):
         if value in memo:
             return memo[value]
         memo[value] = unknown

@@ -1,0 +1,299 @@
+"""Composition theorem for closed typed pointwise storage/IEEE programs.
+
+The CPU profile is certified per dtype/form, never against a captured example.
+All typed RNE boundaries and explicit path/NaN selectors stay in the program.
+Reductions need a different theorem about order and competing NaN payloads.
+"""
+
+
+def prove(module):
+    import math
+
+    from merlin.targetgen.native_ieee_certificate import certificate
+    from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
+
+    try:
+        proof = certificate()
+    except (OSError, KeyError, ValueError) as exc:
+        return dict(status="refused", code="native_cpu_certificate_unavailable", reason=str(exc))
+    arithmetic = {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "arith.negf", "math.fma"}
+    conversions = {"arith.extf", "arith.truncf", "arith.sitofp", "arith.uitofp"}
+    scalar = (
+        arithmetic
+        | conversions
+        | {
+            "arith.constant",
+            "arith.addi",
+            "arith.subi",
+            "arith.muli",
+            "arith.extsi",
+            "arith.extui",
+            "arith.trunci",
+            "arith.index_cast",
+            "arith.index_castui",
+            "arith.bitcast",
+            "arith.cmpi",
+            "arith.cmpf",
+            "arith.select",
+            "arith.andi",
+            "arith.ori",
+            "arith.xori",
+            "arith.shli",
+            "arith.shrsi",
+            "arith.shrui",
+            "arith.minui",
+            "arith.maxui",
+            "arith.minsi",
+            "arith.maxsi",
+        }
+    )
+    structural = {
+        "builtin.module",
+        "func.func",
+        "func.return",
+        "linalg.generic",
+        "linalg.yield",
+        "linalg.index",
+        "linalg.copy",
+        "linalg.broadcast",
+        "linalg.transpose",
+        "linalg.fill",
+        "tensor.empty",
+        "tensor.splat",
+        "tensor.cast",
+        "tensor.reshape",
+        "tensor.dim",
+        "tensor.extract",
+        "tensor.extract_slice",
+        "tensor.insert_slice",
+        "tensor.concat",
+        "tensor.collapse_shape",
+        "tensor.expand_shape",
+        "tensor.pad",
+        "tensor.yield",
+        "affine.apply",
+    }
+    divisions = {"arith.divsi", "arith.floordivsi", "arith.remsi", "arith.divui", "arith.remui"}
+    primitives = set()
+    reduced_profile = False
+    functions = [op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward"]
+    storage = {str(arg.type.element_type) for function in functions for arg in function.body.block.args}
+    for check in proof.get("arithmetic_checks", []):
+        if check["form"]["dtype"] in storage and check["status"] != "proven":
+            return dict(
+                status="refused",
+                code="native_cpu_arithmetic_certificate_refused",
+                reason="CPU per-dtype arithmetic form has a full-domain counterexample",
+                form=check["form"],
+                counterexample=check["counterexample"],
+            )
+
+    def literal(value):
+        from xdsl.ir import BlockArgument
+
+        if isinstance(value, BlockArgument):
+            parent = value.owner.parent_op()
+            if parent is not None and parent.name == "linalg.generic" and value.index < len(parent.inputs):
+                value = parent.inputs[value.index]
+        return _constant_of(value)
+
+    def has_nan_guard(value):
+        """Require the complete explicit invalid/default + quieted-input DAG.
+
+        Every unprotected arithmetic-word escape refuses. Index selects after
+        the complete guard may choose different proved operand priorities.
+        """
+        from xdsl.dialects.builtin import IntegerAttr
+
+        from merlin.llvmlower.fixed_point_ir import FORMAT
+
+        primitive = value.owner
+        block = primitive.parent_block()
+        fraction, exponent, _ = FORMAT[str(value.type)]
+        quiet = 1 << (fraction - 1)
+        default = ((1 << (fraction + exponent + 1)) - 1) ^ ((1 << (fraction - 1)) - 1)
+        width_mask = (1 << (fraction + exponent + 1)) - 1
+        operands = set(primitive.operands)
+        required = {v for v in operands if literal(v) is None or math.isnan(literal(v))}
+
+        def constant_bits(word):
+            cast = word.owner
+            if getattr(cast, "name", None) != "arith.bitcast":
+                return None
+            owner = cast.operands[0].owner
+            if getattr(owner, "name", None) != "arith.constant":
+                return None
+            attr = owner.properties.get("value")
+            return (attr.value.data & width_mask) if isinstance(attr, IntegerAttr) else None
+
+        def nan_select(op):
+            if op.name != "arith.select":
+                return None
+            condition = op.operands[0].owner
+            if (
+                getattr(condition, "name", None) != "arith.cmpf"
+                or condition.operands[0] is not condition.operands[1]
+                or condition.predicate.value.data not in {7, 14}
+            ):
+                return None
+            yes, no = op.operands[1:]
+            if condition.predicate.value.data == 7:
+                yes, no = no, yes
+            return condition.operands[0], yes, no
+
+        def quiet_word(word, original):
+            cast = word.owner
+            if getattr(cast, "name", None) != "arith.bitcast":
+                return False
+            union = cast.operands[0].owner
+            if getattr(union, "name", None) != "arith.ori":
+                return False
+            for raw, mask in (tuple(union.operands), tuple(reversed(union.operands))):
+                bitcast = raw.owner
+                constant = mask.owner
+                if (
+                    getattr(bitcast, "name", None) == "arith.bitcast"
+                    and bitcast.operands[0] is original
+                    and getattr(constant, "name", None) == "arith.constant"
+                    and isinstance(constant.properties.get("value"), IntegerAttr)
+                    and constant.properties["value"].value.data == quiet
+                ):
+                    return True
+            return False
+
+        states = {}
+        for op in block.ops:
+            choice = nan_select(op)
+            if choice is None:
+                continue
+            tested, yes, no = choice
+            if tested is value and no is value and constant_bits(yes) == default:
+                states[op.results[0]] = set()
+            elif no in states and tested in operands and quiet_word(yes, tested):
+                states[op.results[0]] = states[no] | {tested}
+        memo = {}
+
+        def protected(word):
+            if word in memo:
+                return memo[word]
+            if word in states and states[word] >= required:
+                return True
+            memo[word] = False
+            if not word.uses:
+                return True
+            for use in word.uses:
+                consumer = use.operation
+                if (
+                    consumer.name == "arith.cmpf"
+                    and consumer.operands[0] is word
+                    and consumer.operands[1] is word
+                    and consumer.predicate.value.data in {7, 14}
+                ):
+                    continue
+                if (
+                    consumer.name != "arith.select"
+                    or consumer.results[0] not in states
+                    or not protected(consumer.results[0])
+                ):
+                    return False
+            memo[word] = True
+            return True
+
+        return bool(states) and protected(value)
+
+    for op in module.walk():
+        if op.name == "linalg.generic" and any(it.data.value != "parallel" for it in op.get_iterator_types()):
+            return dict(
+                status="refused",
+                code="native_aggregate_nan_order_unproved",
+                reason="aggregate CPU order/NaN payload selection lacks a full-domain theorem",
+            )
+        if op.name in divisions:
+            if str(op.results[0].type) == "index":
+                continue
+            from merlin.llvmlower.integer_division_components import literal_divisor
+
+            divisor = literal_divisor(op)
+            if divisor is None or divisor == 0 or (divisor == -1 and op.results[0].type.width.data >= 32):
+                return dict(
+                    status="refused",
+                    code="native_integer_division_exception_domain",
+                    reason="full dtype domain includes divisor-zero or INT_MIN/-1 CPU exception; no value constraint",
+                )
+            if divisor == -1 and op.results[0].type.width.data == 8:
+                rows = proof.get("integer_checks", {}).get("quotients", [])
+                if not rows or any(row.get("overflow_domain") != "value" for row in rows):
+                    return dict(
+                        status="refused",
+                        code="native_integer_division_exception_domain",
+                        reason="signed-byte overflow has no checked CPU value theorem",
+                    )
+        elif op.name not in scalar | structural:
+            return dict(
+                status="refused",
+                code="native_primitive_semantics_unproved",
+                reason="no certified typed pointwise theorem for " + op.name,
+            )
+        for key in ("fastmath", "overflowFlags"):
+            flag = op.properties.get(key, op.attributes.get(key))
+            if flag is not None and str(flag).split("<")[-1] != "none>":
+                return dict(
+                    status="refused",
+                    code="native_relaxed_arithmetic_unproved",
+                    reason="typed RNE theorem requires unflagged arithmetic",
+                )
+        if op.name in arithmetic | conversions:
+            primitives.add(op.name)
+        if op.name == "arith.divf":
+            divisor = literal(op.operands[1])
+            if divisor is None:
+                return dict(
+                    status="refused",
+                    code="native_runtime_float_division_unproved",
+                    reason="runtime floating division requires a full-domain quotient and zero-divisor producer",
+                )
+            if not math.isfinite(divisor):
+                return dict(
+                    status="refused",
+                    code="native_nonfinite_literal_division_unproved",
+                    reason="nonfinite literal division has no certified complete integer producer",
+                )
+            if divisor and math.isfinite(divisor):
+                from fractions import Fraction
+
+                ratio = Fraction(float(divisor))
+                if abs(ratio.numerator) & (abs(ratio.numerator) - 1):
+                    return dict(
+                        status="refused",
+                        code="native_reciprocal_opmath_unproved",
+                        reason="non-dyadic reciprocal CPU scalar path differs from direct IEEE division",
+                    )
+        if op.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "math.fma"}:
+            if not has_nan_guard(op.results[0]):
+                runtime = {v for v in op.operands if literal(v) is None}
+                constants = [literal(v) for v in op.operands if literal(v) is not None]
+                if any(math.isnan(v) for v in constants) or (len(runtime) > 1 and storage != {"bf16"}):
+                    return dict(
+                        status="refused",
+                        code="native_competing_nan_priority_unproved",
+                        reason="unguarded competing NaN words depend on CPU instruction/loop order",
+                    )
+                if "bf16" in storage:
+                    reduced_profile = True
+        if op.name in {"arith.extf", "arith.truncf"}:
+            if any(str(v.type) not in {"f16", "bf16", "f32", "f64"} for v in (*op.operands, *op.results)):
+                return dict(status="refused", code="native_conversion_form_unproved", reason="unknown floating format")
+    return dict(
+        status="proven",
+        method="closed_typed_pointwise_IEEE_composition_v1",
+        certificate_sha256=proof["content_sha256"],
+        conversion_forms=[row["key"] for row in proof["conversions"]],
+        input_domain="all_storage_bit_patterns",
+        runtime_input_observations=False,
+        finite_arithmetic="one exact integer producer and RNE at every original typed boundary",
+        primitives=sorted(primitives),
+        ieee_scope="explicit_source_NaN_and_index_selectors_preserved",
+        integer_arithmetic="modular; certified literal quotient correction; typed promotion retained",
+        cpu_reduced_storage_profile_required=reduced_profile,
+        cpu_loop_profile=proof["loop_profile"],
+    )

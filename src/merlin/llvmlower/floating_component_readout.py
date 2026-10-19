@@ -33,7 +33,7 @@ def component_readout(
     def publish(op, integer, exponent, integer_bound, operations, compute_type=None, denominator=1):
         compute_type = compute_type or op.results[0].type.element_type
         output_type = op.results[0].type.element_type
-        if ieee_pointwise:
+        if ieee_pointwise and any(it.data == L.IteratorType.REDUCTION for it in op.get_iterator_types()):
             f, _, bias = FORMAT[str(output_type)]
             finite_limit = Fraction((1 << (f + 1)) - 1) * Fraction(2) ** (bias - f)
             finite_bound = Fraction(integer_bound, denominator) * Fraction(2) ** exponent
@@ -133,6 +133,14 @@ def component_readout(
             from merlin.llvmlower.ieee_pointwise import overlay
 
             selected = overlay(op, block.args[2 : 2 + len(op.inputs)], selected, emit)
+        if str(output_type) == "bf16" and "merlin.cpu_storage_profile" in op.attributes:
+            import json
+
+            from merlin.llvmlower.ieee_pointwise import canonical_bf16_storage
+
+            selected = canonical_bf16_storage(
+                selected, json.loads(op.attributes["merlin.cpu_storage_profile"].data), emit
+            )
         block.add_op(L.YieldOp(selected))
         if aggregate:
             # A positive-zero seeded contraction rounds exact cancellation to +0.
@@ -161,6 +169,13 @@ def component_readout(
             and max_exponent < FORMAT[str(output_type)][2]
             else None
         )
+        if ieee_pointwise and grids[result] is None:
+            from merlin.llvmlower.ieee_dyadic_ir import finite_dtype_grid
+
+            # Overflow is a specified pointwise RNE result. A following typed
+            # boundary sanitizes it for the finite subproblem and overlays only
+            # the source-dependent exceptional element.
+            grids[result] = finite_dtype_grid(str(output_type))
         if len(scalar_ops) == 1 and scalar_ops[0].name == "arith.extf":
             # Widening is exact even at the source format's largest finite value.
             # An artificial rounding margin can cross the destination's finite

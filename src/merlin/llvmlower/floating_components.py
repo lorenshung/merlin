@@ -74,7 +74,7 @@ def rewrite_floating_components(
         # Size that operand representation for both significands and carries,
         # rather than proving the first GEMM and stranding its epilogue.
         required_bits = aligned_bits + 2
-        if any(op.name == "arith.mulf" for op in function.walk()):
+        if any(op.name in {"arith.mulf", "math.fma"} for op in function.walk()):
             required_bits = max(required_bits, 2 * aligned_bits + 32)
         packing_width = 1 << (max(512, required_bits) - 1).bit_length()
         i64, i128 = IntegerType(packing_width), IntegerType(2 * packing_width)

@@ -74,7 +74,18 @@ def rewrite_zero_division(module):
         if token != "bf16":
             invalid_nan |= 1 << (fraction + exponent)
         result = emit(arith.SelectOp(is_zero, constant(invalid_nan), signed_infinity))
+        nan = emit(arith.CmpiOp(magnitude, infinity, "ugt"))
+        quiet_payload = emit(arith.OrIOp(raw, constant(1 << (fraction - 1))))
+        if token == "bf16":
+            quiet_payload = constant(0x7FC0)
+        result = emit(arith.SelectOp(nan, quiet_payload, result))
         result = emit(arith.BitcastOp(result, typ.element_type))
+        if token == "bf16" and "merlin.cpu_storage_profile" in op.attributes:
+            import json
+
+            from merlin.llvmlower.ieee_pointwise import canonical_bf16_storage
+
+            result = canonical_bf16_storage(result, json.loads(op.attributes["merlin.cpu_storage_profile"].data), emit)
         block.add_op(L.YieldOp(result))
         identity = AffineMapAttr(AffineMap.identity(len(typ.get_shape())))
         overlay = L.GenericOp(

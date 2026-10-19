@@ -47,6 +47,11 @@ def unlowered_data_reductions(module, limb_attribute):
             "arith.maxui",
             "arith.minsi",
             "arith.minui",
+            "arith.divsi",
+            "arith.divui",
+            "arith.remsi",
+            "arith.remui",
+            "arith.floordivsi",
         }:
             # Index predicates select addresses or representation components;
             # they are not retained numerical comparisons of tensor values.
@@ -106,6 +111,9 @@ def prepare_integer_components(
     bounds = [domain["absolute_bound"] for domain in domains]
     dtype_bounds = list(bounds)
     grids = [domain["finite_grid"] for domain in domains]
+    from merlin.llvmlower.uniform_numeric_literals import fold_uniform_numeric_literals
+
+    literal_folds = fold_uniform_numeric_literals(module)
     semantics = component_semantics(module)
     if semantics["status"] != "proven":
         (directory / "exact-dtype-refusal.json").write_text(json.dumps(dict(family="F2", **semantics)) + "\n")
@@ -119,14 +127,185 @@ def prepare_integer_components(
     known_bounds, boolean_count = rewrite_boolean_components(module)
     observe("boolean_components")
     sign_proofs = []
+    from merlin.llvmlower.native_cpu_layout import input_layouts, profile
+
+    loop = semantics.get("cpu_loop_profile")
+    profiles = (
+        {
+            value: profile(layout, block=loop["reduced_vector_elements"], grain=loop["parallel_grain"])
+            for value, layout in input_layouts(report, functions[0].body.block.args).items()
+        }
+        if loop
+        else {}
+    )
+    scalar_primitives = {
+        operation.name for operation in module.walk() if operation.name.startswith(("arith.", "math."))
+    }
+    pure_float_copy = bool(scalar_primitives & {"arith.extf", "arith.truncf"}) and scalar_primitives <= {
+        "arith.extf",
+        "arith.truncf",
+        "arith.constant",
+    }
+    floating_storage = set(native_types) & {"f16", "bf16", "f32", "f64"}
+    if len(floating_storage) > 1 and not pure_float_copy:
+        (directory / "exact-dtype-refusal.json").write_text(
+            json.dumps(
+                dict(
+                    family="F2",
+                    code="native_mixed_storage_promotion_unproved",
+                    reason=(
+                        "mixed-storage TensorIterator temporary conversion needs a complete scalar/vector copy profile"
+                    ),
+                )
+            )
+            + "\n"
+        )
+        return None
+    copy_profiles = None
+    if pure_float_copy:
+        copy_profiles = {
+            value: profile(layout, block=loop["float_copy_vector_elements"], grain=loop["parallel_grain"])
+            for value, layout in input_layouts(report, functions[0].body.block.args).items()
+        }
+        if any(copy_profiles.get(value) is None for value in functions[0].body.block.args):
+            (directory / "exact-dtype-refusal.json").write_text(
+                json.dumps(
+                    dict(
+                        family="F2",
+                        code="native_copy_layout_unproved",
+                        reason="copy CPU loop layout has no certified form",
+                    )
+                )
+                + "\n"
+            )
+            return None
+    if semantics.get("cpu_reduced_storage_profile_required"):
+        candidates = [p for p in profiles.values() if p is not None]
+        output_shape = (
+            list(records[0]["output_abi"][0]["shape"]) if len(records) == 1 and records[0].get("output_abi") else None
+        )
+        selected_profile = next((p for p in candidates if p["shape"] == output_shape), None)
+        from math import prod
+
+        if selected_profile is None or any(
+            p is None
+            or (
+                prod(p["shape"]) != 1
+                and any(p[k] != selected_profile[k] for k in ("shape", "axes", "row", "vector_prefix"))
+            )
+            for p in profiles.values()
+        ):
+            (directory / "exact-dtype-refusal.json").write_text(
+                json.dumps(
+                    dict(
+                        family="F2",
+                        code="native_reduced_binary_layout_unproved",
+                        reason=(
+                            "reduced-storage scalar/vector readout needs "
+                            "equal dense/rank-one input profiles or one scalar"
+                        ),
+                    )
+                )
+                + "\n"
+            )
+            return None
+        scalars = sum(
+            prod(p["shape"]) == 1 or all(s == 0 for s, n in zip(p["stride"], p["shape"]) if n > 1)
+            for p in profiles.values()
+        )
+        if scalars > 1:
+            selected_profile = dict(selected_profile, vector_prefix=0)
+        from xdsl.dialects.builtin import StringAttr
+
+        for operation in module.walk():
+            if operation.name == "linalg.generic":
+                operation.attributes["merlin.cpu_storage_profile"] = StringAttr(
+                    json.dumps(selected_profile, sort_keys=True)
+                )
+    for operation in module.walk():
+        if operation.name != "linalg.generic" or len(operation.inputs) != 1:
+            continue
+        source = operation.inputs[0]
+        if str(source.type.element_type) not in {"f16", "bf16"}:
+            continue
+        if any(child.name in {"arith.negf", "arith.cmpf"} for child in operation.body.block.ops):
+            if profiles.get(source) is None:
+                (directory / "exact-dtype-refusal.json").write_text(
+                    json.dumps(
+                        dict(
+                            family="F2",
+                            code="native_cpu_word_layout_unproved",
+                            reason=(
+                                "reduced storage unary CPU loop requires a certified "
+                                "dense or rank-one layout below its parallel grain"
+                            ),
+                        )
+                    )
+                    + "\n"
+                )
+                return None
     if any(dtype in {"i8", "i16", "i32", "i64", "f16", "bf16", "f32", "f64", "complex<f32>"} for dtype in native_types):
         from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
 
-        sign_bounds, sign_proofs = rewrite_native_sign_components(module, canonical_bf16_nan=False)
+        sign_bounds, sign_proofs = rewrite_native_sign_components(
+            module, canonical_bf16_nan=False, cpu_profiles=profiles
+        )
         observe("native_sign_prelude")
         known_bounds.update(sign_bounds)
+    typed_proofs = []
+    if semantics.get("method") == "closed_typed_pointwise_IEEE_composition_v1":
+        from merlin.llvmlower.fixed_point_ir import FORMAT
+        from merlin.llvmlower.floating_components import rewrite_floating_components
+        from merlin.llvmlower.ieee_conversion_components import rewrite_ieee_conversions
+        from merlin.llvmlower.ieee_dyadic_ir import finite_dtype_grid
+        from merlin.llvmlower.integer_float_boundaries import rewrite_integer_float_boundaries
+        from merlin.llvmlower.pointwise_primitives import expose_pointwise_primitives
+        from merlin.llvmlower.significand_products import rewrite_significand_products
+
+        expose_pointwise_primitives(module)
+        literal_folds += fold_uniform_numeric_literals(module)
+        from merlin.llvmlower.integer_division_components import rewrite_integer_divisions
+
+        added, divisions = rewrite_integer_divisions(module)
+        known_bounds.update(added)
+        typed_proofs.extend(divisions)
+        added, conversions = rewrite_ieee_conversions(module, copy_profiles=copy_profiles)
+        known_bounds.update(added)
+        typed_proofs.extend(conversions)
+        added, products = rewrite_significand_products(module)
+        known_bounds.update(added)
+        typed_proofs.extend(products)
+        conversion_grids = {}
+        added, _ = rewrite_integer_float_boundaries(module, bounds, output_grids=conversion_grids)
+        known_bounds.update(added)
+        from merlin.llvmlower.ieee_zero_division import rewrite_zero_division
+
+        rewrite_zero_division(module)
+        for operation in module.walk():
+            if "merlin.exact_host_arithmetic" in operation.attributes:
+                for value in operation.results:
+                    token = str(getattr(value.type, "element_type", ""))
+                    if token in FORMAT:
+                        conversion_grids.setdefault(value, finite_dtype_grid(token))
+        try:
+            added, floating_proofs = rewrite_floating_components(
+                module, grids, known_grids=conversion_grids, ieee_pointwise=True
+            )
+        except ValueError as exc:
+            (directory / "exact-dtype-refusal.json").write_text(
+                json.dumps(dict(family="F2", code="native_typed_representation_unproved", reason=str(exc))) + "\n"
+            )
+            return None
+        known_bounds.update(added)
+        typed_proofs.extend(floating_proofs)
+        from xdsl.dialects.builtin import UnitAttr
+
+        for operation in module.walk():
+            if operation.name in {"arith.cmpf", "arith.cmpi"}:
+                operation.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
+        observe("typed_ieee_components")
     if any(b is None for b in bounds):
-        if not sign_proofs:
+        if not sign_proofs and not typed_proofs:
             (directory / "exact-dtype-refusal.json").write_text(
                 json.dumps(
                     dict(
@@ -268,6 +447,8 @@ def prepare_integer_components(
         limb_plans=plans,
         native_semantic_proof=semantics,
         native_sign_proofs=sign_proofs,
+        typed_ieee_proofs=typed_proofs,
+        source_uniform_literal_folds=literal_folds,
         boolean_semantics={"source": "closed_boolean_and", "integer_components": boolean_count},
         input_bound_proof=dict(
             method="full_dtype_storage_domain",

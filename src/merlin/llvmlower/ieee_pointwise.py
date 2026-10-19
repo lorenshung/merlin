@@ -32,6 +32,26 @@ def finite_or_zero(value, emit):
     return emit(arith.SelectOp(flag, zero, value))
 
 
+def canonical_bf16_storage(value, profile, emit):
+    """Certified scalar C10 versus AVX2 vector NaN storage; finite words untouched."""
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import IntegerAttr, i16
+
+    from merlin.llvmlower.native_cpu_layout import vector_predicate
+
+    raw = emit(arith.BitcastOp(value, i16))
+    magnitude = emit(arith.AndIOp(raw, emit(arith.ConstantOp(IntegerAttr(0x7FFF, i16)))))
+    nan = emit(arith.CmpiOp(magnitude, emit(arith.ConstantOp(IntegerAttr(0x7F80, i16))), "ugt"))
+    vector = vector_predicate(profile, emit)
+    selected = emit(
+        arith.SelectOp(
+            vector, emit(arith.ConstantOp(IntegerAttr(-1, i16))), emit(arith.ConstantOp(IntegerAttr(0x7FC0, i16)))
+        )
+    )
+    result = emit(arith.BitcastOp(selected, value.type))
+    return emit(arith.SelectOp(nan, result, value))
+
+
 def dependence_proof(op):
     """Prove the exact element dependence set from a closed scalar/index DAG."""
     from xdsl.ir.affine import AffineMap
@@ -216,7 +236,7 @@ def special_arithmetic(name, operands, emit):
     return emit(arith.BitcastOp(raw, typ))
 
 
-def special_conversion(name, operand, destination, emit):
+def special_conversion(name, operand, destination, emit, *, finite_fallback=None):
     """Retain NaN sign/payload when RV floating conversions would canonicalize it."""
     from xdsl.dialects import arith, scf
     from xdsl.dialects.builtin import IntegerAttr, IntegerType, i64
@@ -247,7 +267,8 @@ def special_conversion(name, operand, destination, emit):
         payload = e(arith.ShLIOp(payload, c(fraction - source_fraction)))
     elif fraction < source_fraction:
         payload = e(arith.ShRUIOp(payload, c(source_fraction - fraction)))
-    payload = e(arith.OrIOp(payload, c(1 << (fraction - 1))))
+    if not (str(operand.type) == "bf16" and str(destination) == "f32"):
+        payload = e(arith.OrIOp(payload, c(1 << (fraction - 1))))
     if str(destination) == "bf16":
         payload = c(1 << (fraction - 1))
     payload = e(arith.SelectOp(nan, payload, c(0)))
@@ -261,6 +282,9 @@ def special_conversion(name, operand, destination, emit):
     value = e(arith.BitcastOp(raw, destination))
     selected.add_op(scf.YieldOp(value))
     finite = Block()
-    converted = (arith.ExtFOp if name == "arith.extf" else arith.TruncFOp)(operand, destination)
-    finite.add_ops([converted, scf.YieldOp(converted.result)])
+    if finite_fallback is None:
+        converted = (arith.ExtFOp if name == "arith.extf" else arith.TruncFOp)(operand, destination)
+        finite.add_ops([converted, scf.YieldOp(converted.result)])
+    else:
+        finite.add_op(scf.YieldOp(finite_fallback))
     return emit(scf.IfOp(flag, [destination], Region(selected), Region(finite)))

@@ -39,7 +39,17 @@ def expose_pointwise_primitives(module):
         "arith.cmpf",
         "arith.select",
         "arith.addi",
+        "arith.subi",
         "arith.muli",
+        "arith.divsi",
+        "arith.divui",
+        "arith.remsi",
+        "arith.remui",
+        "arith.floordivsi",
+        "arith.minsi",
+        "arith.minui",
+        "arith.maxsi",
+        "arith.maxui",
         "linalg.index",
         "linalg.yield",
     }
@@ -63,6 +73,11 @@ def expose_pointwise_primitives(module):
                 "arith.sitofp",
                 "arith.uitofp",
                 "math.fma",
+                "arith.divsi",
+                "arith.divui",
+                "arith.remsi",
+                "arith.remui",
+                "arith.floordivsi",
             }
             for child in body.ops
         ):
@@ -88,6 +103,11 @@ def expose_pointwise_primitives(module):
             "arith.truncf",
             "arith.sitofp",
             "arith.uitofp",
+            "arith.divsi",
+            "arith.divui",
+            "arith.remsi",
+            "arith.remui",
+            "arith.floordivsi",
         }
         has_numeric_data = False
         for child in body.ops:
