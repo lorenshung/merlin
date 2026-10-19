@@ -70,6 +70,10 @@ installed headers, and verifies the vector loop's boundary/update form. Declared
 shape and stride metadata then select its scalar/vector readout. Dense physical
 orders, rank-one strides and fully broadcast layouts below that grain have closed
 profiles; unknown compound layouts stay host. No tensor payload is inspected.
+Unary storage and copy profiles require one original tensor argument. Additional
+destination tensors can change iteration order even when functional capture drops
+them from the arithmetic SSA. Such contexts remain host. Binary profiles require
+the complete original tensor-layout roster and compatible iteration profiles.
 Binary64 arithmetic and conversions are outside these certificates. In particular,
 a binary64-to-reduced conversion must not silently assume the CPU omits an
 intermediate binary32 rounding. Existing bit-preserving storage proofs are separate.

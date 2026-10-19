@@ -242,3 +242,52 @@ def test_conversion_prelude_cannot_place_a_numerical_comparison(certificate):
         return %r:tensor<4xf32>
     }}""")
     assert prove(module)["code"] == "native_float_predicate_family_unproved"
+
+
+def test_dropped_destination_layout_cannot_claim_a_copy_profile(tmp_path, monkeypatch):
+    import json
+
+    from merlin.targetgen.core_aten_components import prepare_integer_components
+
+    module = parse_mlir_text("""module {func.func @forward(%x:tensor<4xf16>)->tensor<4xf32>{
+      %e=tensor.empty():tensor<4xf32>
+      %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
+        iterator_types=["parallel"]} ins(%x:tensor<4xf16>) outs(%e:tensor<4xf32>){
+      ^bb0(%a:f16,%unused:f32):
+        %v=arith.extf %a:f16 to f32
+        linalg.yield %v:f32
+      }->tensor<4xf32>
+      return %r:tensor<4xf32>
+    }}""")
+    monkeypatch.setattr(
+        "merlin.targetgen.native_dtype_domain.component_semantics",
+        lambda _: {
+            "status": "proven",
+            "method": "closed_typed_pointwise_IEEE_composition_v1",
+            "cpu_loop_profile": {"reduced_vector_elements": 4, "float_copy_vector_elements": 2, "parallel_grain": 1024},
+        },
+    )
+
+    class Provider:
+        def admit_numeric_schedule(self, *args, **kwargs):
+            raise AssertionError("unknown CPU storage context reached device admission")
+
+    report = {
+        "cases": [
+            {
+                "status": "bundled",
+                "input_indices": [0, 1],
+                "case": {
+                    "arguments": [
+                        {"kind": "tensor", "shape": [4], "stride": [1]},
+                        {"kind": "tensor", "shape": [4], "stride": [2]},
+                    ]
+                },
+            }
+        ]
+    }
+    assert (
+        prepare_integer_components(tmp_path, report, None, Provider(), None, module, limb_attribute="test.limb") is None
+    )
+    refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
+    assert refusal["code"] == "native_copy_layout_context_unproved"

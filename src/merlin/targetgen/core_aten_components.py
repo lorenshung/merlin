@@ -162,7 +162,20 @@ def prepare_integer_components(
         )
         return None
     copy_profiles = None
+    one_tensor_storage_context = bool(records) and all(len(record.get("input_indices", ())) == 1 for record in records)
     if pure_float_copy:
+        if not one_tensor_storage_context:
+            (directory / "exact-dtype-refusal.json").write_text(
+                json.dumps(
+                    dict(
+                        family="F2",
+                        code="native_copy_layout_context_unproved",
+                        reason="CPU copy profile requires one original tensor; additional destination layouts are unproved",
+                    )
+                )
+                + "\n"
+            )
+            return None
         copy_profiles = {
             value: profile(layout, block=loop["float_copy_vector_elements"], grain=loop["parallel_grain"])
             for value, layout in input_layouts(report, functions[0].body.block.args).items()
@@ -187,13 +200,22 @@ def prepare_integer_components(
         selected_profile = next((p for p in candidates if p["shape"] == output_shape), None)
         from math import prod
 
-        if selected_profile is None or any(
-            p is None
-            or (
-                prod(p["shape"]) != 1
-                and any(p[k] != selected_profile[k] for k in ("shape", "axes", "row", "vector_prefix"))
+        complete_context = all(
+            0 <= index < len(functions[0].body.block.args) and functions[0].body.block.args[index] in profiles
+            for record in records
+            for index in record.get("input_indices", ())
+        )
+        if (
+            not complete_context
+            or selected_profile is None
+            or any(
+                p is None
+                or (
+                    prod(p["shape"]) != 1
+                    and any(p[k] != selected_profile[k] for k in ("shape", "axes", "row", "vector_prefix"))
+                )
+                for p in profiles.values()
             )
-            for p in profiles.values()
         ):
             (directory / "exact-dtype-refusal.json").write_text(
                 json.dumps(
@@ -229,14 +251,14 @@ def prepare_integer_components(
         if str(source.type.element_type) not in {"f16", "bf16"}:
             continue
         if any(child.name in {"arith.negf", "arith.cmpf"} for child in operation.body.block.ops):
-            if profiles.get(source) is None:
+            if profiles.get(source) is None or not one_tensor_storage_context:
                 (directory / "exact-dtype-refusal.json").write_text(
                     json.dumps(
                         dict(
                             family="F2",
                             code="native_cpu_word_layout_unproved",
                             reason=(
-                                "reduced storage unary CPU loop requires a certified "
+                                "reduced storage unary CPU loop requires one original tensor and a certified "
                                 "dense or rank-one layout below its parallel grain"
                             ),
                         )
