@@ -158,3 +158,55 @@ def test_corrupted_double_rounding_certificate_refuses(tmp_path, monkeypatch):
     monkeypatch.setattr(checker, "proof_sources", lambda: document["sources"])
     with pytest.raises(ValueError, match="double rounding precision"):
         checker.certificate()
+
+
+def test_scalar_literal_nan_guard_folds_without_runtime_observation():
+    from merlin.llvmlower.uniform_numeric_literals import fold_uniform_numeric_literals
+    from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
+
+    module = parse_mlir_text("""module {func.func @forward()->tensor<4xbf16>{
+      %a=arith.constant 0.5:f32
+      %b=arith.truncf %a:f32 to bf16
+      %n=arith.constant 32704:i16
+      %nan=arith.bitcast %n:i16 to bf16
+      %c=arith.cmpf uno,%a,%a:f32
+      %s=arith.select %c,%nan,%b:bf16
+      %r=tensor.splat %s:tensor<4xbf16>
+      return %r:tensor<4xbf16>
+    }}""")
+    assert fold_uniform_numeric_literals(module) == 3
+    returned = next(op for op in module.walk() if op.name == "func.return").operands[0]
+    assert _constant_of(returned) == 0.5
+
+
+@pytest.mark.parametrize("divisor,accepted", [("2.0", True), ("3.0", False), ("0x00000001", False)])
+def test_reciprocal_requires_an_exact_finite_compute_value(certificate, divisor, accepted):
+    module = parse_mlir_text(
+        """module {func.func @forward(%x:tensor<4xf32>)->tensor<4xf32>{
+      %d=arith.constant DIVISOR:f32
+      %y=tensor.splat %d:tensor<4xf32>
+      %e=tensor.empty():tensor<4xf32>
+      %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
+        iterator_types=["parallel"]} ins(%x,%y:tensor<4xf32>,tensor<4xf32>) outs(%e:tensor<4xf32>){
+      ^bb0(%a:f32,%b:f32,%unused:f32):
+        %q=arith.divf %a,%b:f32
+        linalg.yield %q:f32
+      }->tensor<4xf32>
+      return %r:tensor<4xf32>
+    }}""".replace("DIVISOR", divisor)
+    )
+    result = prove(module)
+    assert (result["status"] == "proven") == accepted
+    if not accepted:
+        assert result["code"] == "native_reciprocal_opmath_unproved"
+
+
+def test_fused_runtime_product_cannot_bypass_native_unit_restriction(certificate):
+    module = guarded()
+    from xdsl.dialects import math
+    from xdsl.rewriter import Rewriter
+
+    added = next(op for op in module.walk() if op.name == "arith.addf")
+    fused = math.FmaOp(added.operands[0], added.operands[1], added.operands[0])
+    Rewriter.replace_op(added, fused)
+    assert prove(module)["code"] == "native_parallel_runtime_product_construction"

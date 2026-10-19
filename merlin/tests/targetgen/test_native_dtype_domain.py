@@ -57,16 +57,21 @@ def test_native_sign_theorem_is_about_all_input_words(dtype):
 
 @pytest.mark.parametrize("dtype", ["f16", "bf16"])
 def test_reduced_precision_nan_dispatch_requires_its_own_theorem(dtype):
-    assert (
-        component_semantics(unary(dtype, f"%v=arith.negf %a : {dtype}"))["code"]
-        == "native_reduced_precision_nan_semantics_unproved"
-    )
+    proof = component_semantics(unary(dtype, f"%v=arith.negf %a : {dtype}"))
+    assert proof["status"] == "proven"
+    assert proof["method"] == "closed_typed_pointwise_IEEE_composition_v1"
+    assert proof["certificate_sha256"]
+    assert proof["runtime_input_observations"] is False
 
 
 @pytest.mark.parametrize("dtype", ["f16", "bf16", "f32", "f64"])
-def test_finite_inputs_cannot_prove_general_ieee_arithmetic(dtype):
+def test_finite_inputs_cannot_replace_the_general_ieee_certificate(dtype, monkeypatch):
+    def unavailable():
+        raise ValueError("missing full-domain certificate")
+
+    monkeypatch.setattr("merlin.targetgen.native_ieee_certificate.certificate", unavailable)
     module = unary(dtype, f"%v=arith.addf %a,%a : {dtype}")
-    assert component_semantics(module)["code"] == "native_ieee_arithmetic_semantics_unproved"
+    assert component_semantics(module)["code"] == "native_cpu_certificate_unavailable"
 
 
 def test_modular_ring_keeps_dtype_and_promotion_boundaries():

@@ -208,6 +208,15 @@ def prove(module):
                 code="native_aggregate_nan_order_unproved",
                 reason="aggregate CPU order/NaN payload selection lacks a full-domain theorem",
             )
+        if op.name in {"arith.mulf", "math.fma"}:
+            from merlin.llvmlower.uniform_numeric_literals import compile_time_operand
+
+            if not any(compile_time_operand(v) for v in op.operands[:2]):
+                return dict(
+                    status="refused",
+                    code="native_parallel_runtime_product_construction",
+                    reason="parallel products require a compile-time operand, including fused products",
+                )
         if op.name in divisions:
             if str(op.results[0].type) == "index":
                 continue
@@ -262,11 +271,19 @@ def prove(module):
                 from fractions import Fraction
 
                 ratio = Fraction(float(divisor))
-                if abs(ratio.numerator) & (abs(ratio.numerator) - 1):
+                from merlin.llvmlower.ieee_dyadic_ir import finite_dtype_grid
+
+                quantum, bound = finite_dtype_grid(str(op.results[0].type))
+                reciprocal = abs(1 / ratio) / Fraction(2) ** quantum
+                if (
+                    abs(ratio.numerator) & (abs(ratio.numerator) - 1)
+                    or reciprocal.denominator != 1
+                    or reciprocal > bound
+                ):
                     return dict(
                         status="refused",
                         code="native_reciprocal_opmath_unproved",
-                        reason="non-dyadic reciprocal CPU scalar path differs from direct IEEE division",
+                        reason="CPU scalar reciprocal is not an exact finite value of the compute dtype",
                     )
         if op.name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "math.fma"}:
             if not has_nan_guard(op.results[0]):

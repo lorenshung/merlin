@@ -107,7 +107,7 @@ def overlay(op, inputs, fallback, emit):
 
     No finite floating subproblem is replayed: the false branch returns the
     exact integer readout. A closed parallel primitive is required by the caller.
-    The independent source/eager qualification and final bit grader remain gates.
+    A closed per-dtype source proof and the independent final bit grader remain gates.
     """
     from xdsl.dialects import arith, scf
     from xdsl.ir import Block, Region
@@ -223,8 +223,8 @@ def special_arithmetic(name, operands, emit):
     if name == "arith.divf":
         # A finite numerator divided by an infinite divisor yields signed zero.
         raw = choose(binary(arith.AndIOp, infs[1], emit(arith.CmpiOp(magnitudes[0], infinity, "ult"))), sign, raw)
-    # The independent source audit refuses unequal competing NaN words; either
-    # operand then has the same propagated payload. BF16 opmath canonicalizes.
+    # Unprotected competing NaNs refuse. Complete source guards override this
+    # provisional word with their proved priority. BF16 opmath canonicalizes.
     propagated = binary(arith.OrIOp, raws[-1], quiet)
     has_nan = nans[-1]
     for nan, word in reversed(list(zip(nans[:-1], raws[:-1], strict=True))):

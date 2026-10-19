@@ -281,12 +281,17 @@ def prepare_integer_components(
         from merlin.llvmlower.ieee_zero_division import rewrite_zero_division
 
         rewrite_zero_division(module)
+        from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
+
         for operation in module.walk():
-            if "merlin.exact_host_arithmetic" in operation.attributes:
-                for value in operation.results:
-                    token = str(getattr(value.type, "element_type", ""))
-                    if token in FORMAT:
-                        conversion_grids.setdefault(value, finite_dtype_grid(token))
+            for value in operation.results:
+                token = str(getattr(value.type, "element_type", ""))
+                if token in FORMAT and _constant_of(value) is None:
+                    # Any finite word of this declared type lies on its full
+                    # dtype grid, including word selects and NaN-priority DAGs.
+                    # Packing sanitizes specials; complete-source admission
+                    # still requires every arithmetic producer on device.
+                    conversion_grids.setdefault(value, finite_dtype_grid(token))
         try:
             added, floating_proofs = rewrite_floating_components(
                 module, grids, known_grids=conversion_grids, ieee_pointwise=True

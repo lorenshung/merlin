@@ -228,6 +228,27 @@ def component_semantics(module):
     proof = _storage_component_semantics(module)
     if proof["status"] == "proven":
         return proof
+    numerical = {
+        "arith.addf",
+        "arith.subf",
+        "arith.mulf",
+        "arith.divf",
+        "math.fma",
+        "arith.extf",
+        "arith.truncf",
+        "arith.sitofp",
+        "arith.uitofp",
+    }
+    if not any(op.name in numerical for op in module.walk()) and proof["code"] in {
+        "native_ieee_word_semantics_unproved",
+        "native_reduced_precision_nan_semantics_unproved",
+    }:
+        if not all(_word_generic(op) for op in module.walk() if op.name in {"arith.negf", "arith.cmpf"}):
+            return dict(
+                status="refused",
+                code="native_ieee_word_semantics_unproved",
+                reason="word-only source is outside the closed sign/positive-zero-threshold wiring theorem",
+            )
     from merlin.targetgen.native_typed_semantics import prove
 
     return prove(module)

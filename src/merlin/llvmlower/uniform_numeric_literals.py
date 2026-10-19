@@ -105,28 +105,15 @@ def fold_uniform_numeric_literals(module):
 
     count = 0
     for op in list(module.walk()):
-        if op.name not in {"arith.sitofp", "arith.uitofp", "arith.extf", "arith.truncf"}:
+        if len(op.results) != 1 or not op.operands or str(op.results[0].type) not in {*FORMAT, "i1"}:
             continue
-        parent = op.operands[0].owner
-        if getattr(parent, "name", None) != "arith.constant" or str(op.results[0].type) not in FORMAT:
+        values = [_constant_of(v) for v in op.operands]
+        value = evaluate(op, values)
+        if value is None or not math.isfinite(value):
             continue
-        attr = parent.properties.get("value")
-        if not isinstance(attr, (FloatAttr, IntegerAttr)) or not math.isfinite(attr.value.data):
-            continue
-        original = attr.value.data
-        if op.name == "arith.uitofp":
-            original %= 1 << op.operands[0].type.width.data
-        token = str(op.results[0].type)
-        try:
-            value = round_binary(
-                original, 16 if token in {"bf16", "f16"} else 32 if token == "f32" else 64, bfloat16=token == "bf16"
-            )
-        except (ValueError, OverflowError):
-            continue
-        if original == 0 and isinstance(original, float):
-            value = math.copysign(0.0, original)
-        replacement = arith.ConstantOp(FloatAttr(value, op.results[0].type))
-        Rewriter.replace_op(op, replacement)
+        typ = op.results[0].type
+        attr = IntegerAttr(value, typ) if str(typ) == "i1" else FloatAttr(value, typ)
+        Rewriter.replace_op(op, arith.ConstantOp(attr))
         count += 1
     for op in list(module.walk()):
         if op.name != "linalg.generic" or len(op.results) != 1:
