@@ -11,6 +11,7 @@ import hashlib
 import math
 from pathlib import Path
 
+from merlin.targetgen.operator_review import review_accepted
 from merlin.targetgen.software_spec import admit_operation, load_software_spec
 
 QUANTIZE = "quantized_decomposed.quantize_per_tensor.default"
@@ -127,7 +128,7 @@ def declaration_location(selection, authority, key, fields=()):
 
 def pipeline_refusals(selection):
     reasons = []
-    if selection["spec"].get("status") != "reviewed" or selection["host"].get("status") != "reviewed":
+    if not review_accepted(selection["spec"], selection["host"], default="unreviewed"):
         reasons.append("software and host declarations must both be reviewed")
     return reasons
 
@@ -152,7 +153,7 @@ def readout_refusals(selection, decision):
                 ("rounding", "round_to_nearest_even"),
                 ("per_element", "correctly_rounded_single_operation"),
             ):
-                if contract.get("status") != "reviewed" or semantics.get(field) != expected:
+                if not review_accepted(contract, default="unreviewed") or semantics.get(field) != expected:
                     where = declaration_location(selection, authority, key, ("numerical_contract", "semantics", field))
                     reasons.append(
                         f"{where.get('path', '')}:{where.get('line', '')} {key}: "
@@ -441,7 +442,7 @@ def admission_plan(
             declared = host.get("exact_readout") or {}
             admitted = (
                 policy.get("strategy") == "exact_rational_host"
-                and declared.get("status") == "reviewed"
+                and review_accepted(declared, default="unreviewed")
                 and declared.get("api") == "merlin.runtime.exact_readout.requantize_int32"
                 and declared.get("rounding") == "half_to_even"
             )
@@ -497,7 +498,7 @@ def admission_plan(
                 exact_limit=exact_limit,
                 source=location,
             )
-            if contract.get("status") != "reviewed" or exact_limit is None or cast_bound > exact_limit:
+            if not review_accepted(contract, default="unreviewed") or exact_limit is None or cast_bound > exact_limit:
                 reasons.append(
                     f"step 5 {location.get('path', '')}:{location.get('line', '')} {cast_key}: "
                     f"accumulator bound {cast_bound} exceeds or lacks declared exact_range {exact_range!r}"

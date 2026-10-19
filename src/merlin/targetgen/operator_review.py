@@ -9,8 +9,8 @@ STATUSES = frozenset({"reviewed", "unreviewed", PENDING})
 ACCEPT_ENV = "MERLIN_ACCEPT_AUTHORED_PENDING_OPERATOR_REVIEW"
 
 
-def review_status(document):
-    status = document.get("status", "reviewed")
+def review_status(document, *, default="reviewed"):
+    status = document.get("status", default)
     if status != "reviewed":
         return status
     evidence = document.get("evidence", {})
@@ -36,8 +36,8 @@ def acceptance():
     )
 
 
-def review_record(*documents):
-    states = [review_status(document) for document in documents]
+def review_record(*documents, default="reviewed"):
+    states = [review_status(document, default=default) for document in documents]
     state = (
         "unreviewed"
         if any(s not in {"reviewed", PENDING} for s in states)
@@ -51,5 +51,5 @@ def review_record(*documents):
     )
 
 
-def review_accepted(*documents):
-    return review_record(*documents)["operator_accepted"]
+def review_accepted(*documents, default="reviewed"):
+    return review_record(*documents, default=default)["operator_accepted"]

@@ -169,8 +169,18 @@ def test_pinned_cross_repo_bounded_device_results(tmp_path):
         evidence = result["evidence"]
         assert evidence["lane"] == "device", (case, result)
         verdict = evidence["semantic_verdict"]
-        assert verdict["integer_reference"]["status"] == "pass", (case, verdict)
-        assert all(row["status"] == "pass" for row in verdict["integer_reference"]["results"])
+        if verdict["numeric_execution_policy"] == "native_host_exact":
+            # A pinned frontend can retain native IEEE arithmetic instead of
+            # quantizing it. This path must meet the independent native bit gate.
+            floor = verdict["host_floor"]
+            assert floor["status"] == "pass", (case, floor)
+            assert floor["comparison"] == "exact_native_eager_storage_bits", (case, floor)
+            assert floor["results"] and all(row["status"] == "pass" for row in floor["results"])
+        else:
+            reference = verdict["integer_reference"]
+            assert reference["status"] == "pass", (case, reference)
+            assert reference["engine"] == "independent_pt2e_exact_rational", (case, reference)
+            assert reference["results"] and all(row["status"] == "pass" for row in reference["results"])
         execution = evidence["routing"]["execution_evidence"]
         assert execution["status"] == "measured" and execution["executed_instructions"] > 0
 

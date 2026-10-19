@@ -164,3 +164,23 @@ def test_host_screen_separates_acceptance_from_review(monkeypatch, enabled):
     assert result["status"] == ("admitted" if enabled == "1" else "unknown")
     assert result["review_status"] == PENDING and result["reviewed"] is False
     assert result["operator_accepted"] is (enabled == "1")
+
+
+@pytest.mark.parametrize("enabled", ["0", "1"])
+def test_pending_numerical_contract_uses_the_same_acceptance_policy(monkeypatch, enabled):
+    from merlin.targetgen.operation_numerics import _explicit_contract
+
+    monkeypatch.setenv(ACCEPT_ENV, enabled)
+    contract = dict(status=PENDING, semantics=dict(arithmetic="exact_integer"), evidence=dict(basis="authored"))
+    result = _explicit_contract(contract)
+    assert result["status"] == ("resolved" if enabled == "1" else "unknown")
+    assert result["review_status"] == PENDING
+    assert result["operator_accepted"] is (enabled == "1")
+
+
+def test_numerical_contract_without_explicit_review_status_is_not_accepted(monkeypatch):
+    from merlin.targetgen.operation_numerics import _explicit_contract
+
+    monkeypatch.setenv(ACCEPT_ENV, "1")
+    result = _explicit_contract(dict(semantics=dict(arithmetic="exact_integer"), evidence=dict(basis="authored")))
+    assert result["status"] == "unknown" and "review_status" in result["unknowns"]

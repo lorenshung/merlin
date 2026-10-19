@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from merlin.targetgen.operator_review import review_record
+
 
 def integer_split_k_limit(
     numeric_policy: dict | None, *, tile_dim: int, full_k: int, operand_range: tuple[int, int] | None = None
@@ -117,13 +119,15 @@ def _explicit_contract(contract: dict | None) -> dict:
     unknowns = _unknowns(semantics) if isinstance(semantics, dict) and semantics else ["semantics"]
     if not isinstance(evidence, dict) or not evidence:
         unknowns.append("evidence")
-    if contract.get("status") != "reviewed":
+    review = review_record(contract, default="unreviewed")
+    if not review["operator_accepted"]:
         unknowns.append("review_status")
     return {
         "status": "unknown" if unknowns else "resolved",
         "semantics": semantics,
         "unknowns": sorted(unknowns),
-        "qualification": "reviewed declaration, not measured numerical conformance",
+        "qualification": "accepted declaration, not measured numerical conformance",
+        **review,
     }
 
 
@@ -157,7 +161,8 @@ def operation_numerical_contracts(entry: dict, software_spec: dict | None, host_
                 "unknowns": sorted(set(unknowns)),
                 "semantics": semantics,
                 "basis": "selected contraction numerical semantics",
-                "qualification": "reviewed declaration, not measured numerical conformance",
+                "qualification": "accepted declaration, not measured numerical conformance",
+        **review,
             }
         else:
             decision = _explicit_contract(None)
