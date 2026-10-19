@@ -133,12 +133,14 @@ def test_linear_components_recombine_with_native_wraparound(bits, coefficient):
     assert evaluate(source, [x, y]) == expected
 
 
-def test_boolean_or_uses_unsigned_truth_codes_and_exact_host_predicate():
+def test_boolean_or_stays_in_the_host_source():
     source = module("i1", "%v = arith.ori %a, %b : i1")
+    original = str(source)
     bounds, count = rewrite_boolean_components(source)
-    assert count == 1
-    assert rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[1, 1], known_bounds=bounds)
-    assert evaluate(source, [[0, 0, 1, 1], [0, 1, 0, 1]]) == [0, -1, -1, -1]
+    assert count == 0 and bounds == {}
+    assert str(source) == original
+    assert not rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[1, 1], known_bounds=bounds)
+    assert str(source) == original
 
 
 def test_widening_keeps_the_carry_above_the_original_storage_width():
