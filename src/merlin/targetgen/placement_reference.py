@@ -30,7 +30,10 @@ def movement_pattern(module):
                 if not shape or not mapping.data.results:
                     continue
                 inner = mapping.data.results[-1]
-                output_inner = maps[-1].data.results[-1]
+                # A scalar result has no contiguous axis. Its input map can
+                # still select a component of a non-scalar storage tensor.
+                output_results = maps[-1].data.results
+                output_inner = output_results[-1] if output_results else None
                 if inner != output_inner:
                     index_operations += expression_cost(inner)
                     evidence.append(dict(operation=op.name, input_map=str(mapping), reason="nonunit_inner_selector"))

@@ -395,3 +395,24 @@ def test_descriptor_fold_retains_host_while_real_scalar_tensor_work_qualifies(tm
     )
     assert result["refusal_code"] == "constant_metadata_fold_no_tensor_data"
     assert result["placement_cost"]["descriptor_folds"] == [proof]
+
+
+def test_scalar_movement_result_has_no_innermost_output_axis():
+    from merlin.targetgen.placement_reference import movement_pattern
+
+    module = parse_mlir_text('''module {
+      func.func @forward(%x: tensor<2xf32>) -> tensor<f32> {
+        %e=tensor.empty() : tensor<f32>
+        %r=linalg.generic {
+          indexing_maps=[affine_map<()->(0)>,affine_map<()->()>],iterator_types=[]}
+          ins(%x : tensor<2xf32>) outs(%e : tensor<f32>) {
+          ^bb0(%a: f32,%unused: f32):
+            linalg.yield %a : f32
+          } -> tensor<f32>
+        func.return %r : tensor<f32>
+      }}''')
+    pattern, evidence, operations = movement_pattern(module)
+    assert pattern == 'element_gather'
+    assert evidence == [dict(operation='linalg.generic', input_map='affine_map<() -> (0)>',
+                             reason='nonunit_inner_selector')]
+    assert operations == 0
