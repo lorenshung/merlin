@@ -7,7 +7,7 @@ from fractions import Fraction
 import numpy as np
 import pytest
 
-from merlin.llvmlower.exact_readout import lower_exact_readouts, prove_scale
+from merlin.llvmlower.exact_readout import lower_exact_readouts
 from merlin.llvmlower.exact_readout_source import Scalar, build_readout
 
 
@@ -61,8 +61,8 @@ def fixture(scales, *, size=513, floating=False, bias=False, **kwargs):
     return ModuleOp([fn]), reader
 
 
-def scalar(block, arguments):
-    values = dict(zip(block.args, arguments))
+def scalar(block, arguments, external=None):
+    values = {**(external or {}), **dict(zip(block.args, arguments))}
 
     def signed(v, typ):
         w = typ.width.data
@@ -73,9 +73,17 @@ def scalar(block, arguments):
         name = op.name
         if name == "builtin.unregistered":
             name = op.op_name.data
-        if name == "linalg.yield":
+        if name in {"linalg.yield", "scf.yield"}:
             return a[0]
-        if name == "arith.constant":
+        if name == "arith.constant" and hasattr(op.value, "get_values"):
+            v = np.array(list(op.value.get_values()), dtype=object).reshape(op.results[0].type.get_shape())
+        elif name == "tensor.extract":
+            v = a[0][tuple(a[1:])]
+        elif name == "arith.index_cast":
+            v = a[0]
+        elif name == "scf.if":
+            v = scalar(op.regions[0 if a[0] else 1].block, [], values)
+        elif name == "arith.constant":
             v = op.value.value.data
             if str(op.results[0].type) == "f32":
                 import struct
@@ -123,6 +131,7 @@ def scalar(block, arguments):
                 "arith.andi": lambda: x & y,
                 "arith.ori": lambda: x | y,
                 "arith.shrui": lambda: x >> y,
+                "arith.shrsi": lambda: signed(x, op.operands[0].type) >> y,
                 "arith.shli": lambda: x << y,
                 "arith.maxsi": lambda: max(signed(x, op.operands[0].type), signed(y, op.operands[1].type)),
                 "arith.minsi": lambda: min(signed(x, op.operands[0].type), signed(y, op.operands[1].type)),
@@ -172,17 +181,20 @@ def test_emitted_requantizer_exact_at_extremes_ties_and_random(scale, zp, lo, hi
 
 def test_complete_small_numerator_domain():
     scale = Fraction(23, 98)
-    p = prove_scale(scale.numerator, scale.denominator)
-    assert p["method"] == "exact_multiply_shift"
+    from merlin.llvmlower.requant_a import records
+
+    params = dict(zero_point=0, quant_min=-128, quant_max=127, relu=False)
+    p = records([scale], [Fraction(0)], params)
+    assert p[0]["schema"] == "requant-A-v1"
     b = Scalar()
     from xdsl.dialects.builtin import i8, i32
     from xdsl.dialects.linalg.ops import YieldOp
     from xdsl.ir import Block
 
-    from merlin.llvmlower.exact_readout import emit_scale
+    from merlin.llvmlower.requant_a import emit
 
     block = Block(arg_types=[i32, i8])
-    result = emit_scale(b, block.args[0], p, -128, 127, 0, False)
+    result = emit(b, block.args[0], p)
     block.add_ops([*b.ops, YieldOp(result)])
     for v in range(-32768, 32769):
         assert scalar(block, [v & 0xFFFFFFFF, 0]) == min(127, max(-128, round(v * scale))) & 255

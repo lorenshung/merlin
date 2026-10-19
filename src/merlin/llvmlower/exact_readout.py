@@ -7,84 +7,8 @@ Unsupported expressions retain their original exact implementation.
 
 import json
 from fractions import Fraction
-from functools import lru_cache
 
 from merlin.llvmlower.exact_readout_source import Scalar, build_readout
-
-
-@lru_cache(maxsize=4096)
-def prove_scale(numerator, denominator, low=-128, high=127, zero_point=0):
-    """Prove a u64*u64->u128 quotient estimate and exact remainder correction.
-
-    M=ceil(num*2^s/den), E=M*den-num*2^s. For 0<=a<=2^31,
-    a*M/2^s = a*num/den + a*E/(den*2^s).
-    A*E < den*2^s proves floor(a*M/2^s) is q or q+1.
-    Comparing estimate*den to a*num recovers q EXACTLY, then the exact
-    remainder decides all half ties. This extends the provider reciprocal
-    certificate to avoid an overflowing intermediate a*num in signed i64.
-    """
-    num, den, a = abs(numerator), denominator, 1 << 31
-    fallback = dict(method="source_exact", reason="rational exceeds certified u128 intermediates")
-    if not num or den <= 0 or den >= 1 << 127 or a * num >= 1 << 127:
-        return fallback
-    # A quotient and its estimate must fit i64; products and residual fit i128.
-    if (a * num + den - 1) // den >= (1 << 63) - 1:
-        return fallback
-    candidate = None
-    # Prefer a proved exact floor when it still fits the u64 multiplier.
-    # Otherwise the relaxed estimate is corrected with the exact numerator.
-    for exact_floor in (True, False):
-        for shift in range(128):
-            m = (num * (1 << shift) + den - 1) // den
-            error = m * den - num * (1 << shift)
-            limit = (1 if exact_floor else den) * (1 << shift)
-            if m < 1 << 64 and a * error < limit:
-                candidate = m, shift, error, exact_floor
-                break
-        if candidate is not None:
-            break
-    if candidate is None:
-        return dict(method="source_exact", reason="no certified u64 multiplier")
-    m, shift, error, exact_floor = candidate
-    max_estimate = a * m >> shift
-    if max_estimate * den >= 1 << 127:
-        return fallback
-
-    def fast(value):
-        magnitude = abs(value)
-        q = magnitude * m >> shift
-        q -= q * den > magnitude * num
-        r = magnitude * num - q * den
-        q += r > den - r or (r == den - r and q & 1)
-        return -q if (value < 0) != (numerator < 0) else q
-
-    points = {-(1 << 31), (1 << 31) - 1, -1, 0, 1}
-    for k in range(low - zero_point - 1, high - zero_point + 2):
-        edge = (2 * k + 1) * den // (2 * num)
-        for v in (edge, -edge):
-            points.update(range(v - 2, v + 3))
-    points = sorted(v for v in points if -(1 << 31) <= v < 1 << 31)
-    for v in points:
-        if fast(v) != round(Fraction(v * numerator, den)):
-            return dict(method="source_exact", reason="boundary verification failed")
-    return dict(
-        method="exact_multiply_shift",
-        numerator=str(numerator),
-        denominator=str(den),
-        accumulator_min=-(1 << 31),
-        accumulator_max=(1 << 31) - 1,
-        bound_source="full_int32_storage",
-        multiplier=str(m),
-        shift=shift,
-        exact_floor=exact_floor,
-        error=str(error),
-        error_product=str(a * error),
-        error_limit=str((1 if exact_floor else den) * (1 << shift)),
-        quotient_proof="A*E<D*2^s => estimate=q or q+1; subtract iff estimate*D>a*abs(num)",
-        rounding_proof="exact r; increment iff r>D-r or (r=D-r and q odd); signed symmetry",
-        verification="formal_full_domain_and_boundary_tests",
-        tested_values=len(points),
-    )
 
 
 def table_lookup(b, values, index, typ):
@@ -106,64 +30,12 @@ def table_lookup(b, values, index, typ):
     return b.emit(tensor.ExtractOp(table, [index], typ))
 
 
-def emit_scale(b, accumulator, proofs, low, high, zp, relu, index=None):
-    from xdsl.dialects import arith
-    from xdsl.dialects.builtin import IntegerType, i8, i64
-
-    proofs = proofs if isinstance(proofs, list) else [proofs]
-
-    def parameters(key):
-        return [int(p[key]) for p in proofs]
-
-    # Use native arithmetic whenever the full-domain proof permits it.
-    residual_type = (
-        i64
-        if all((1 << 31) * abs(int(p["numerator"])) + int(p["denominator"]) < 1 << 63 for p in proofs)
-        else IntegerType(128)
-    )
-    product_type = (
-        i64 if all((1 << 31) * int(p["multiplier"]) < 1 << 64 and p["shift"] < 64 for p in proofs) else IntegerType(128)
-    )
-
-    def parameter(key, typ, absolute=False):
-        values = parameters(key)
-        if absolute:
-            values = [abs(v) for v in values]
-        return table_lookup(b, values, index, typ)
-
-    value = b.cast(accumulator, i64)
-    negative = b.cmp(value, b.c(0, i64), "slt")
-    magnitude = b.select(negative, b.neg(value), value)
-    product = b.mul(b.cast(magnitude, product_type, unsigned=True), parameter("multiplier", product_type))
-    estimate = b.cast(b.shr(product, parameter("shift", product_type)), i64, unsigned=True)
-    numerator = b.mul(b.cast(magnitude, residual_type, unsigned=True), parameter("numerator", residual_type, True))
-    den = parameter("denominator", residual_type)
-    if all(p["exact_floor"] for p in proofs):
-        q = estimate
-    else:
-        excess = b.cmp(b.mul(b.cast(estimate, residual_type, unsigned=True), den), numerator, "ugt")
-        q = b.sub(estimate, b.cast(excess, i64, unsigned=True))
-    remainder = b.sub(numerator, b.mul(b.cast(q, residual_type, unsigned=True), den))
-    complement = b.sub(den, remainder)
-    odd = b.cmp(b.band(q, b.c(1, i64)), b.c(0, i64), "ne")
-    up = b.bor(b.cmp(remainder, complement, "ugt"), b.band(b.cmp(remainder, complement, "eq"), odd))
-    q = b.add(q, b.cast(up, i64, unsigned=True))
-    sign = table_lookup(b, [int(p["numerator"]) < 0 for p in proofs], index, IntegerType(1))
-    negative = b.emit(arith.XOrIOp(negative, sign))
-    q = b.select(negative, b.neg(q), q)
-    low = max(low, min(high, zp)) if relu else low
-    q = b.emit(arith.MaxSIOp(q, b.c(low - zp, i64)))
-    q = b.emit(arith.MinSIOp(q, b.c(high - zp, i64)))
-    return b.cast(b.add(q, b.c(zp, i64)), i8)
-
-
 def _parameters(op):
     from xdsl.dialects.builtin import f32, i32
 
     a = op.attributes
     if (
         op.name != "linalg.generic"
-        or a.get("merlin.exact_readout_proof") is not None
         or getattr(a.get("prov.role"), "data", None) != "readout"
         or getattr(a.get("prov.quant.arithmetic"), "data", None) != "exact"
         or len(op.inputs) not in (1, 2)
@@ -206,8 +78,7 @@ def _parameters(op):
 
 def lower_exact_readouts(module):
     from xdsl.dialects.builtin import StringAttr
-    from xdsl.dialects.linalg import ops as linalg
-    from xdsl.ir import Block, Region
+    from xdsl.ir import Region
 
     count = 0
     for op in list(module.walk()):
@@ -215,6 +86,14 @@ def lower_exact_readouts(module):
         if parameters is None:
             continue
         scales, ratios, params = parameters
+        previous = op.attributes.get("merlin.exact_readout_proof")
+        if previous is not None:
+            recorded = json.loads(previous.data)
+            if recorded.get("method") == "requant_A":
+                from .requant_a import validate_lowered
+
+                validate_lowered(op, scales, ratios, params, recorded)
+            continue
         # The frontend integer-grid builder is defined for binary source
         # coefficients. Arbitrary non-dyadic provenance cannot authenticate it.
         if any(s.denominator & (s.denominator - 1) for s in scales):
@@ -240,49 +119,27 @@ def lower_exact_readouts(module):
         # Delete detached validation operations so they do not leave ghost SSA uses.
         for item in reversed(source_ops):
             item.drop_all_references()
+        from .requant_a import frozen_bias, frozen_float_body, quantized_body
+
+        frozen = frozen_bias(op, params["bias"]) if matches else None
+        replacement = None
         if not matches:
             proof = dict(method="source_exact", reason="source scalar body differs from exact readout specification")
         elif params["output_scale"] is None:
-            block, proof = floating_body(op, scales, params)
+            replacement, proof = (
+                frozen_float_body(op, scales, params, frozen)
+                if frozen is not None
+                else floating_body(op, scales, params)
+            )
+        elif params["bias"] is not None and frozen is None:
+            proof = dict(method="source_exact", reason="runtime float bias has no frozen constant certificate")
+        else:
+            replacement, proof = quantized_body(op, ratios, params, frozen)
+        if replacement is not None:
             old = op.detach_region(op.body)
-            op.add_region(Region(block))
+            op.add_region(Region(replacement))
             old.drop_all_references()
             count += 1
-        elif params["bias"] is not None:
-            proof = dict(method="source_exact", reason="unbounded runtime float bias needs the exact wide path")
-        else:
-            proofs = [
-                dict(
-                    prove_scale(
-                        r.numerator, r.denominator, params["quant_min"], params["quant_max"], params["zero_point"]
-                    )
-                )
-                for r in ratios
-            ]
-            proof = dict(method="exact_multiply_shift", scales=proofs)
-            if any(p["method"] != "exact_multiply_shift" for p in proofs):
-                proof = dict(method="source_exact", scales=proofs, reason="scale certificate failed")
-            else:
-                block = Block(arg_types=[v.type for v in op.body.block.args])
-                b = Scalar()
-                index = None
-                if len(proofs) > 1:
-                    index = b.emit(linalg.IndexOp(len(op.results[0].type.get_shape()) - 1))
-                result = emit_scale(
-                    b,
-                    block.args[0],
-                    proofs,
-                    params["quant_min"],
-                    params["quant_max"],
-                    params["zero_point"],
-                    params["relu"],
-                    index,
-                )
-                block.add_ops([*b.ops, linalg.YieldOp(result)])
-                old = op.detach_region(op.body)
-                op.add_region(Region(block))
-                old.drop_all_references()
-                count += 1
         op.attributes["merlin.exact_readout_proof"] = StringAttr(json.dumps(proof, sort_keys=True))
     return count
 

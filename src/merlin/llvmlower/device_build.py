@@ -126,6 +126,9 @@ def apply_region_offload(routing, prepared: Path, workdir: Path) -> Path:
         if not path.is_file():
             raise ValueError(f"region offload returned no {label} file")
     document = json.loads(manifest.read_text(encoding="utf-8"))
+    from merlin.runtime.requant_a import validate_manifest
+
+    validate_manifest(document)
     bindings = list(document.get("bindings") or ())
     if not bindings:
         raise ValueError("region offload bound no region")
