@@ -17,7 +17,7 @@ pins:
       shift and floor-division decompositions, PT2E integer-contraction capture, and literal
       quantization-parameter lowering; missing any of these leaves supported operations opaque.
     repo_canonical: https://github.com/ucb-bar/model2MLIR.git
-    commit: "dc4b28a9647658e6ae43c8acee524bd9e5a45640"
+    commit: "941eac967bea7e99cf865f71709a2a86a1d979c8"
     root_env: MERLIN_M2M_DIR
     requires_paths:
       - m2m/ir/decompositions.py
