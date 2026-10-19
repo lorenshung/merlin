@@ -32,8 +32,8 @@ def test_native_conversion_does_not_grow_import_path():
     assert sys.path == before
 
 
-def test_scalar_complex_product_keeps_reduction_seed_in_loader():
-    """Normalizing the capture must preserve the original eager bits and ABI."""
+def test_scalar_complex_product_preserves_native_rank_and_bits():
+    """The pinned frontend owns scalar reduction semantics; do not reshape inputs."""
     from merlin.targetgen.core_aten_capture import loader_source
 
     tensor = dict(
@@ -56,6 +56,15 @@ import torch
 scope={{}}
 exec({source!r},scope)
 model,inputs=scope['get_model_and_inputs']()
+original_op=scope['_op']
+seen_shapes=[]
+def observe_op(name):
+ operation=original_op(name)
+ def call(x,*args,**kwargs):
+  seen_shapes.append(x.shape)
+  return operation(x,*args,**kwargs)
+ return call
+scope['_op']=observe_op
 for overload,tail,kwargs in [('default',[],{{}}),('dim_int',[0,False],{{}}),('dim_int',[-1,True],{{}})]:
  scope['_DOCUMENT']['overload']='aten.prod.'+overload
  scope['_DOCUMENT']['arguments']['args']['items'] = [{{'input_index':0}}, *tail]
@@ -66,6 +75,7 @@ for overload,tail,kwargs in [('default',[],{{}}),('dim_int',[0,False],{{}}),('di
     x=torch.tensor(complex(real,imag),dtype=dtype)
     expected=getattr(torch.ops.aten.prod,overload)(x,*tail,**kwargs)
     actual=model(x)
+    assert seen_shapes[-1] == torch.Size([])
     assert actual.shape == expected.shape == torch.Size([])
     assert torch.equal(actual.reshape(-1).view(torch.uint8),expected.reshape(-1).view(torch.uint8)), (x,actual,expected)
     assert actual.untyped_storage()._cdata != x.untyped_storage()._cdata

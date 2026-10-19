@@ -145,21 +145,7 @@ class Model(nn.Module):
         arguments = _decode(_DOCUMENT["arguments"], inputs)
         {argument_projection}
         operation = _op(_DOCUMENT["overload"])
-        # The frontend's rank-zero complex product fast path drops the
-        # multiplicative identity. Unlike a bitwise copy, (1+0j)*x must
-        # propagate IEEE invalid products between both components. Expose a
-        # one-element reduction so the ordinary product lowering keeps its
-        # seed, for every complex scalar value and both product overloads.
-        scalar_complex_product = (
-            operation._schema.name == "aten::prod"
-            and arguments["args"][0].is_complex()
-            and arguments["args"][0].dim() == 0
-        )
-        if scalar_complex_product:
-            arguments["args"] = (arguments["args"][0].reshape(1), *arguments["args"][1:])
         result = operation(*arguments["args"], **arguments["kwargs"])
-        if scalar_complex_product:
-            result = result.reshape(())
         {scalar_wrap}
         return result
 
