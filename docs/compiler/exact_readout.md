@@ -1,3 +1,13 @@
+---
+title: Exact readout lowering
+kind: reference
+status: current
+owner: core
+last_verified: 2026-10-19
+related: [requant_A_contract, exact_convolution_reference]
+code_refs: [src/merlin/llvmlower/exact_readout.py, src/merlin/llvmlower/exact_readout_source.py]
+---
+
 # Exact readout lowering
 
 The xDSL preprocessing stage `xdsl-exact-readouts` specializes the frontend's

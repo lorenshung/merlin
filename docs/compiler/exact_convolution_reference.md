@@ -1,3 +1,13 @@
+---
+title: Integer-grid exact convolution reference
+kind: reference
+status: current
+owner: core
+last_verified: 2026-10-19
+related: [exact_readout]
+code_refs: [src/merlin/targetgen/exact_quantized_reference.py]
+---
+
 # Integer-grid exact convolution reference
 
 `targetgen.exact_quantized_reference._convolution` factors each rational source

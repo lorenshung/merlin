@@ -1,3 +1,13 @@
+---
+title: Certified requantization boundary
+kind: reference
+status: current
+owner: core
+last_verified: 2026-10-19
+related: [exact_readout]
+code_refs: [src/merlin/runtime/requant_a.py, src/merlin/llvmlower/requant_a.py]
+---
+
 # requant-A-v1: shared Merlin / Gemmini host boundary
 
 The default is `clamp_mul_add_shift`, proved separately for every concrete
