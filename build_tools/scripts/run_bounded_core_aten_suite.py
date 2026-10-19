@@ -120,6 +120,9 @@ def stamp(args):
             if args.execution_provider
             else None,
             "target": args.target,
+            "dram_bytes": getattr(args, "dram_mb", None) * 1024 * 1024
+            if getattr(args, "dram_mb", None) is not None
+            else None,
             "software_spec_sha256": provenance.file_digest(args.software_spec) if args.software_spec else None,
             "host_capabilities_sha256": provenance.file_digest(args.host_capabilities)
             if args.host_capabilities
@@ -192,6 +195,7 @@ def execute(args, case, block):
                 directory,
                 batch,
                 arena_mb=args.arena_mb,
+                dram_bytes=args.dram_mb * 1024 * 1024 if args.dram_mb is not None else None,
                 timeout=args.execution_timeout,
                 target=args.target,
                 numeric_policy=args.numeric_policy,
@@ -480,6 +484,7 @@ def main():
     p.add_argument("--execution-timeout", type=int, default=120)
     p.add_argument("--worker-timeout", type=int, default=900)
     p.add_argument("--arena-mb", type=int, default=256)
+    p.add_argument("--dram-mb", type=int, help="Packed executable DRAM extent in MiB")
     p.add_argument("--baseline", type=Path)
     p.add_argument("--limit", type=int)
     p.add_argument("--worker", choices=["capture", "execute"])
