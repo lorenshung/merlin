@@ -4,6 +4,7 @@ from fractions import Fraction
 
 import pytest
 
+from merlin.common.mlir_query import op_name
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.quantized_guard_domain import Unproved, canonicalize_quantized_affine, prove_affine
 
@@ -125,3 +126,90 @@ def test_default_has_no_native_ieee_reassociation_permission():
     original = str(module)
     assert canonicalize_quantized_affine(module) == []
     assert str(module) == original
+
+
+def summed_guard(*, divisor="3.0", add="arith.addf", scale="0.03125", metadata=True):
+    """A quantized sum/scale/carrier followed by an IEEE NaN-quieting map."""
+    text = '''module {
+ func.func @forward(%x:tensor<2x3xi8>) -> tensor<2x1xi8> {
+  %s=arith.constant SCALE : f64
+  %st=tensor.splat %s : tensor<f64>
+  %z=arith.constant -3 : i64
+  %zt=tensor.splat %z : tensor<i64>
+  %dq="quant_ext.dequantize_per_tensor"(%x,%st,%zt) {
+   prov.quant.storage_dtype="int8",prov.quant.quant_min=-128:i64,prov.quant.quant_max=127:i64,
+   prov.quant.zero_point=-3:i64,prov.quant.scale_numerator=["1"],prov.quant.scale_denominator=["32"]
+  } : (tensor<2x3xi8>,tensor<f64>,tensor<i64>)->tensor<2x3xf32>
+  %zero=arith.constant 0.0 : f32
+  %init=tensor.splat %zero : tensor<2xf32>
+  %sum="linalg.reduce"(%dq,%init) <{dimensions=array<i64:1>}> ({
+   ^bb0(%a:f32,%b:f32):
+    %v="ADD"(%a,%b) : (f32,f32)->f32
+    "linalg.yield"(%v) : (f32)->()
+  }) : (tensor<2x3xf32>,tensor<2xf32>)->tensor<2xf32>
+  %d=arith.constant DIVISOR : f32
+  %ds=tensor.splat %d : tensor<2xf32>
+  %empty=tensor.empty() : tensor<2xf32>
+  %scaled=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
+    iterator_types=["parallel"]} ins(%sum,%ds:tensor<2xf32>,tensor<2xf32>) outs(%empty:tensor<2xf32>) {
+   ^bb0(%a:f32,%b:f32,%unused:f32):
+    %v=arith.divf %a,%b : f32
+    linalg.yield %v : f32
+  } -> tensor<2xf32>
+  %expanded="tensor.expand_shape"(%scaled)
+    <{reassociation=[[0:i64,1:i64]],static_output_shape=array<i64:2,1>}>
+    : (tensor<2xf32>)->tensor<2x1xf32>
+  %out=tensor.empty() : tensor<2x1xf32>
+  %quiet=linalg.generic {indexing_maps=[affine_map<(d0,d1)->(d0,d1)>,affine_map<(d0,d1)->(d0,d1)>],
+    iterator_types=["parallel","parallel"]} ins(%expanded:tensor<2x1xf32>) outs(%out:tensor<2x1xf32>) {
+   ^bb0(%a:f32,%unused:f32):
+    %bits=arith.bitcast %a : f32 to i32
+    %mask=arith.constant 4194304 : i32
+    %word=arith.ori %bits,%mask : i32
+    %nan=arith.bitcast %word : i32 to f32
+    %test=arith.cmpf uno,%a,%a : f32
+    %v=arith.select %test,%nan,%a : f32
+    linalg.yield %v : f32
+  } -> tensor<2x1xf32>
+  %q="quant_ext.quantize_per_tensor"(%quiet,%st,%zt) : (tensor<2x1xf32>,tensor<f64>,tensor<i64>)->tensor<2x1xi8>
+  return %q : tensor<2x1xi8>
+ }}'''.replace("DIVISOR", divisor).replace("ADD", add).replace("SCALE", scale)
+    module = parse_mlir_text(text)
+    if not metadata:
+        next(o for o in module.walk() if op_name(o) == "quant_ext.dequantize_per_tensor").attributes.pop(
+            "prov.quant.scale_numerator"
+        )
+    return module
+
+
+def test_quantized_nan_guard_after_sum_literal_divisor_and_reshape():
+    module = summed_guard()
+    proof = prove_affine([o for o in module.walk() if o.name == "linalg.generic"][-1])
+    assert proof["status"] == "proven"
+    assert proof["coefficients"] == ["1"] and proof["constant"] == "0"
+    assert proof["dead_classification_selects"] == 1
+    assert all(abs(Fraction(v)) < 5 for v in proof["finite_interval"])
+    assert len(canonicalize_quantized_affine(module, exact_rational=True)) == 1
+    module.verify()
+
+
+@pytest.mark.parametrize("options", [dict(divisor="0.0"), dict(add="arith.mulf"), dict(metadata=False)])
+def test_reduction_guard_requires_complete_finite_linear_domain(options):
+    module = summed_guard(**options)
+    original = str(module)
+    assert canonicalize_quantized_affine(module, exact_rational=True) == []
+    assert str(module) == original
+
+
+def test_large_declared_reduction_domain_refuses_before_guard_removal():
+    module = summed_guard()
+    from xdsl.dialects.builtin import FloatAttr, StringAttr, f64
+
+    dq = next(o for o in module.walk() if op_name(o) == "quant_ext.dequantize_per_tensor")
+    scale = 2**120
+    dq.operands[1].owner.operands[0].owner.properties["value"] = FloatAttr(float(scale), f64)
+    from xdsl.dialects.builtin import ArrayAttr
+
+    dq.attributes["prov.quant.scale_numerator"] = ArrayAttr([StringAttr(str(scale))])
+    dq.attributes["prov.quant.scale_denominator"] = ArrayAttr([StringAttr("1")])
+    assert canonicalize_quantized_affine(module, exact_rational=True) == []

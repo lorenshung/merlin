@@ -46,6 +46,47 @@ def _domain(value):
         return (literal, literal), dict(literal=str(literal))
     except Unproved:
         pass
+    # Propagate a finite enclosure through immutable carriers and closed sums.
+    # No tensor payload, eager result or source operator name participates.
+    name = op_name(owner)
+    if name in {"tensor.expand_shape", "tensor.collapse_shape", "tensor.cast"}:
+        interval, record = _domain(owner.operands[0])
+        return interval, dict(carrier=name, source=record)
+    if name == "linalg.generic":
+        proof = prove_affine(owner)
+        return tuple(Fraction(v) for v in proof["finite_interval"]), dict(affine=proof)
+    if name == "linalg.reduce" and len(owner.operands) == 2 and len(owner.results) == 1:
+        block = owner.regions[0].block
+        body = list(block.ops)
+        if (
+            len(body) != 2
+            or body[0].name != "arith.addf"
+            or body[1].name != "linalg.yield"
+            or tuple(body[0].operands) not in (tuple(block.args), tuple(reversed(block.args)))
+            or tuple(body[1].operands) != tuple(body[0].results)
+            or str(body[0].results[0].type) != "f32"
+        ):
+            raise Unproved("not a closed f32 additive reduction")
+        flag = body[0].properties.get("fastmath", body[0].attributes.get("fastmath"))
+        if flag is not None and str(flag).split("<")[-1] != "none>":
+            raise Unproved("relaxed reduction arithmetic")
+        shape = owner.operands[0].type.get_shape()
+        dims = tuple(owner.properties["dimensions"].get_values())
+        if len(set(dims)) != len(dims) or any(d < 0 or d >= len(shape) for d in dims) or any(d < 0 for d in shape):
+            raise Unproved("reduction has no closed static extent")
+        count = math.prod(shape[d] for d in dims)
+        interval, source = _domain(owner.operands[0])
+        seed, initial = _domain(owner.operands[1])
+        # Standard summation error enclosure, using a conservative relative
+        # error 2**-23 plus one minimum subnormal per addition. This bounds
+        # every partial sum for every reduction order, not just the final sum.
+        relative = Fraction(count, 2**23)
+        if relative >= 1:
+            raise Unproved("reduction rounding enclosure unavailable")
+        radius = (max(map(abs, seed)) + count * max(map(abs, interval)) + count * _TINY) / (1 - relative)
+        if radius > _MAX / 4:
+            raise Unproved("finite reduction intermediate overflow proof unavailable")
+        return (-radius, radius), dict(reduction="sum", count=count, source=source, seed=initial)
     if op_name(owner) != "quant_ext.dequantize_per_tensor":
         raise Unproved("operand has no declared quantized domain")
 
@@ -247,6 +288,14 @@ def prove_affine(op, *, conditional=False):
             result = add(*(evaluate(v) for v in child.operands), sign=-1 if name == "arith.subf" else 1)
         elif name == "arith.mulf":
             result = mul(*(evaluate(v) for v in child.operands))
+        elif name == "arith.divf":
+            numerator = evaluate(child.operands[0])
+            denominator, divisor_interval = evaluate(child.operands[1])
+            if any(denominator[:-1]) or not denominator[-1] or divisor_interval != (denominator[-1], denominator[-1]):
+                raise Unproved("division requires an exact nonzero literal denominator")
+            divisor = denominator[-1]
+            interval = None if numerator[1] is None else tuple(sorted(x / divisor for x in numerator[1]))
+            result = (tuple(x / divisor for x in numerator[0]), bound(interval))
         elif name == "math.fma":
             a, b, c = (evaluate(v) for v in child.operands)
             result = add(mul(a, b), c)  # Conservative two-round interval encloses fused arithmetic too.
@@ -269,6 +318,7 @@ def prove_affine(op, *, conditional=False):
         status="conditional" if conditional else "proven",
         source_sha256=hashlib.sha256(str(op).encode()).hexdigest(),
         domains=domains,
+        finite_interval=None if interval is None else [str(v) for v in interval],
         coefficients=[str(v) for v in polynomial[:-1]],
         constant=str(polynomial[-1]),
         dead_classification_selects=removed[0],
