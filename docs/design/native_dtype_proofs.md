@@ -70,6 +70,9 @@ installed headers, and verifies the vector loop's boundary/update form. Declared
 shape and stride metadata then select its scalar/vector readout. Dense physical
 orders, rank-one strides and fully broadcast layouts below that grain have closed
 profiles; unknown compound layouts stay host. No tensor payload is inspected.
+Binary64 arithmetic and conversions are outside these certificates. In particular,
+a binary64-to-reduced conversion must not silently assume the CPU omits an
+intermediate binary32 rounding. Existing bit-preserving storage proofs are separate.
 Uniform source-literal expressions may fold with exact rational arithmetic and
 RNE at each original typed boundary, including zero signs. This is ordinary
 compile-time constant propagation, independent of runtime input values.
@@ -133,6 +136,12 @@ divisors or trapping literal domains require a declared exception/range contract
 they stay host. The signed-byte promoted case is representable in its wider
 compute type and wraps only at the final storage boundary. Floating true division
 retains explicit integer-to-float promotion and every following typed RNE.
+For a captured floor quotient, the certificate separately checks the singleton
+`INT_MIN/-1` overflow class at each native width. Where eager returns wrapped
+`INT_MIN`, the widened exact quotient followed by storage wrap covers that class;
+the universal quotient argument covers all remaining numerators. This exception
+does not license a truncating source that traps. A missing or changed exception
+certificate refuses the whole domain.
 
 ## Complex component composition
 

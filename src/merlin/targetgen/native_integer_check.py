@@ -12,7 +12,7 @@ def generate():
     # Check trapping domains in isolated processes. A CPU SIGFPE is evidence
     # for retaining the entire value-producing program on host, never a value.
     exceptions = []
-    for width in (8, 32, 64):
+    for width in (8, 16, 32, 64):
         for mode in ("trunc", "floor", None):
             for divisor in (0, -1):
                 code = f"""import torch,json,resource

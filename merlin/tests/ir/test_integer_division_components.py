@@ -32,3 +32,21 @@ def test_universal_wide_interval_and_extremes(width):
 def test_zero_divisor_cannot_be_proved():
     with pytest.raises(ValueError):
         reciprocal(64, 0)
+
+
+@pytest.mark.parametrize("width", [8, 16, 32, 64])
+def test_floor_overflow_requires_the_exact_cpu_exception_certificate(width):
+    from merlin.llvmlower.integer_division_components import cpu_floor_wrap
+
+    expected = b"".join((v % (1 << width)).to_bytes(width // 8, "little") for v in (-(1 << (width - 1)), 0, -1))
+    row = dict(
+        width=width,
+        mode="floor",
+        divisor=-1,
+        observation=dict(status="value", dtype="torch.int" + str(width), bits=list(expected)),
+    )
+    proof = {"integer_checks": {"exceptions": [row]}}
+    assert cpu_floor_wrap(proof, width)
+    row["observation"]["bits"][0] ^= 1
+    assert not cpu_floor_wrap(proof, width)
+    assert not cpu_floor_wrap(proof, 1)

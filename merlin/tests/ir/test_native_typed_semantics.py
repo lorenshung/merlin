@@ -210,3 +210,35 @@ def test_fused_runtime_product_cannot_bypass_native_unit_restriction(certificate
     fused = math.FmaOp(added.operands[0], added.operands[1], added.operands[0])
     Rewriter.replace_op(added, fused)
     assert prove(module)["code"] == "native_parallel_runtime_product_construction"
+
+
+def test_uncertified_binary64_narrowing_cannot_fold_away_its_obligation(certificate):
+    from merlin.llvmlower.uniform_numeric_literals import fold_uniform_numeric_literals
+
+    # Above a half midpoint, but binary32 first rounds it onto that midpoint.
+    module = parse_mlir_text("""module {func.func @forward()->tensor<1xf16>{
+      %a=arith.constant 1.0004882812509095:f64
+      %b=arith.truncf %a:f64 to f16
+      %r=tensor.splat %b:tensor<1xf16>
+      return %r:tensor<1xf16>
+    }}""")
+    assert fold_uniform_numeric_literals(module) == 0
+    assert prove(module)["code"] == "native_conversion_form_unproved"
+
+
+def test_conversion_prelude_cannot_place_a_numerical_comparison(certificate):
+    module = parse_mlir_text("""module {
+      func.func @forward(%x:tensor<4xf16>,%y:tensor<4xf16>)->tensor<4xf32>{
+        %e=tensor.empty():tensor<4xf32>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
+          iterator_types=["parallel"]} ins(%x,%y:tensor<4xf16>,tensor<4xf16>) outs(%e:tensor<4xf32>){
+        ^bb0(%a:f16,%b:f16,%unused:f32):
+          %af=arith.extf %a:f16 to f32
+          %bf=arith.extf %b:f16 to f32
+          %c=arith.cmpf olt,%af,%bf:f32
+          %v=arith.select %c,%af,%bf:f32
+          linalg.yield %v:f32
+        }->tensor<4xf32>
+        return %r:tensor<4xf32>
+    }}""")
+    assert prove(module)["code"] == "native_float_predicate_family_unproved"

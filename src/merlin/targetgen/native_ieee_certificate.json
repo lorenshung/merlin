@@ -170,7 +170,7 @@
       "status": "proven"
     }
   ],
-  "content_sha256": "24b6c66767a7db9e296be65b911e216a8d3785810ad768ce70b352c08b2e0d0b",
+  "content_sha256": "74721019a8e05c64bcd7d0436147d46a970741b79ade03ef4d1e849dde1571a2",
   "conversions": [
     {
       "count": 65536,
@@ -494,6 +494,106 @@
           "status": "error",
           "type": "RuntimeError"
         },
+        "width": 16
+      },
+      {
+        "divisor": -1,
+        "mode": "trunc",
+        "observation": {
+          "bits": [
+            0,
+            128,
+            0,
+            0,
+            255,
+            255
+          ],
+          "dtype": "torch.int16",
+          "status": "value"
+        },
+        "width": 16
+      },
+      {
+        "divisor": 0,
+        "mode": "floor",
+        "observation": {
+          "message": "ZeroDivisionError",
+          "status": "error",
+          "type": "RuntimeError"
+        },
+        "width": 16
+      },
+      {
+        "divisor": -1,
+        "mode": "floor",
+        "observation": {
+          "bits": [
+            0,
+            128,
+            0,
+            0,
+            255,
+            255
+          ],
+          "dtype": "torch.int16",
+          "status": "value"
+        },
+        "width": 16
+      },
+      {
+        "divisor": 0,
+        "mode": null,
+        "observation": {
+          "bits": [
+            0,
+            0,
+            128,
+            255,
+            0,
+            0,
+            192,
+            255,
+            0,
+            0,
+            128,
+            127
+          ],
+          "dtype": "torch.float32",
+          "status": "value"
+        },
+        "width": 16
+      },
+      {
+        "divisor": -1,
+        "mode": null,
+        "observation": {
+          "bits": [
+            0,
+            0,
+            0,
+            71,
+            0,
+            0,
+            0,
+            128,
+            0,
+            0,
+            128,
+            191
+          ],
+          "dtype": "torch.float32",
+          "status": "value"
+        },
+        "width": 16
+      },
+      {
+        "divisor": 0,
+        "mode": "trunc",
+        "observation": {
+          "message": "ZeroDivisionError",
+          "status": "error",
+          "type": "RuntimeError"
+        },
         "width": 32
       },
       {
@@ -799,17 +899,17 @@
     "src/merlin/llvmlower/ieee_conversion_components.py": "326bb1d28d1175b00cddb2adf4692d030780f74a34a3a921ee17c7ff5145df45",
     "src/merlin/llvmlower/ieee_dyadic_ir.py": "0e22b85571da64945e4944f0d269cb9bd66d88d9b6eac8836f233588568596fe",
     "src/merlin/llvmlower/ieee_pointwise.py": "e0ab590581e6588c5a63ef28096927737f808d33ebb236d490c7010156542222",
-    "src/merlin/llvmlower/integer_division_components.py": "9a0827aa7a4375f1eae91730657ce92e9705028e856ebddc0960550b1c810554",
+    "src/merlin/llvmlower/integer_division_components.py": "9572fe010e847b45b832959648a2cf680c5b109aaa49da4e39b069bf2643d0c2",
     "src/merlin/llvmlower/native_cpu_layout.py": "9cd355b2a5857e81d5737e271fcf8cf769e6f08268bb4a0cc21e26d74aea0ea1",
     "src/merlin/llvmlower/native_sign_components.py": "35edf78459a56a185e890655f6b8e546cb4eb371b2039faebb1edd2f3fc44e29",
     "src/merlin/llvmlower/significand_products.py": "f6c294c049d782ce6e4d3a02275a83d71140d39110ddf36da608b666f84a9b00",
-    "src/merlin/llvmlower/uniform_numeric_literals.py": "15919dca065eb5162579c8360dd02cb79424857ac6296ea5a8589e6dbc88612e",
+    "src/merlin/llvmlower/uniform_numeric_literals.py": "24c7dedc69e74a3934c404920f893bdc941a5d55a57150a67c30ba34e20d83e8",
     "src/merlin/targetgen/native_cpu_loop_check.py": "f1c28bf067709f12a163beb88dc2207382085f30b4dfe0ea3c37275a80b9732f",
     "src/merlin/targetgen/native_ieee_arithmetic_check.py": "928d3540ea86ba2684f2efb63b7758f14f15e0ab7416d20226c0ab7e937aed95",
     "src/merlin/targetgen/native_ieee_certificate.py": "f8d5eabf6e5f8fc6338cfafac667ea4f0fcc2ee36fed80f84b90ee19c9e09776",
     "src/merlin/targetgen/native_ieee_ir_check.py": "5198386ee7a95f25644c4fea4fc027708017058c03c34b9f9dc10138c5b774d9",
-    "src/merlin/targetgen/native_integer_check.py": "a19d230e4c8c3213d05d54ae52da38c0ddf99151b28a6913ebbae29d4dfcbc6c",
-    "src/merlin/targetgen/native_typed_semantics.py": "14a676f08109568b95cbe2e62e601c42df24bcdb004a5640f1fbd1e664887dd8"
+    "src/merlin/targetgen/native_integer_check.py": "3bfa93afa0672cd323c74ea6362bbadb604a6778f9445925ae6f1ccd30152f76",
+    "src/merlin/targetgen/native_typed_semantics.py": "305a16198881a5f010f91c705ddb9b8615e8b44d926f7e3af55c4c52e0994a7e"
   },
   "unary": [
     {

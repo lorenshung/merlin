@@ -34,7 +34,23 @@ def reciprocal(width, divisor):
     return multiplier, shift
 
 
-def rewrite_integer_divisions(module):
+def cpu_floor_wrap(proof, width):
+    """Check the complete signed-overflow exception class, independent of inputs."""
+    if width not in {8, 16, 32, 64}:
+        return False
+    expected = b"".join((value % (1 << width)).to_bytes(width // 8, "little") for value in (-(1 << (width - 1)), 0, -1))
+    return any(
+        row.get("width") == width
+        and row.get("mode") == "floor"
+        and row.get("divisor") == -1
+        and row.get("observation", {}).get("status") == "value"
+        and row["observation"].get("dtype") == "torch.int" + str(width)
+        and row["observation"].get("bits") == list(expected)
+        for row in proof.get("integer_checks", {}).get("exceptions", [])
+    )
+
+
+def rewrite_integer_divisions(module, *, wrapping_floor_widths=()):
     from xdsl.dialects import arith, tensor
     from xdsl.dialects.builtin import ArrayAttr, IntegerAttr, IntegerType, TensorType
     from xdsl.dialects.linalg import ops as L
@@ -55,7 +71,8 @@ def rewrite_integer_divisions(module):
         if not isinstance(dtype, IntegerType) or dtype.width.data not in {8, 16, 32, 64}:
             continue
         divisor = literal_divisor(scalar)
-        if divisor is None or not divisor or (divisor == -1 and dtype.width.data >= 32):
+        wrapping_floor = scalar.name == "arith.floordivsi" and dtype.width.data in wrapping_floor_widths
+        if divisor is None or not divisor or (divisor == -1 and dtype.width.data >= 32 and not wrapping_floor):
             continue
         if any(it.data.value != "parallel" for it in op.get_iterator_types()):
             continue

@@ -266,7 +266,9 @@ def prepare_integer_components(
         literal_folds += fold_uniform_numeric_literals(module)
         from merlin.llvmlower.integer_division_components import rewrite_integer_divisions
 
-        added, divisions = rewrite_integer_divisions(module)
+        added, divisions = rewrite_integer_divisions(
+            module, wrapping_floor_widths=semantics.get("integer_floor_wrap_widths", ())
+        )
         known_bounds.update(added)
         typed_proofs.extend(divisions)
         added, conversions = rewrite_ieee_conversions(module, copy_profiles=copy_profiles)

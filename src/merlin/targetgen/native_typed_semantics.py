@@ -76,8 +76,26 @@ def prove(module):
     divisions = {"arith.divsi", "arith.floordivsi", "arith.remsi", "arith.divui", "arith.remui"}
     primitives = set()
     reduced_profile = False
+    integer_floor_wrap_widths = set()
     functions = [op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward"]
     storage = {str(arg.type.element_type) for function in functions for arg in function.body.block.args}
+    if storage & {"f64", "complex<f64>"}:
+        return dict(
+            status="refused",
+            code="native_binary64_arithmetic_form_unproved",
+            reason=(
+                "binary64 arithmetic/conversion forms are outside this CPU certificate; "
+                "storage-only proofs remain separate"
+            ),
+        )
+    for function in functions:
+        for value in function.body.block.last_op.operands:
+            if str(getattr(value.type, "element_type", "")) == "i1" and value not in function.body.block.args:
+                return dict(
+                    status="refused",
+                    code="native_numeric_predicate_family_unproved",
+                    reason="a conversion prelude cannot place an unproved numerical Boolean readout",
+                )
     for check in proof.get("arithmetic_checks", []):
         if check["form"]["dtype"] in storage and check["status"] != "proven":
             return dict(
@@ -202,6 +220,16 @@ def prove(module):
         return bool(states) and protected(value)
 
     for op in module.walk():
+        if op.name == "arith.cmpf":
+            from merlin.targetgen.native_dtype_domain import _word_generic
+
+            nan_classification = op.operands[0] is op.operands[1] and op.predicate.value.data in {7, 14}
+            if not nan_classification and not _word_generic(op):
+                return dict(
+                    status="refused",
+                    code="native_float_predicate_family_unproved",
+                    reason="floating predicate is outside NaN readout and the closed device word-selection family",
+                )
         if op.name == "linalg.generic" and any(it.data.value != "parallel" for it in op.get_iterator_types()):
             return dict(
                 status="refused",
@@ -220,14 +248,18 @@ def prove(module):
         if op.name in divisions:
             if str(op.results[0].type) == "index":
                 continue
-            from merlin.llvmlower.integer_division_components import literal_divisor
+            from merlin.llvmlower.integer_division_components import cpu_floor_wrap, literal_divisor
 
             divisor = literal_divisor(op)
-            if divisor is None or divisor == 0 or (divisor == -1 and op.results[0].type.width.data >= 32):
+            width = op.results[0].type.width.data
+            wrapping_floor = op.name == "arith.floordivsi" and cpu_floor_wrap(proof, width)
+            if divisor == -1 and wrapping_floor:
+                integer_floor_wrap_widths.add(width)
+            if divisor is None or divisor == 0 or (divisor == -1 and width >= 32 and not wrapping_floor):
                 return dict(
                     status="refused",
                     code="native_integer_division_exception_domain",
-                    reason="full dtype domain includes divisor-zero or INT_MIN/-1 CPU exception; no value constraint",
+                    reason="full dtype domain includes divisor-zero or INT_MIN/-1 without a defined CPU value theorem",
                 )
             if divisor == -1 and op.results[0].type.width.data == 8:
                 rows = proof.get("integer_checks", {}).get("quotients", [])
@@ -298,8 +330,12 @@ def prove(module):
                 if "bf16" in storage:
                     reduced_profile = True
         if op.name in {"arith.extf", "arith.truncf"}:
-            if any(str(v.type) not in {"f16", "bf16", "f32", "f64"} for v in (*op.operands, *op.results)):
-                return dict(status="refused", code="native_conversion_form_unproved", reason="unknown floating format")
+            if any(str(v.type) not in {"f16", "bf16", "f32"} for v in (*op.operands, *op.results)):
+                return dict(
+                    status="refused",
+                    code="native_conversion_form_unproved",
+                    reason="floating conversion form is outside the checked reduced/binary32 storage domains",
+                )
     return dict(
         status="proven",
         method="closed_typed_pointwise_IEEE_composition_v1",
@@ -311,6 +347,7 @@ def prove(module):
         primitives=sorted(primitives),
         ieee_scope="explicit_source_NaN_and_index_selectors_preserved",
         integer_arithmetic="modular; certified literal quotient correction; typed promotion retained",
+        integer_floor_wrap_widths=sorted(integer_floor_wrap_widths),
         cpu_reduced_storage_profile_required=reduced_profile,
         cpu_loop_profile=proof["loop_profile"],
     )

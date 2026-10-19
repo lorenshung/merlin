@@ -72,6 +72,8 @@ def fold_uniform_numeric_literals(module):
         negative = [math.copysign(1.0, v) < 0 for v in operands]
         negative_zero = False
         if name in {"arith.extf", "arith.truncf", "arith.sitofp", "arith.uitofp"}:
+            if str(primitive.operands[0].type) == "f64":
+                return None
             result = rational[0]
             negative_zero = negative[0] and not result
             if name == "arith.uitofp":
@@ -93,7 +95,7 @@ def fold_uniform_numeric_literals(module):
         else:
             return None
         token = str(primitive.results[0].type)
-        if token not in FORMAT:
+        if token not in {"f16", "bf16", "f32"}:
             return None
         try:
             rounded = round_binary(
