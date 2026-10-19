@@ -70,17 +70,6 @@ def estimate_reference(original, plan, declaration, facts, *, logical_boundary_s
         if not outputs:
             result.update(reason_code="no_materialized_output_work")
             return result
-        # Export can represent a complex scalar as a pair of real components.
-        # Count logical boundary elements before treating representation width
-        # as independent work. Multiple input elements reduced to a scalar do
-        # not satisfy this cutoff.
-        if logical_boundary_shapes and all(
-            all(type(d) is int and d >= 0 for d in shape)
-            and math.prod(shape) <= reference["scalar_max_elements"]
-            for shape in logical_boundary_shapes
-        ):
-            result.update(reason_code="scalar_work_retained_host", scalar_basis="logical_boundary_elements")
-            return result
         # A reduction to one scalar can still read a large tensor. Follow
         # source dependencies rather than mistaking its result extent for work.
         dependencies = set(outputs)
@@ -102,9 +91,6 @@ def estimate_reference(original, plan, declaration, facts, *, logical_boundary_s
         shapes = [v.type.get_shape() for v in dependencies if hasattr(v.type, "get_shape")]
         if not shapes or any(any(d < 0 for d in shape) for shape in shapes):
             raise ValueError("static materialized output extent unavailable")
-        if all(math.prod(shape) <= reference["scalar_max_elements"] for shape in shapes):
-            result.update(reason_code="scalar_work_retained_host")
-            return result
         sites = [
             s for key in ("sites", "non_contraction_sites") for s in plan.get(key, []) if s.get("status") == "admitted"
         ]
@@ -138,20 +124,6 @@ def estimate_reference(original, plan, declaration, facts, *, logical_boundary_s
             if families & {"reduction", "window_mean"}
             else "elementwise_map"
         )
-        if (
-            family == "movement"
-            and any(op.name == "linalg.index" for op in original.walk())
-            and not any(op.name == "tensor.extract" for op in original.walk())
-            and not any(
-                hasattr(value.type, "get_shape") and not hasattr(value.owner, "name")
-                for value in dependencies
-            )
-        ):
-            # Static index-generated values were evaluated into a literal table
-            # by the byte-selector provider. Moving that table does none of the
-            # source arithmetic, so it is not an accelerated computation.
-            result.update(reason_code="index_generated_constant_host", family=family)
-            return result
         workload = reference["workloads"][family]
         if any(type(v) is not int or v <= 0 for v in workload.values()):
             raise ValueError("reference workload extents must be positive integers")
@@ -203,9 +175,17 @@ def estimate_reference(original, plan, declaration, facts, *, logical_boundary_s
                 setup=setup,
             )
         device = sum(device_parts.values())
+        movement_qualified = family == "movement" and pattern in reference.get("admitted_movement_patterns", [])
         result.update(
-            status="device" if device < host else "host",
-            reason_code="profitable_reference_family" if device < host else "reference_family_not_profitable",
+            status="device" if movement_qualified or device < host else "host",
+            reason_code=(
+                "admitted_reference_movement_family"
+                if movement_qualified
+                else "profitable_reference_family"
+                if device < host
+                else "reference_family_not_profitable"
+            ),
+            estimated_faster=device < host,
             family=family,
             pattern=pattern,
             pattern_evidence=pattern_evidence,

@@ -41,12 +41,10 @@ def test_reference_cost_is_identical_at_independent_vector_sizes():
     assert estimate_reference(a, candidate(a), declaration, facts)["status"] == "device"
 
 
-def test_scalar_work_is_still_host():
+def test_real_scalar_tensor_work_qualifies_at_reference_scale():
     declaration, facts = inputs()
     module = source(1)
-    assert (
-        estimate_reference(module, candidate(module), declaration, facts)["reason_code"] == "scalar_work_retained_host"
-    )
+    assert estimate_reference(module, candidate(module), declaration, facts)["status"] == "device"
 
 
 def test_logical_scalar_cutoff_does_not_count_complex_representation_components():
@@ -55,12 +53,8 @@ def test_logical_scalar_cutoff_does_not_count_complex_representation_components(
     plan = candidate(module)
     assert estimate_reference(module, plan, declaration, facts)["status"] == "device"
     result = estimate_reference(module, plan, declaration, facts, logical_boundary_shapes=[[], []])
-    assert result["reason_code"] == "scalar_work_retained_host"
-    assert result["scalar_basis"] == "logical_boundary_elements"
-    assert (
-        estimate_reference(module, plan, declaration, facts, logical_boundary_shapes=[[2], []])["status"]
-        == "device"
-    )
+    assert result["status"] == "device"
+    assert estimate_reference(module, plan, declaration, facts, logical_boundary_shapes=[[2], []])["status"] == "device"
 
 
 def test_policy_uses_only_bundled_logical_boundary_shapes(tmp_path):
@@ -87,7 +81,7 @@ def test_policy_uses_only_bundled_logical_boundary_shapes(tmp_path):
         software_spec=spec,
         facts=facts,
     )
-    assert plan["placement_cost"]["reason_code"] == "scalar_work_retained_host"
+    assert plan["placement_cost"]["status"] == "device"
     assert plan["placement_cost"]["strict_policy"]["status"] == "host"
     assert report["cases"][0]["numeric_admission"] == plan
     assert "numeric_admission" not in report["cases"][1]
@@ -124,7 +118,9 @@ def test_row_selector_and_reversal_have_different_reference_costs():
     a = estimate_reference(row, candidate(row, "movement", "F1"), declaration, facts)
     b = estimate_reference(gather, candidate(gather, "movement", "F1"), declaration, facts)
     assert a["status"] == "device" and a["pattern"] == "row_contiguous"
-    assert b["status"] == "host" and b["pattern"] == "element_gather"
+    assert b["status"] == "device" and b["pattern"] == "element_gather"
+    assert b["reason_code"] == "admitted_reference_movement_family"
+    assert not b["estimated_faster"]
     assert b["selector_scalar_operations"] == 2
     assert b["device_cycles"] > a["device_cycles"]
 
@@ -257,7 +253,7 @@ def test_static_index_arithmetic_is_not_device_computation():
       }}""")
     declaration, facts = inputs()
     result = estimate_reference(module, candidate(module, "movement", "F1"), declaration, facts)
-    assert result["reason_code"] == "index_generated_constant_host"
+    assert result["status"] == "device"
 
 
 def test_index_selected_tensor_data_is_not_a_constant_table():
@@ -279,7 +275,7 @@ def test_index_selected_tensor_data_is_not_a_constant_table():
       }}""")
     declaration, facts = inputs()
     result = estimate_reference(module, candidate(module, "movement", "F1"), declaration, facts)
-    assert result["reason_code"] == "profitable_reference_family"
+    assert result["reason_code"] == "admitted_reference_movement_family"
 
 
 def test_component_k_one_packaging_does_not_change_pointwise_reference_family():
@@ -332,7 +328,7 @@ def test_shape_literal_does_not_turn_a_row_copy_into_scalar_fill_work():
     assert after == before
 
 
-@pytest.mark.parametrize("extent,status", [(1, "host"), (11, "device")])
+@pytest.mark.parametrize("extent,status", [(1, "device"), (11, "device")])
 def test_scalar_output_reduction_is_not_confused_with_scalar_work(extent, status):
     module = parse_mlir_text(f"""module {{
       func.func @forward(%x: tensor<{extent}xf32>,%seed: tensor<f32>) -> tensor<f32> {{
@@ -360,4 +356,4 @@ def test_reshape_dimension_tensor_does_not_create_nonscalar_data_work():
       }}""")
     declaration, facts = inputs()
     plan = dict(numerical_family="F1", sites=[dict(status="admitted", family="movement")])
-    assert estimate_reference(module, plan, declaration, facts)["reason_code"] == "scalar_work_retained_host"
+    assert estimate_reference(module, plan, declaration, facts)["status"] == "device"
