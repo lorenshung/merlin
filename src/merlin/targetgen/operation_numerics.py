@@ -154,7 +154,8 @@ def operation_numerical_contracts(entry: dict, software_spec: dict | None, host_
             else:
                 unknowns.append("model.engine")
             unknowns.extend(sorted(required - set(semantics)))
-            if spec.get("status") != "reviewed":
+            review = review_record(spec, default="unreviewed")
+            if not review["operator_accepted"]:
                 unknowns.append("software_spec_review")
             decision = {
                 "status": "unknown" if unknowns else "resolved",
@@ -162,14 +163,14 @@ def operation_numerical_contracts(entry: dict, software_spec: dict | None, host_
                 "semantics": semantics,
                 "basis": "selected contraction numerical semantics",
                 "qualification": "accepted declaration, not measured numerical conformance",
-        **review,
+                **review,
             }
         else:
             decision = _explicit_contract(None)
         accelerator.append({"declaration": declaration["id"], **decision})
     host = []
     for profile in entry["host_admission"].get("profiles") or []:
-        if profile["status"] != "admitted" or not profile.get("reviewed"):
+        if profile["status"] != "admitted" or not profile.get("operator_accepted", profile.get("reviewed")):
             continue
         selected = (host_capabilities or {}).get(profile["profile"]) or {}
         document = selected.get("capability_spec") or {}

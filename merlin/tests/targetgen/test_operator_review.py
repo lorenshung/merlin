@@ -197,3 +197,17 @@ def test_missing_required_review_cannot_be_accepted_implicitly(monkeypatch, miss
         row.pop("status")
         row["admission_basis"] = "declared_unchecked"
     assert decision(spec)["status"] == "unknown"
+
+
+def test_numerical_report_keeps_accepted_pending_host_claims(monkeypatch):
+    from merlin.targetgen.operation_numerics import operation_numerical_contracts
+
+    monkeypatch.setenv(ACCEPT_ENV, "1")
+    claim = dict(status=PENDING, semantics=dict(arithmetic="exact_integer"), evidence=dict(basis="authored"))
+    entry = dict(observed_signature={}, software_admissions=[], host_admission=dict(profiles=[
+        dict(profile="native", status="admitted", reviewed=False, operator_accepted=True,
+             decisions=[dict(status="admitted", declaration="host_integer")])]))
+    selected = {"native": dict(capability_spec=dict(operations=[dict(id="host_integer", numerical_contract=claim)]))}
+    result = operation_numerical_contracts(entry, {}, selected)
+    assert result["host"]["status"] == "resolved"
+    assert result["host"]["declarations"][0]["review_status"] == PENDING
