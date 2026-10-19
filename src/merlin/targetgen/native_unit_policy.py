@@ -54,7 +54,8 @@ def construction_evidence(module):
         if op.name in {"math.floor", "math.ceil", "math.trunc", "math.round", "math.roundeven"}:
             if not literal(op.operands[0]):
                 evidence.append(dict(ordinal=ordinal, operation=op.name, reason="nonlinear_rounding_construction"))
-        if op.name not in {"arith.mulf", "arith.muli"}:
+        boolean_product = op.name == "arith.andi" and str(op.results[0].type) == "i1"
+        if op.name not in {"arith.mulf", "arith.muli"} and not boolean_product:
             continue
         if any(str(value.type) == "index" for value in op.operands) or any(literal(v) for v in op.operands):
             continue
