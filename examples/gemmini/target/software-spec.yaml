@@ -17,7 +17,7 @@ placement_cost_model:
           payload_bytes: 16
           cycles_numerator: 7176
           cycles_denominator: 256
-          scope: paired mvin/mvout plus loop issue and final fence; cold first pass; not
+          scope: paired mvin/mvout plus loop issue and final fence; first measured pass after initialization; cache state unverified; not
             physical byte-counter readings
           measurements:
           - rows: 16
@@ -88,7 +88,7 @@ placement_cost_model:
           payload_bytes: 4
           cycles_numerator: 7257
           cycles_denominator: 256
-          scope: paired mvin/mvout plus loop issue and final fence; cold first pass; not
+          scope: paired mvin/mvout plus loop issue and final fence; first measured pass after initialization; cache state unverified; not
             physical byte-counter readings
           measurements:
           - rows: 16
