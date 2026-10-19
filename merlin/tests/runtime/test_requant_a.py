@@ -1,6 +1,7 @@
 """Complete monotone-boundary proofs, exact ties, overflow and contract parity."""
 
 import importlib.util
+import os
 import random
 from fractions import Fraction as F
 from pathlib import Path
@@ -70,7 +71,10 @@ def test_hash_table_and_rounding_corruption_refused():
 
 
 def test_provider_contract_round_trip():
-    path = Path("/scratch/loren/core-aten-ref/gemmini-mlir-wtE/mlir_oot/core_aten/requant_a.py")
+    selected = os.environ.get("MERLIN_REQUANT_A_PROVIDER")
+    if not selected:
+        pytest.skip("no external requantization provider selected")
+    path = Path(selected)
     if not path.is_file():
         pytest.skip("external provider prototype unavailable")
     spec = importlib.util.spec_from_file_location("provider_requant_a", path)
