@@ -83,7 +83,16 @@ def unlowered_data_reductions(module, limb_attribute):
 
 
 def prepare_integer_components(
-    directory, report, selection, provider, package, module, *, limb_attribute, native_f32=False
+    directory,
+    report,
+    selection,
+    provider,
+    package,
+    module,
+    *,
+    limb_attribute,
+    native_f32=False,
+    construction_observer=None,
 ):
     import numpy as np
 
@@ -270,17 +279,25 @@ def prepare_integer_components(
                 + "\n"
             )
             return None
+
+    def observe(stage):
+        if construction_observer is not None:
+            construction_observer(module, stage)
+
     known_bounds, boolean_count = rewrite_boolean_components(module)
+    observe("boolean_components")
     from merlin.llvmlower.integer_float_boundaries import rewrite_integer_float_boundaries
 
     conversion_grids = {}
     conversion_bounds, conversion_count = rewrite_integer_float_boundaries(
         module, bounds, output_grids=conversion_grids
     )
+    observe("integer_float_boundary_prelude")
     known_bounds.update(conversion_bounds)
     from merlin.llvmlower.ieee_zero_division import rewrite_zero_division
 
     zero_division_count = rewrite_zero_division(module) if ieee_enabled else 0
+    observe("zero_division_prelude")
     if has_literal_zero_divisor(module):
         (directory / "exact-dtype-refusal.json").write_text(
             json.dumps(
@@ -311,6 +328,7 @@ def prepare_integer_components(
         sign_bounds, sign_proofs = rewrite_native_sign_components(
             module, canonical_bf16_nan=ieee_enabled, defer_floating_negation=mixed_finite_arithmetic
         )
+        observe("native_sign_prelude")
         known_bounds.update(sign_bounds)
     floating_proofs = []
     zero_limbs = {}
@@ -371,6 +389,7 @@ def prepare_integer_components(
                 json.dumps(dict(family="F2", code="ieee_source_policy_unproved", reason=str(exc))) + "\n"
             )
             return None
+        observe("floating_components")
         known_bounds.update(floating_bounds)
         if not floating_proofs and not boolean_count:
             if conversion_count:
@@ -482,6 +501,7 @@ def prepare_integer_components(
             json.dumps(dict(family="F2", reason=reason, provider_proof=proof)) + "\n"
         )
         return None
+    observe("integer_components")
     sites = []
     for ordinal, op in enumerate(module.walk()):
         if limb_attribute not in op.attributes:
@@ -567,7 +587,7 @@ def prepare_integer_components(
             if ieee_pointwise and any("ieee_dependence_proof" in p for p in floating_proofs)
             else None
         ),
-        boolean_semantics={"source": "closed_boolean_or_and", "integer_components": boolean_count},
+        boolean_semantics={"source": "closed_boolean_and", "integer_components": boolean_count},
         integer_float_boundaries={"count": conversion_count, "rounding": "source_sitofp_before_host_epilogue"},
         input_bound_proof=dict(
             method="complete_immutable_input_payload",

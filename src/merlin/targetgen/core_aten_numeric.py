@@ -163,6 +163,7 @@ def _prepare_spec_int8(
     host_capabilities: Path,
     provider=None,
     package=None,
+    construction_observer=None,
 ):
     """Emit admitted sites and preserve independently refused source contractions."""
     import hashlib
@@ -197,6 +198,8 @@ def _prepare_spec_int8(
     prepare = getattr(provider, "prepare_bundle", None)
     preparation = prepare(directory, target=target, facts=facts) if prepare is not None else {}
     module = parse_mlir_file(directory / "model.mlir")
+    if construction_observer is not None:
+        construction_observer(module, "provider_prelude")
     from merlin.kernels.shapes import observe_contractions
     from merlin.targetgen.core_aten_exact_dtype import prepare_bitwise
 
@@ -208,7 +211,14 @@ def _prepare_spec_int8(
     from merlin.targetgen.core_aten_components import prepare_integer_components
 
     components = prepare_integer_components(
-        directory, report, selection, provider, package, module, limb_attribute=f"{target}.limb"
+        directory,
+        report,
+        selection,
+        provider,
+        package,
+        module,
+        limb_attribute=f"{target}.limb",
+        construction_observer=construction_observer,
     )
     if components is not None:
         return components
@@ -765,6 +775,7 @@ def _prepare_spec_int8(
                 parse_mlir_file(directory / "model.mlir"),
                 limb_attribute=f"{target}.limb",
                 native_f32=True,
+                construction_observer=construction_observer,
             )
             if components is not None:
                 components["quantization_fallback"] = dict(

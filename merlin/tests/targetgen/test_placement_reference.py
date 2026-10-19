@@ -66,7 +66,14 @@ def test_policy_uses_only_bundled_logical_boundary_shapes(tmp_path):
     module = source(2)
     (tmp_path / "model.mlir").write_text(str(module))
     spec = tmp_path / "software.yaml"
-    spec.write_text(yaml.safe_dump(dict(placement_cost_model=declaration)))
+    spec.write_text(
+        yaml.safe_dump(
+            dict(
+                placement_cost_model=declaration,
+                numerical_semantics=dict(native_unit_contract=dict(excluded_constructions=[])),
+            )
+        )
+    )
     scalar = dict(dtype="complex<f32>", shape=[])
     report = dict(
         cases=[
@@ -162,7 +169,14 @@ def test_selectable_policy_records_both_verdicts(tmp_path, monkeypatch, policy):
     module = source(6)
     (tmp_path / "model.mlir").write_text(str(module))
     spec = tmp_path / "software.yaml"
-    spec.write_text(yaml.safe_dump(dict(placement_cost_model=declaration)))
+    spec.write_text(
+        yaml.safe_dump(
+            dict(
+                placement_cost_model=declaration,
+                numerical_semantics=dict(native_unit_contract=dict(excluded_constructions=[])),
+            )
+        )
+    )
     report = dict(cases=[dict(case_id="independent", status="bundled")])
     monkeypatch.setenv("MERLIN_PLACEMENT_POLICY", policy)
 
@@ -187,7 +201,14 @@ def test_no_numeric_candidate_has_explicit_not_applicable_strict_evidence(tmp_pa
     declaration, facts = inputs()
     (tmp_path / "model.mlir").write_text(str(source(6)))
     spec = tmp_path / "software.yaml"
-    spec.write_text(yaml.safe_dump(dict(placement_cost_model=declaration)))
+    spec.write_text(
+        yaml.safe_dump(
+            dict(
+                placement_cost_model=declaration,
+                numerical_semantics=dict(native_unit_contract=dict(excluded_constructions=[])),
+            )
+        )
+    )
     report = dict(cases=[dict(status="bundled")])
     plan = prepare(
         tmp_path,
@@ -209,7 +230,14 @@ def test_unknown_policy_is_not_silently_replaced(tmp_path, monkeypatch):
 
     declaration, facts = inputs()
     spec = tmp_path / "software.yaml"
-    spec.write_text(yaml.safe_dump(dict(placement_cost_model=declaration)))
+    spec.write_text(
+        yaml.safe_dump(
+            dict(
+                placement_cost_model=declaration,
+                numerical_semantics=dict(native_unit_contract=dict(excluded_constructions=[])),
+            )
+        )
+    )
     monkeypatch.setenv("MERLIN_PLACEMENT_POLICY", "undefined")
     with pytest.raises(ValueError, match="unknown placement profitability policy"):
         prepare(
@@ -299,7 +327,14 @@ def test_policy_evidence_is_attributed_only_to_the_bundled_case(tmp_path, admitt
     module = source(7)
     (tmp_path / "model.mlir").write_text(str(module))
     spec = tmp_path / "software.yaml"
-    spec.write_text(yaml.safe_dump(dict(placement_cost_model=declaration)))
+    spec.write_text(
+        yaml.safe_dump(
+            dict(
+                placement_cost_model=declaration,
+                numerical_semantics=dict(native_unit_contract=dict(excluded_constructions=[])),
+            )
+        )
+    )
     report = dict(cases=[dict(status="bundled"), dict(status="not_in_shard", case_id="unselected")])
     inactive = report["cases"][1]
 
@@ -384,7 +419,14 @@ def test_descriptor_fold_retains_host_while_real_scalar_tensor_work_qualifies(tm
     )
     (capture / "capture.json").write_text(json.dumps(dict(capture_meta=dict(static_metadata_specialization=proof))))
     specification = tmp_path / "spec.yaml"
-    specification.write_text(yaml.safe_dump(dict(placement_cost_model=declaration)))
+    specification.write_text(
+        yaml.safe_dump(
+            dict(
+                placement_cost_model=declaration,
+                numerical_semantics=dict(native_unit_contract=dict(excluded_constructions=[])),
+            )
+        )
+    )
     report = dict(cases=[dict(status="bundled", case=case, capture_directory=str(capture))])
     result = prepare(
         tmp_path,
@@ -417,3 +459,64 @@ def test_scalar_movement_result_has_no_innermost_output_axis():
         dict(operation="linalg.generic", input_map="affine_map<() -> (0)>", reason="nonunit_inner_selector")
     ]
     assert operations == 0
+
+
+@pytest.mark.parametrize("missing", ["placement_cost_model", "excluded_constructions"])
+def test_missing_construction_policy_refuses_before_any_preparation(tmp_path, missing):
+    import yaml
+
+    from merlin.targetgen.core_aten_profitability import prepare
+
+    declaration, facts = inputs()
+    software = dict(placement_cost_model=declaration, numerical_semantics=dict(native_unit_contract={}))
+    if missing == "placement_cost_model":
+        del software[missing]
+    spec = tmp_path / "software.yaml"
+    spec.write_text(yaml.safe_dump(software))
+    with pytest.raises(ValueError, match=missing):
+        prepare(
+            tmp_path, {}, lambda *a, **k: pytest.fail("must refuse before preparing"), software_spec=spec, facts=facts
+        )
+
+
+@pytest.mark.parametrize("stage", ["prepared", "provider_prelude"])
+def test_generated_constructions_are_screened_even_if_the_prelude_is_later_removed(tmp_path, stage):
+    import yaml
+
+    from merlin.targetgen.core_aten_profitability import prepare
+
+    declaration, facts = inputs()
+    original = source(7)
+    (tmp_path / "model.mlir").write_text(str(original))
+    spec = tmp_path / "software.yaml"
+    spec.write_text(
+        yaml.safe_dump(
+            dict(
+                placement_cost_model=declaration,
+                numerical_semantics=dict(native_unit_contract=dict(excluded_constructions=["multi_op_identity"])),
+            )
+        )
+    )
+    forbidden = parse_mlir_text("""module {
+      func.func @bad(%a: i1,%b: i1) -> tensor<i1> {
+        %e=tensor.empty() : tensor<i1>
+        %r=linalg.generic {indexing_maps=[affine_map<()->()>],iterator_types=[]} outs(%e : tensor<i1>) {
+        ^bb0(%unused: i1):
+          %v=arith.ori %a,%b : i1
+          linalg.yield %v : i1
+        } -> tensor<i1>
+        func.return %r : tensor<i1>
+      }}""")
+
+    def implementation(directory, report, *, construction_observer, **kwargs):
+        if stage == "provider_prelude":
+            construction_observer(forbidden, stage)
+        else:
+            (directory / "model.mlir").write_text(str(forbidden))
+        return dict(candidate(original), selection=dict(identities={}), exact_dtype_sites=1)
+
+    report = dict(cases=[dict(status="bundled")])
+    plan = prepare(tmp_path, report, implementation, software_spec=spec, facts=facts)
+    assert plan["refusal_code"] == "non_native_unit_construction"
+    assert any(e["stage"] == stage for e in plan["placement_cost"]["native_unit_policy"]["evidence"])
+    assert (tmp_path / "model.mlir").read_text() == str(original)

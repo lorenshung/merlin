@@ -96,7 +96,14 @@ def test_unprofitable_candidate_restores_original_host_boundary(tmp_path):
     (tmp_path / "inputs.npz").write_bytes(b"original input bytes")
     (tmp_path / "semantic_io.json").write_text("original ABI")
     specification = tmp_path / "software.yaml"
-    specification.write_text(yaml.safe_dump(dict(placement_cost_model=DECLARATION)))
+    specification.write_text(
+        yaml.safe_dump(
+            dict(
+                placement_cost_model=DECLARATION,
+                numerical_semantics=dict(native_unit_contract=dict(excluded_constructions=[])),
+            )
+        )
+    )
     report = dict(cases=[dict(case_id="independent", input_abi=[dict(shape=[1])])])
     before = copy.deepcopy(report)
     retained_record = report["cases"][0]

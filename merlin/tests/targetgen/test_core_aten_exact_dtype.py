@@ -143,6 +143,12 @@ def test_empty_boundary_decision_precedes_provider_and_quantized_capture(tmp_pat
         def prepare_bundle(self, *args, **kwargs):
             raise AssertionError("empty boundary must not ask the provider for work")
 
+    specification = tmp_path / "software.yaml"
+    specification.write_text(
+        "placement_cost_model: {}\n"
+        "numerical_semantics: {native_unit_contract: {excluded_constructions: []}}\n"
+    )
+    (tmp_path / "model.mlir").write_text("module {}")
     record = dict(
         status="bundled", input_abi=[dict(dtype="f16", shape=[0, 4])], output_abi=[dict(dtype="f16", shape=[0, 4])]
     )
@@ -151,7 +157,7 @@ def test_empty_boundary_decision_precedes_provider_and_quantized_capture(tmp_pat
         dict(cases=[record]),
         target="test",
         facts={},
-        software_spec=None,
+        software_spec=specification,
         host_capabilities=None,
         provider=Provider(),
         package=None,

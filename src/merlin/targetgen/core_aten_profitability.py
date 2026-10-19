@@ -14,8 +14,20 @@ def prepare(directory, report, implementation, **kwargs):
     selected = kwargs.get("software_spec")
     software = load_yaml(selected) if selected is not None else {}
     declaration = software.get("placement_cost_model")
-    if declaration is None:
-        return implementation(directory, report, **kwargs)
+    if not isinstance(declaration, dict):
+        raise ValueError("native placement requires placement_cost_model")
+    native_contract = software.get("numerical_semantics", {}).get("native_unit_contract", {})
+    excluded = native_contract.get("excluded_constructions")
+    if not isinstance(excluded, list) or not all(isinstance(item, str) for item in excluded):
+        raise ValueError("native placement requires explicit excluded_constructions")
+    from merlin.targetgen.native_unit_policy import construction_evidence
+
+    stages = []
+
+    def observe(module, stage):
+        decision = construction_evidence(module, excluded=excluded)
+        stages.append(dict(stage=stage, **decision))
+
     # Preparation can change the whole exported ABI and its inputs. A rejected
     # placement must restore the original host program and all of its sidecars.
     original_files = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
@@ -24,7 +36,15 @@ def prepare(directory, report, implementation, **kwargs):
     policy = os.environ.get("MERLIN_PLACEMENT_POLICY", declaration.get("default_policy", "strict_per_shape"))
     if policy not in {"reference_scale", "strict_per_shape"}:
         raise ValueError(f"unknown placement profitability policy: {policy}")
-    plan = implementation(directory, report, **kwargs)
+    observe(parse_mlir_text((directory / "model.mlir").read_text()), "source")
+    plan = implementation(directory, report, construction_observer=observe, **kwargs)
+    observe(parse_mlir_text((directory / "model.mlir").read_text()), "prepared")
+    native = dict(
+        schema="merlin.native_unit_policy.v1",
+        status="host" if any(s["status"] == "host" for s in stages) else "eligible",
+        stages=stages,
+        evidence=[dict(stage=s["stage"], **e) for s in stages for e in s["evidence"]],
+    )
     # One numeric candidate belongs only to bundled records. Some preparation
     # paths annotate all retained corpus rows, including not-in-shard metadata;
     # restore those rows before publishing this candidate's policy evidence.
@@ -44,7 +64,10 @@ def prepare(directory, report, implementation, **kwargs):
         plan["placement_cost"] = dict(
             policy=policy,
             status="host",
-            reason_code="no_admitted_device_candidate",
+            reason_code="non_native_unit_construction"
+            if native["status"] == "host"
+            else "no_admitted_device_candidate",
+            native_unit_policy=native,
             strict_policy=dict(
                 policy="strict_per_shape",
                 status="not_applicable",
@@ -82,13 +105,6 @@ def prepare(directory, report, implementation, **kwargs):
         )
         if policy == "reference_scale"
         else dict(strict)
-    )
-    from merlin.targetgen.native_unit_policy import construction_evidence
-
-    native_contract = software.get("numerical_semantics", {}).get("native_unit_contract", {})
-    native = construction_evidence(
-        parse_mlir_text(original_files["model.mlir"].decode()),
-        excluded=native_contract.get("excluded_constructions", []),
     )
     cost["native_unit_policy"] = native
     if native["status"] == "host":

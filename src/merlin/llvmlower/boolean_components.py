@@ -1,4 +1,4 @@
-"""Boolean OR/AND as integer numerators followed by an exact truth predicate."""
+"""Boolean AND as integer numerators followed by an exact truth predicate."""
 
 
 def rewrite_boolean_components(module):
@@ -44,7 +44,7 @@ def rewrite_boolean_components(module):
         if op.name != "linalg.generic" or len(op.results) != 1 or str(op.results[0].type.element_type) != "i1":
             continue
         body = list(op.body.block.ops)
-        if len(body) != 2 or body[0].name not in {"arith.ori", "arith.andi"}:
+        if len(body) != 2 or body[0].name != "arith.andi":
             continue
         if len(op.inputs) != 2 or list(body[0].operands) != list(op.body.block.args[:2]):
             continue
@@ -74,52 +74,40 @@ def rewrite_boolean_components(module):
         zero = arith.ConstantOp(IntegerAttr(0, i32))
         seed = tensor.SplatOp(zero.result, [], TensorType(i32, shape))
         operations.extend([zero, seed])
-        if body[0].name == "arith.ori":
-
-            def numerator(block):
-                left, right = arith.ExtSIOp(block.args[0], i32), arith.ExtSIOp(block.args[1], i32)
-                addition = arith.AddiOp(left.result, right.result)
-                block.add_ops([left, right, addition])
-                return addition.result
-
-            result = point(
-                inputs, seed.result.type, numerator, ArrayAttr([identity] * 3), op.get_iterator_types(), operations
-            )
-        else:
-            flat = []
-            for value in inputs:
-                sizes = arith.ConstantOp(DenseIntOrFPElementsAttr.from_list(TensorType(i64, [3]), [prod(shape), 1, 1]))
-                reshaped = tensor.ReshapeOp(value, sizes.result, TensorType(i8, [prod(shape), 1, 1]))
-                operations.extend([sizes, reshaped])
-                bounds[reshaped.result] = 1
-                flat.append(reshaped.result)
-            batch_seed = tensor.SplatOp(zero.result, [], TensorType(i32, [prod(shape), 1, 1]))
-            operations.append(batch_seed)
-            b = Block(arg_types=[i8, i8, i32])
-            a, w = arith.ExtSIOp(b.args[0], i32), arith.ExtSIOp(b.args[1], i32)
-            product = arith.MuliOp(a.result, w.result)
-            addition = arith.AddiOp(product.result, b.args[2])
-            b.add_ops([a, w, product, addition, L.YieldOp(addition.result)])
-            maps = ArrayAttr(
-                [
-                    AffineMapAttr(AffineMap(4, 0, tuple(AffineDimExpr(i) for i in axes)))
-                    for axes in [(0, 1, 3), (0, 3, 2), (0, 1, 2)]
-                ]
-            )
-            contraction = L.GenericOp(
-                inputs=flat,
-                outputs=[batch_seed.result],
-                body=Region(b),
-                indexing_maps=maps,
-                iterator_types=ArrayAttr(
-                    [L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * 3 + [L.IteratorTypeAttr(L.IteratorType.REDUCTION)]
-                ),
-                result_types=[batch_seed.result.type],
-            )
-            sizes = arith.ConstantOp(DenseIntOrFPElementsAttr.from_list(TensorType(i64, [len(shape)]), list(shape)))
-            reshaped = tensor.ReshapeOp(contraction.results[0], sizes.result, seed.result.type)
-            operations.extend([contraction, sizes, reshaped])
-            result = reshaped.result
+        flat = []
+        for value in inputs:
+            sizes = arith.ConstantOp(DenseIntOrFPElementsAttr.from_list(TensorType(i64, [3]), [prod(shape), 1, 1]))
+            reshaped = tensor.ReshapeOp(value, sizes.result, TensorType(i8, [prod(shape), 1, 1]))
+            operations.extend([sizes, reshaped])
+            bounds[reshaped.result] = 1
+            flat.append(reshaped.result)
+        batch_seed = tensor.SplatOp(zero.result, [], TensorType(i32, [prod(shape), 1, 1]))
+        operations.append(batch_seed)
+        b = Block(arg_types=[i8, i8, i32])
+        a, w = arith.ExtSIOp(b.args[0], i32), arith.ExtSIOp(b.args[1], i32)
+        product = arith.MuliOp(a.result, w.result)
+        addition = arith.AddiOp(product.result, b.args[2])
+        b.add_ops([a, w, product, addition, L.YieldOp(addition.result)])
+        maps = ArrayAttr(
+            [
+                AffineMapAttr(AffineMap(4, 0, tuple(AffineDimExpr(i) for i in axes)))
+                for axes in [(0, 1, 3), (0, 3, 2), (0, 1, 2)]
+            ]
+        )
+        contraction = L.GenericOp(
+            inputs=flat,
+            outputs=[batch_seed.result],
+            body=Region(b),
+            indexing_maps=maps,
+            iterator_types=ArrayAttr(
+                [L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * 3 + [L.IteratorTypeAttr(L.IteratorType.REDUCTION)]
+            ),
+            result_types=[batch_seed.result.type],
+        )
+        sizes = arith.ConstantOp(DenseIntOrFPElementsAttr.from_list(TensorType(i64, [len(shape)]), list(shape)))
+        reshaped = tensor.ReshapeOp(contraction.results[0], sizes.result, seed.result.type)
+        operations.extend([contraction, sizes, reshaped])
+        result = reshaped.result
         bounds[result] = 2
 
         def truth(block):
@@ -131,7 +119,7 @@ def rewrite_boolean_components(module):
         final = point(
             [result], op.results[0].type, truth, ArrayAttr([identity] * 2), op.get_iterator_types(), operations
         )
-        # This predicate decodes the complete device-computed OR/AND numerator.
+        # This predicate decodes the complete device-computed AND numerator.
         final.owner.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
         Rewriter.replace_op(op, operations, [final])
         changed += 1

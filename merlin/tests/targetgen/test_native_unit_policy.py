@@ -163,3 +163,131 @@ def test_literal_uniformity_uses_storage_bits_for_nan_and_zero():
     assert construction_evidence(table([0, 0x80000000]))["status"] == "host"
     assert construction_evidence(table([0x7FC01234, 0x7FC05678]))["status"] == "host"
     assert construction_evidence(table([]))["status"] == "eligible"
+
+
+def test_saturation_used_as_comparator_is_excluded_but_plain_clamp_is_native():
+    clamp = "%z=arith.constant 0.0 : f32\n%capped=arith.maximumf %a,%z : f32\n"
+    predicate = "%p=arith.cmpf ogt,%capped,%z : f32\n%v=arith.uitofp %p : i1 to f32"
+    result = construction_evidence(source(clamp + predicate))
+    assert "saturation_comparators" in {e["reason"] for e in result["evidence"]}
+    assert construction_evidence(source(clamp + "%v=arith.addf %capped,%z : f32"))["status"] == "eligible"
+    assert (
+        construction_evidence(source("%p=arith.cmpf ogt,%a,%b : f32\n%v=arith.select %p,%a,%b : f32"))["status"]
+        == "eligible"
+    )
+
+
+def test_biased_rounding_is_detected_without_excluding_an_ordinary_affine_offset():
+    bias = "%half=arith.constant 0.5 : f32\n%biased=arith.addf %a,%half : f32\n"
+    result = construction_evidence(source(bias + "%v=math.floor %biased : f32"))
+    assert "readout_offset_rounding" in {e["reason"] for e in result["evidence"]}
+    narrowing = "%n=arith.fptosi %biased : f32 to i32\n%v=arith.sitofp %n : i32 to f32"
+    assert construction_evidence(source(bias + narrowing), excluded=["readout_offset_rounding"])["status"] == "host"
+    assert (
+        construction_evidence(source("%half=arith.constant 0.5 : f32\n%v=arith.addf %a,%half : f32"))["status"]
+        == "eligible"
+    )
+    assert (
+        construction_evidence(source("%n=arith.fptosi %a : f32 to i32\n%v=arith.sitofp %n : i32 to f32"))["status"]
+        == "eligible"
+    )
+
+
+def test_magic_bias_rounding_is_detected():
+    module = source(
+        "%bias=arith.constant 16777216.0 : f32\n%shift=arith.addf %a,%bias : f32\n%v=arith.subf %shift,%bias : f32"
+    )
+    assert construction_evidence(module, excluded=["readout_offset_rounding"])["status"] == "host"
+
+
+def test_rectifier_extremum_identity_is_excluded_but_native_relu_is_not():
+    zero = "%z=arith.constant 0.0 : f32\n"
+    identity = "%d=arith.subf %a,%b : f32\n%r=arith.maximumf %d,%z : f32\n%v=arith.addf %r,%b : f32"
+    assert construction_evidence(source(zero + identity), excluded=["multi_op_identity"])["status"] == "host"
+    assert construction_evidence(source(zero + "%v=arith.maximumf %a,%z : f32"))["status"] == "eligible"
+    assert construction_evidence(source("%v=arith.maximumf %a,%b : f32"))["status"] == "eligible"
+
+
+def boolean_source():
+    return parse_mlir_text("""module {
+      func.func @forward(%x: tensor<3xi1>,%y: tensor<3xi1>) -> tensor<3xi1> {
+        %e=tensor.empty() : tensor<3xi1>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,
+          affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x,%y : tensor<3xi1>,tensor<3xi1>) outs(%e : tensor<3xi1>) {
+          ^bb0(%a: i1,%b: i1,%c: i1):
+            %v=arith.ori %a,%b : i1
+            linalg.yield %v : i1
+          } -> tensor<3xi1>
+        func.return %r : tensor<3xi1>
+      }}""")
+
+
+def test_boolean_or_is_host_and_is_never_rewritten_as_add_and_truth():
+    from merlin.llvmlower.boolean_components import rewrite_boolean_components
+
+    module = boolean_source()
+    original = str(module)
+    assert construction_evidence(module, excluded=["multi_op_identity"])["status"] == "host"
+    assert rewrite_boolean_components(module) == ({}, 0)
+    assert str(module) == original
+
+
+def test_boolean_add_truth_identity_is_detected_after_rewriting():
+    module = boolean_source()
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import IntegerAttr, i32
+    from xdsl.rewriter import Rewriter
+
+    union = next(op for op in module.walk() if op.name == "arith.ori")
+    left, right = (arith.ExtUIOp(v, i32) for v in union.operands)
+    add = arith.AddiOp(left.result, right.result)
+    zero = arith.ConstantOp(IntegerAttr(0, i32))
+    truth = arith.CmpiOp(add.result, zero.result, "ne")
+    Rewriter.replace_op(union, [left, right, add, zero, truth], [truth.result])
+    assert construction_evidence(module, excluded=["multi_op_identity"])["status"] == "host"
+
+
+def test_an_unrelated_reduction_does_not_license_parallel_products_or_index_payloads():
+    from xdsl.dialects.builtin import ModuleOp
+
+    reduction = source("%v=arith.mulf %a,%b : f32", reduction=True)
+    for other, reason in [
+        (source("%v=arith.mulf %a,%b : f32"), "parallel_runtime_product_construction"),
+        (
+            source("%i=linalg.index 0 : index\n%j=arith.index_cast %i : index to i64\n%v=arith.sitofp %j : i64 to f32"),
+            "index_generated_payload_arithmetic",
+        ),
+    ]:
+        module = ModuleOp([op.clone() for m in [reduction, other] for op in m.body.block.ops])
+        assert reason in {e["reason"] for e in construction_evidence(module)["evidence"]}
+
+
+def test_deep_shared_payloads_do_not_expand_exponentially_or_hit_python_recursion():
+    lines = ["%c0=arith.constant 1.0 : f32"]
+    for i in range(1, 1200):
+        lines.append(f"%c{i}=arith.addf %c{i - 1},%c{i - 1} : f32")
+    lines.append("%v=arith.mulf %a,%c1199 : f32")
+    assert construction_evidence(source("\n".join(lines)))["status"] == "eligible"
+
+
+def test_integer_offset_readout_is_rounding():
+    module = parse_mlir_text("""module {
+      func.func @forward(%a: i64) -> i64 {
+        %offset=arith.constant 128 : i64
+        %bits=arith.constant 8 : i64
+        %biased=arith.addi %a,%offset : i64
+        %shifted=arith.shrsi %biased,%bits : i64
+        func.return %shifted : i64
+      }}""")
+    assert construction_evidence(module, excluded=["readout_offset_rounding"])["status"] == "host"
+
+
+def test_readout_uses_only_the_current_module_during_prelude_rewriting():
+    module = boolean_source()
+    generic = next(op for op in module.walk() if op.name == "linalg.generic")
+    # A replaced generic can retain stale SSA uses after its region is removed.
+    # It is absent from the current serialized program and has no readout role.
+    detached = generic.clone(value_mapper={generic.inputs[0]: generic.results[0]})
+    detached.detach_region(0)
+    assert construction_evidence(module, excluded=["multi_op_identity"])["status"] == "host"
