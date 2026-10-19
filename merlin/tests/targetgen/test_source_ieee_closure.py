@@ -57,7 +57,7 @@ def test_native_source_observation_retains_every_storage_bit(tmp_path):
     assert receipt["scope"] == "typed_source_ieee_storage_bits_no_target_qualification"
 
 
-def test_native_source_disagreement_refuses_before_provider_selection(tmp_path):
+def test_unproved_native_source_refuses_without_reading_eager_or_inputs(tmp_path):
     python = os.environ.get("MERLIN_M2M_PYTHON")
     if not python or not Path(python).is_file():
         pytest.skip("declared capture interpreter unavailable")
@@ -110,11 +110,8 @@ def test_native_source_disagreement_refuses_before_provider_selection(tmp_path):
         is None
     )
     refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
-    assert refusal["code"] == "native_source_eager_disagreement"
-    assert refusal["source_agreement"][0]["results"] == [
-        dict(output_index=0, status="mismatch"),
-        dict(output_index=1, status="pass"),
-    ]
+    assert refusal["code"] == "native_ieee_arithmetic_semantics_unproved"
+    assert "source_agreement" not in refusal
     assert (tmp_path / "model.mlir").read_text() == source
 
 
@@ -226,5 +223,5 @@ def test_native_reduced_storage_requires_complete_source_observation(tmp_path):
         is None
     )
     refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
-    assert refusal["code"] == "native_source_observation_unavailable"
+    assert refusal["code"] == "native_external_semantics_unproved"
     assert (tmp_path / "model.mlir").read_text() == source

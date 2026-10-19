@@ -42,4 +42,6 @@ def test_bf16_nan_negation_needs_explicit_source_policy(tmp_path):
         is None
     )
     assert (tmp_path / "model.mlir").read_text() == original
-    assert "NaN-canonicalization policy" in json.loads((tmp_path / "exact-dtype-refusal.json").read_text())["reason"]
+    assert json.loads((tmp_path / "exact-dtype-refusal.json").read_text())["code"] == (
+        "native_reduced_precision_nan_semantics_unproved"
+    )

@@ -65,8 +65,8 @@ def test_integer_conversion_does_not_admit_a_retained_host_float_sum(tmp_path):
     assert decision is None
     assert (tmp_path / "model.mlir").read_text() == original
     assert (
-        json.loads((tmp_path / "exact-dtype-refusal.json").read_text())["reason"]
-        == "integer conversion alone is not a device reduction"
+        json.loads((tmp_path / "exact-dtype-refusal.json").read_text())["code"]
+        == "native_conversion_semantics_unproved"
     )
 
 
@@ -124,7 +124,7 @@ def test_device_pointwise_prelude_does_not_hide_a_host_bilinear_loop(tmp_path):
     assert decision is None
     assert (tmp_path / "model.mlir").read_text() == original
     refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
-    assert "partial preludes" in refusal["reason"] and refusal["source_operation_ordinals"]
+    assert refusal["code"] == "native_ieee_arithmetic_semantics_unproved"
 
 
 @pytest.mark.parametrize("predicate", ["cmpf", "maximumf", "minimumf"])
@@ -213,14 +213,11 @@ def test_fused_components_retain_only_self_nan_classification(tmp_path, monkeypa
         None,
         module,
         limb_attribute="test.limb",
-        native_f32=True,
     )
     assert decision is None  # The provider deliberately withholds its proof.
-    assert bool(called) is qualified
-    if qualified:
-        assert "test.limb" in called[0]
-    else:
-        assert "partial preludes" in (tmp_path / "exact-dtype-refusal.json").read_text()
+    assert not called
+    refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
+    assert refusal["code"] == "native_external_semantics_unproved"
 
 
 def test_nan_classification_after_conversion_has_no_arithmetic_witness():

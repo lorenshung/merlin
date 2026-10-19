@@ -774,7 +774,6 @@ def _prepare_spec_int8(
                 package,
                 parse_mlir_file(directory / "model.mlir"),
                 limb_attribute=f"{target}.limb",
-                native_f32=True,
                 construction_observer=construction_observer,
             )
             if components is not None:

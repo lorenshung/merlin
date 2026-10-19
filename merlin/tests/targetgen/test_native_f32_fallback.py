@@ -1,6 +1,4 @@
-"""Finite f32 data need not inherit overflow in a calibration observer."""
-
-import json
+"""Native word admission is structural and independent of sample bytes."""
 
 import numpy as np
 import pytest
@@ -10,9 +8,8 @@ from merlin.targetgen.core_aten_components import prepare_integer_components
 
 
 @pytest.mark.parametrize("inactive", [False, True])
-@pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("word_map", ["negate", "literal_clamp"])
-def test_native_f32_is_explicit_and_keeps_the_independent_bit_gate(tmp_path, monkeypatch, native, word_map, inactive):
+def test_native_f32_word_admission_never_reads_sample_or_eager(tmp_path, monkeypatch, word_map, inactive):
     monkeypatch.setattr(
         "merlin.targetgen.transfer_contracts.screen_transfer_contract", lambda *args, **kwargs: dict(status="admitted")
     )
@@ -32,8 +29,7 @@ def test_native_f32_is_explicit_and_keeps_the_independent_bit_gate(tmp_path, mon
         module = parse_mlir_text(
             str(module).replace(
                 "%r = arith.negf %a : f32",
-                "%zero = arith.constant 0 : i32\n"
-                "%literal = arith.sitofp %zero : i32 to f32\n"
+                "%literal = arith.constant 0.0 : f32\n"
                 "%less = arith.cmpf olt, %a, %literal : f32\n"
                 "%r = arith.select %less, %literal, %a : f32",
             )
@@ -79,12 +75,24 @@ def test_native_f32_is_explicit_and_keeps_the_independent_bit_gate(tmp_path, mon
         None,
         module,
         limb_attribute="test.limb",
-        native_f32=native,
     )
     assert unrelated == dict(status="not_in_shard", input_abi=[dict(dtype="bf16")])
     assert decision is None
-    assert bool(called) == native
-    if native:
-        closure = json.loads((tmp_path / "source-ieee-closure.json").read_text())
-        assert closure["output_bytes"] == [expected.tobytes().hex(), x.tobytes().hex()]
+    assert called
+    first_source = called[0]
+    assert not (tmp_path / "source-ieee-closure.json").exists()
+    # No admissibility or generated-kernel property may use these observations.
+    (tmp_path / "inputs.npz").write_bytes(b"not a readable tensor archive")
+    record["native_eager_boundary"] = {"poison": "never read"}
+    called.clear()
+    prepare_integer_components(
+        tmp_path,
+        dict(cases=records),
+        dict(spec={}, host={}),
+        Provider(),
+        None,
+        parse_mlir_text(source),
+        limb_attribute="test.limb",
+    )
+    assert called == [first_source]
     assert (tmp_path / "model.mlir").read_text() == source

@@ -209,6 +209,16 @@ placement_cost_model:
 # dequantization declaration is limited to its stated operand/result types and
 # ranks; it does not declare device execution or arbitrary shapes.
 numerical_semantics:
+  component_domain:
+    bounds: full_dtype_storage_domain
+    runtime_input_specialization: forbidden
+    zero_limb_omission: source_literals_only
+    native_admission: structural_per_dtype_semantic_proof
+    unproved_ieee_arithmetic: retain_original_host
+    # Calibration qparams define the quantized program. Runtime examples never
+    # narrow its code ranges or choose component kernels.
+    quantized_domain: complete_declared_code_range
+    evidence: {review_status: "authored, pending operator review"}
   native_unit_contract:
     status: authored_pending_operator_review
     eligibility: source_scalar_dataflow_and_reduction_domains
