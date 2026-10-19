@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 
 from merlin.targetgen.core_aten_capture import loader_source
@@ -13,8 +14,62 @@ from merlin.targetgen.core_aten_capture import loader_source
 def atomic_json(path: Path, document: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
+    if isinstance(document, dict) and any(
+        isinstance(v, Mapping) and not isinstance(v, dict) for v in document.values()
+    ):
+        # A complete response/report can exceed memory. Keep its ordinary JSON
+        # protocol while materializing at most one independently graded case.
+        with temporary.open("w") as stream:
+            stream.write("{\n")
+            for index, (key, value) in enumerate(sorted(document.items())):
+                if index:
+                    stream.write(",\n")
+                stream.write(json.dumps(key) + ": ")
+                if isinstance(value, Mapping) and not isinstance(value, dict):
+                    stream.write("{\n")
+                    for position, identifier in enumerate(value):
+                        if position:
+                            stream.write(",\n")
+                        stream.write(json.dumps(identifier) + ": ")
+                        json.dump(value[identifier], stream, sort_keys=True)
+                    stream.write("\n}")
+                else:
+                    json.dump(value, stream, sort_keys=True)
+            stream.write("\n}\n")
+    else:
+        temporary.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n")
     temporary.replace(path)
+
+
+class JsonRecordMapping(MutableMapping):
+    """Read/write complete per-case JSON records without retaining their payloads."""
+
+    def __init__(self, directory, paths=None, *, field=None):
+        self.directory = Path(directory)
+        self.paths = dict(paths or {})
+        self.field = field
+
+    def __getitem__(self, key):
+        value = json.loads(self.paths[key].read_text())
+        return value[self.field] if self.field else value
+
+    def __setitem__(self, key, value):
+        if self.field:
+            raise TypeError("a projected record mapping is read-only")
+        path = self.directory / (hashlib.sha256(key.encode()).hexdigest() + ".json")
+        atomic_json(path, value)
+        self.paths[key] = path
+
+    def __delitem__(self, key):
+        if self.field:
+            raise TypeError("a projected record mapping is read-only")
+        self.paths.pop(key).unlink()
+
+    def __iter__(self):
+        return iter(self.paths)
+
+    def __len__(self):
+        return len(self.paths)
 
 
 def case_digest(case: dict) -> str:

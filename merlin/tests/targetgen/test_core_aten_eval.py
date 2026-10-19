@@ -393,3 +393,20 @@ def test_bounded_suite_requires_explicit_observed_scope(bounded_unit_corpus, all
     assert report["semantic_scope"] == ("values+mutation+observed-metadata" if allow else "full")
     assert report["status"] == ("pass" if allow else "fail")
     assert report["passed_count"] == (len(corpus["selected_cases"]) if allow else int(mixed))
+
+
+def test_disk_backed_bounded_verdicts_use_the_same_sealed_checks(bounded_unit_corpus, tmp_path):
+    from merlin.targetgen.core_aten_bounded_runner import JsonRecordMapping
+
+    store = JsonRecordMapping(tmp_path)
+    report = evaluate_bounded_core_aten_suite(
+        BoundedEagerSuiteAdapter(),
+        bounded_unit_corpus,
+        required_execution_kind="host",
+        validate_live_denominator=False,
+        validate_solver_certificate=False,
+        verdict_store=store,
+    )
+    assert report["cases"] is store
+    assert report["status"] == "pass"
+    assert report["passed_count"] == len(store)

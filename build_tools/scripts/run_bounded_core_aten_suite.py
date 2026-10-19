@@ -19,6 +19,7 @@ from merlin.common import provenance
 from merlin.targetgen.capture_refusals import InputStorageUnavailable
 from merlin.targetgen.core_aten_batch_grade import numeric_policy_counts
 from merlin.targetgen.core_aten_bounded_runner import (
+    JsonRecordMapping,
     SavedResponseAdapter,
     atomic_json,
     bounded_loader_source,
@@ -290,16 +291,19 @@ def launch(args, phase, case, block):
 
 
 def response(args, corpus, block):
-    results = {}
-    for case in corpus["selected_cases"]:
-        path = args.output / args.label / "shards" / case_capture_name(case) / "result.json"
-        results[case["case_id"]] = (
-            json.loads(path.read_text())["observation"]
-            if path.exists()
-            else {"status": "not_run", "reason": "execution pending", "evidence": {"lane": "unassigned"}}
-        )
+    paths = {
+        case["case_id"]: args.output / args.label / "shards" / case_capture_name(case) / "result.json"
+        for case in corpus["selected_cases"]
+    }
+    missing = [key for key, path in paths.items() if not path.exists()]
+    if missing:
+        # Per-case result files are the resumable checkpoints. No multi-GB
+        # duplicate response is needed every fifty completions.
+        return {"schema_version": 1, "results": {}, "pending_count": len(missing), "provenance": block}
+    results = JsonRecordMapping(args.output / args.label, paths, field="observation")
     document = {"schema_version": 1, "results": results, "provenance": block}
-    atomic_json(args.output / args.label / "response.json", document)
+    if not args.evaluate_only:
+        atomic_json(args.output / args.label / "response.json", document)
     return document
 
 
@@ -545,8 +549,6 @@ def main():
                     future.result()
                     if count % 50 == 0 or count == len(cases):
                         print(phase, count, "/", len(cases), "seconds", round(time.time() - began, 1), flush=True)
-                        if phase == "execute":
-                            response(args, corpus, block)
             timings[phase] = time.time() - began
     document = response(args, corpus, block)
     if not args.evaluate_only:
@@ -583,15 +585,17 @@ def main():
         validate_eager_oracles=False,
         validate_solver_certificate=False,
         allow_unobserved_autograd=True,
+        verdict_store=JsonRecordMapping(args.output / args.label / "sealed-verdicts"),
     )
     report["provenance"] = block
     report["numeric_policy"] = args.numeric_policy
-    for item in report["cases"].values():
+    for identifier, item in report["cases"].items():
         numeric = item.get("evidence", {}).get("numeric_verdict", {})
         item["numeric_policy"] = args.numeric_policy
         item["scales"] = numeric.get("scales", [])
         if "fp32_error" in numeric:
             item["fp32_error"] = numeric["fp32_error"]
+        report["cases"][identifier] = item
     report["campaign_complete"] = len(document["results"]) == len(corpus["selected_cases"]) and not any(
         item["status"] in {"not_run", "missing_result", "adapter_error"} for item in report["cases"].values()
     )

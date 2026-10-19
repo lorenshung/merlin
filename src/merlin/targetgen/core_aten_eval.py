@@ -447,6 +447,7 @@ def evaluate_bounded_core_aten_suite(
     validate_eager_oracles: bool = True,
     validate_solver_certificate: bool = True,
     allow_unobserved_autograd: bool = False,
+    verdict_store=None,
 ) -> dict[str, Any]:
     """Execute and judge a generated bounded suite with one adapter call.
 
@@ -630,14 +631,16 @@ def evaluate_bounded_core_aten_suite(
         if corpus.get("pytorch_version") != opset["torch"]:
             raise ValueError("bounded suite PyTorch version does not equal the live pinned environment")
     try:
-        raw_results = dict(adapter.execute(corpus))
+        raw_results = adapter.execute(corpus)
+        if not isinstance(raw_results, Mapping):
+            raise TypeError("adapter results must be a mapping")
         adapter_error = None
     except Exception as exc:  # noqa: BLE001 -- one batch failure becomes explicit per-case failures
         raw_results = {}
         adapter_error = f"{type(exc).__name__}: {exc}"
     expected = set(case_ids)
     unexpected = sorted(set(raw_results) - expected)
-    verdicts: dict[str, dict[str, Any]] = {}
+    verdicts = {} if verdict_store is None else verdict_store
     for case in cases:
         identifier = str(case["case_id"])
         observation = raw_results.get(identifier)

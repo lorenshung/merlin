@@ -560,3 +560,19 @@ def test_stamp_reads_descriptor_and_runtime_sources(tmp_path, monkeypatch):
     expected.append("src/merlin/capture/integerization.py")
     assert all(tmp_path / path in stamp["sources"] for path in expected)
     assert args.execution_provider in stamp["sources"]
+
+
+def test_disk_backed_records_keep_the_complete_response_protocol(tmp_path):
+    from merlin.targetgen.core_aten_bounded_runner import JsonRecordMapping
+
+    records = JsonRecordMapping(tmp_path / "records")
+    records["one"] = {"status": "pass", "evidence": {"bytes": [0, 255]}}
+    records["two"] = {"status": "fail", "reason": "measured mismatch"}
+    target = tmp_path / "report.json"
+    atomic_json(target, {"cases": records, "case_count": 2})
+    assert json.loads(target.read_text()) == {"cases": dict(records), "case_count": 2}
+    assert all(isinstance(value, type(target)) for value in records.paths.values())
+    projected = JsonRecordMapping(tmp_path, {"one": target}, field="case_count")
+    assert projected["one"] == 2
+    with pytest.raises(TypeError, match="read-only"):
+        projected["two"] = 3
