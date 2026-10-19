@@ -66,7 +66,37 @@ def construction_evidence(module, *, excluded=None):
         operands = owner.operands[1:] if name == "arith.select" else owner.operands
         return any(index_payload(v) for v in operands)
 
+    @cache
+    def literal_table_payload(value):
+        """Follow result data, excluding address tables and uniform fills.
+
+        Copying a precomputed nonuniform result does not accelerate the
+        arithmetic that constructed it. Address tables describe a movement
+        layout, rather than supplying the moved payload.
+        """
+        from xdsl.dialects.builtin import DenseIntOrFPElementsAttr
+
+        owner = value.owner
+        name = getattr(owner, "name", None)
+        if name == "arith.constant":
+            data = owner.properties.get("value", owner.attributes.get("value"))
+            return isinstance(data, DenseIntOrFPElementsAttr) and not data.is_splat()
+        if name == "linalg.generic":
+            return literal_table_payload(owner.body.block.last_op.operands[value.index])
+        if name is None and hasattr(owner, "parent_op"):
+            parent = owner.parent_op()
+            if getattr(parent, "name", None) == "linalg.generic" and value.index < len(parent.inputs):
+                return literal_table_payload(parent.inputs[value.index])
+            return False
+        if name in {"tensor.cast", "tensor.reshape", "tensor.extract"}:
+            return literal_table_payload(owner.operands[0])
+        if name == "arith.select":
+            return any(literal_table_payload(v) for v in owner.operands[1:])
+        return False
+
     for ordinal, op in enumerate(module.walk()):
+        if op.name == "func.return" and any(literal_table_payload(v) for v in op.operands):
+            evidence.append(dict(ordinal=ordinal, operation=op.name, reason="nonuniform_literal_result_construction"))
         if not contractions and op.name == "linalg.generic":
             yielded = op.body.block.last_op.operands
             if any(str(v.type) != "i1" and index_payload(v) for v in yielded):

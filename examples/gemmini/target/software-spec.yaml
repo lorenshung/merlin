@@ -208,8 +208,9 @@ numerical_semantics:
   native_unit_contract:
     eligibility: source_scalar_dataflow_and_reduction_domains
     allowed_representation: exact_signed_byte_limbs_and_retained_ieee_host_readout
-    excluded_constructions: [nonlinear_rounding_construction, parallel_runtime_product_construction, index_generated_payload_arithmetic, saturation_comparators, readout_offset_rounding]
+    excluded_constructions: [nonlinear_rounding_construction, parallel_runtime_product_construction, index_generated_payload_arithmetic, nonuniform_literal_result_construction, saturation_comparators, readout_offset_rounding]
     source_overload_dispatch: forbidden
+    result_literals: uniform_fills_are_movement_nonuniform_result_tables_retain_host_construction
     evidence: {review_status: "authored, pending operator review"}
   model:
     engine: integer_reference
