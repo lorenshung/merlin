@@ -7,7 +7,7 @@ express them with contractions. Index arithmetic remains address selection.
 """
 
 
-def construction_evidence(module):
+def construction_evidence(module, *, excluded=None):
     from functools import cache
 
     from merlin.kernels.shapes import observe_contractions
@@ -88,4 +88,10 @@ def construction_evidence(module):
         # It is not the standalone Hadamard-to-diagonal construction.
         if not contractions:
             evidence.append(dict(ordinal=ordinal, operation=op.name, reason="parallel_runtime_product_construction"))
-    return dict(schema="merlin.native_unit_policy.v1", status="host" if evidence else "eligible", evidence=evidence)
+    selected = evidence if excluded is None else [entry for entry in evidence if entry["reason"] in excluded]
+    return dict(
+        schema="merlin.native_unit_policy.v1",
+        status="host" if selected else "eligible",
+        evidence=selected,
+        classified_constructions=evidence,
+    )

@@ -12,7 +12,8 @@ def prepare(directory, report, implementation, **kwargs):
     from merlin.targetgen.placement_reference import estimate_reference
 
     selected = kwargs.get("software_spec")
-    declaration = load_yaml(selected).get("placement_cost_model") if selected is not None else None
+    software = load_yaml(selected) if selected is not None else {}
+    declaration = software.get("placement_cost_model")
     if declaration is None:
         return implementation(directory, report, **kwargs)
     # Preparation can change the whole exported ABI and its inputs. A rejected
@@ -84,7 +85,11 @@ def prepare(directory, report, implementation, **kwargs):
     )
     from merlin.targetgen.native_unit_policy import construction_evidence
 
-    native = construction_evidence(parse_mlir_text(original_files["model.mlir"].decode()))
+    native_contract = software.get("numerical_semantics", {}).get("native_unit_contract", {})
+    native = construction_evidence(
+        parse_mlir_text(original_files["model.mlir"].decode()),
+        excluded=native_contract.get("excluded_constructions", []),
+    )
     cost["native_unit_policy"] = native
     if native["status"] == "host":
         cost.update(status="host", reason_code="non_native_unit_construction")

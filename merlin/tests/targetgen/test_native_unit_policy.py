@@ -99,3 +99,11 @@ def test_shared_index_dag_is_analyzed_without_expanding_its_tree():
     lines.extend([f"%n=arith.index_cast {previous} : index to i64", "%v=arith.sitofp %n : i64 to f32"])
     result = construction_evidence(source("\n".join(lines)))
     assert result["status"] == "host"
+
+
+def test_exclusions_are_selected_by_the_targets_numeric_contract():
+    module = source("%v=arith.mulf %a,%b : f32")
+    assert construction_evidence(module, excluded=[])["status"] == "eligible"
+    decision = construction_evidence(module, excluded=["parallel_runtime_product_construction"])
+    assert decision["status"] == "host"
+    assert decision["classified_constructions"] == decision["evidence"]
