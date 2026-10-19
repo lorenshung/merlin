@@ -1,6 +1,7 @@
 """An admissible contraction cannot grant an undeclared FFT boundary op."""
 
 from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -240,7 +241,7 @@ def test_fft_without_unique_recipe_retains_host_source(tmp_path, monkeypatch, re
         raise AssertionError("ambiguous or absent recipes cannot recapture the source")
 
     monkeypatch.setattr(PytorchRefSource, "capture_loader", capture)
-    (tmp_path / "spec.yaml").write_text("{}\n")
+    (tmp_path / "spec.yaml").write_text(Path(selection["identities"]["software_spec"]["path"]).read_text())
     original = "builtin.module {}\n"
     (tmp_path / "model.mlir").write_text(original)
     report = {
