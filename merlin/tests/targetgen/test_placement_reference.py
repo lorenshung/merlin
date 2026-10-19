@@ -121,6 +121,7 @@ def test_row_selector_and_reversal_have_different_reference_costs():
     assert b["status"] == "device" and b["pattern"] == "element_gather"
     assert b["reason_code"] == "admitted_reference_movement_family"
     assert not b["estimated_faster"]
+    assert b["device_parts"]["measured_issue_and_dma"] > 0
     assert b["selector_scalar_operations"] == 2
     assert b["device_cycles"] > a["device_cycles"]
 

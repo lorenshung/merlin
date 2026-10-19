@@ -144,22 +144,15 @@ def estimate_reference(original, plan, declaration, facts, *, logical_boundary_s
             )
             if literal:
                 host += size / workload["element_bytes"] / rates["host_scalar_ops_per_cycle"]
-            commands = math.ceil(traffic / workload["row_bytes"])
             if pattern == "element_gather":
                 host += size / workload["element_bytes"] * index_operations / rates["host_scalar_ops_per_cycle"]
-                memories = [
-                    m
-                    for m in facts.get("facts", facts).get("memories", [])
-                    if m.get("name") == declaration["dma_memory"]
-                ]
-                if len(memories) != 1:
-                    raise ValueError("selected DMA row width unavailable")
-                row_bytes = memories[0]["row_elems"] * memories[0]["elem_bits"] // 8
-                commands = math.ceil(traffic / workload["element_bytes"])
-                traffic = commands * row_bytes
+            measurement = reference["movement_measurements"]["patterns"][pattern]
+            extent = measurement["payload_bytes"]
+            numerator, denominator = measurement["cycles_numerator"], measurement["cycles_denominator"]
+            if any(type(v) is not int or v <= 0 for v in (extent, numerator, denominator)):
+                raise ValueError("RTL movement cost needs positive measured extents and cycles")
             device_parts = dict(
-                dma=traffic / rates["dma_bytes_per_cycle"],
-                instructions=commands / rates["device_commands_per_cycle"],
+                measured_issue_and_dma=math.ceil(size / extent) * numerator / denominator,
                 setup=setup,
             )
         else:
