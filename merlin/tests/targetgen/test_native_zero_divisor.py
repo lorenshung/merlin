@@ -8,6 +8,7 @@ import pytest
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.integer_float_boundaries import has_literal_zero_divisor
 from merlin.targetgen.core_aten_components import prepare_integer_components
+from merlin.targetgen.native_dtype_domain import component_semantics
 
 
 def division_module(literal):
@@ -38,11 +39,20 @@ def test_uniform_literal_divisors(literal, expected):
     assert has_literal_zero_divisor(division_module(literal)) is expected
 
 
-def test_zero_divisor_falls_back_before_provider(tmp_path):
-    module = division_module("0.0")
+def test_certified_integer_conversion_zero_division():
+    proof = component_semantics(division_module("0.0"))
+    assert proof["status"] == "proven"
+    assert proof["method"] == "closed_typed_pointwise_IEEE_composition_v1"
+
+
+def test_uncertified_binary64_zero_divisor_falls_back_before_provider(tmp_path):
+    source = str(division_module("0.0"))
+    source = source.replace("i32", "f64").replace("f32", "f64")
+    source = source.replace("arith.sitofp %a : f64 to f64", "arith.negf %a : f64")
+    module = parse_mlir_text(source)
     original = str(module) + "\n"
     (tmp_path / "model.mlir").write_text(original)
-    np.savez(tmp_path / "inputs.npz", in0=np.array([0], np.int32))
+    np.savez(tmp_path / "inputs.npz", in0=np.array([0], np.float64))
 
     class Provider:
         def admit_numeric_schedule(self, *args, **kwargs):
@@ -51,7 +61,7 @@ def test_zero_divisor_falls_back_before_provider(tmp_path):
     assert (
         prepare_integer_components(
             tmp_path,
-            dict(cases=[dict(input_abi=[dict(dtype="i32")])]),
+            dict(cases=[dict(input_abi=[dict(dtype="f64")])]),
             dict(spec={}, host={}),
             Provider(),
             None,
@@ -62,4 +72,4 @@ def test_zero_divisor_falls_back_before_provider(tmp_path):
     )
     assert (tmp_path / "model.mlir").read_text() == original
     refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
-    assert refusal["code"] == "native_conversion_semantics_unproved"
+    assert refusal["code"] == "native_binary64_arithmetic_form_unproved"
