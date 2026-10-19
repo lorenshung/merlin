@@ -62,4 +62,4 @@ def test_zero_divisor_falls_back_before_provider(tmp_path):
     )
     assert (tmp_path / "model.mlir").read_text() == original
     refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
-    assert refusal["reason"] == "zero-divisor source is outside the closed IEEE pointwise family"
+    assert refusal["reason"] == "native zero-divisor readout lacks a CPU NaN-payload policy"

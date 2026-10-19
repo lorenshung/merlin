@@ -117,6 +117,7 @@ def test_fft_refusal_preserves_original_host_execution(tmp_path, monkeypatch):
         raise AssertionError("an undeclared FFT cannot enter device routing")
 
     monkeypatch.setattr(core_aten_device, "routing_for_bundle", route)
+    (tmp_path / "spec.yaml").write_text("{}\n")
     original = "original unquantized FFT source"
     (tmp_path / "model.mlir").write_text(original)
     report = {
@@ -239,9 +240,19 @@ def test_fft_without_unique_recipe_retains_host_source(tmp_path, monkeypatch, re
         raise AssertionError("ambiguous or absent recipes cannot recapture the source")
 
     monkeypatch.setattr(PytorchRefSource, "capture_loader", capture)
+    (tmp_path / "spec.yaml").write_text("{}\n")
     original = "builtin.module {}\n"
     (tmp_path / "model.mlir").write_text(original)
-    report = {"cases": [{"overload": "aten._fft_r2c.default", "status": "bundled"}]}
+    report = {
+        "cases": [
+            {
+                "overload": "aten._fft_r2c.default",
+                "status": "bundled",
+                "input_abi": [{"dtype": "f32", "shape": [2, 4]}],
+                "output_abi": [{"dtype": "f32", "shape": [2, 3, 2]}],
+            }
+        ]
+    }
     plan = core_aten_numeric.prepare_spec_int8(
         tmp_path,
         report,

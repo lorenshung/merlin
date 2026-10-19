@@ -138,9 +138,11 @@ import torch
 import torch.ao.quantization.fx._decomposed
 from merlin.targetgen._recipe_integer import _per_tensor_scale
 DQ = torch.ops.quantized_decomposed.dequantize_per_tensor.default
+# Centered int32 operands and exact correction planes retain signed/asymmetric
+# and unsigned byte schemes. Device admission still requires the provider proof.
 for lo, hi, zp, dtype, scale, allowed in [(-128,127,0,torch.int8,.5,True),
-    (-127,127,0,torch.int8,.5,True),(-128,127,-3,torch.int8,.5,False),
-    (0,255,123,torch.uint8,.5,False),(-128,127,0,torch.int8,.03,False)]:
+    (-127,127,0,torch.int8,.5,True),(-128,127,-3,torch.int8,.5,True),
+    (0,255,123,torch.uint8,.5,True),(-128,127,0,torch.int8,.03,False)]:
  class Model(torch.nn.Module):
   def forward(self,x):return DQ(x,scale,zp,lo,hi,dtype)
  graph = torch.export.export(Model(), (torch.ones(2,3,dtype=dtype),)).module().graph
