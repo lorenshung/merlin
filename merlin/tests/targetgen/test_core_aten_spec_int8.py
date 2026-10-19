@@ -449,3 +449,37 @@ def test_software_rank_constraints_refuse_non_ranks(rank):
     document["operations"]["host_dequantize_per_tensor"]["ranks"] = [rank]
     with pytest.raises(ValueError, match="nonnegative integers"):
         validate_software_spec(document)
+
+
+@pytest.mark.parametrize(
+    "k,admitted", [(1024, True), (1025, True), (4096, True), (11008, True), (131071, True), (131072, False)]
+)
+def test_planned_integer_readout_uses_int32_bound(selection, k, admitted):
+    source = str(rank2_module()).replace("40", str(k))
+    module = Parser(make_context(), source).parse_module()
+    (site,) = admission_plan(module, selection, planned_exact_readout=True)["sites"]
+    assert (site["status"] == "admitted") is admitted
+    assert site["cast_exact_range_obligation"] is None
+    assert site["readout"] == "int32_host_exact_pending_capture"
+    readout = next(row for row in site["steps"] if row["step"] == 5)
+    assert readout["qualification"] == "pending_integer_capture_and_provider_proof"
+    assert not any(row for row in site["steps"] if row["step"] == 6)
+    if admitted:
+        assert site["partial_sum_obligation"]["full_result_bound"] == k * 128 * 128
+    else:
+        assert any("i32 aggregation" in reason for reason in site["reasons"])
+
+
+@pytest.mark.parametrize("field,value", [("status", "unreviewed"), ("rounding", "half_up"), ("api", "unknown")])
+def test_planned_integer_readout_still_needs_reviewed_exact_api(selection, field, value):
+    changed = copy.deepcopy(selection)
+    changed["host"]["exact_readout"][field] = value
+    (site,) = admission_plan(rank2_module(), changed, planned_exact_readout=True)["sites"]
+    assert site["status"] == "refused"
+    assert any("exact rational host readout" in reason for reason in site["reasons"])
+
+
+def test_planned_flag_cannot_bypass_captured_float_chain(selection):
+    (site,) = admission_plan(rank2_module(), selection, captured=True, planned_exact_readout=True)["sites"]
+    assert site["status"] == "refused"
+    assert any("floating readout lacks" in reason for reason in site["reasons"])

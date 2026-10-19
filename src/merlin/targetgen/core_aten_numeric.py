@@ -321,7 +321,7 @@ def _prepare_spec_int8(
         for record in report["cases"]:
             record.update(numeric_admission=plan, numeric_selection=selection["identities"])
         return document
-    plan = admission_plan(module, selection)
+    plan = admission_plan(module, selection, planned_exact_readout=True)
     plan["source_sha256_before"] = hashlib.sha256(original).hexdigest()
     selected = [site for site in plan["sites"] if site["status"] == "admitted"]
     # A program with no admitted contraction is still worth recapturing when its floating sites would
@@ -417,6 +417,7 @@ def _prepare_spec_int8(
             accumulator_dtype=selection["readout_facets"][0]["accumulator_dtype"],
             software_admission=selection["spec"],
             software_numerical_engine="integer_reference",
+            readout_numerics="integer_readout",
             **({"host_readout_declarations": declaration_keys(selected[0])["mul"]} if selected else {}),
             fft_admission_selection={key: selection[key] for key in ("spec", "host", "identities")},
         )

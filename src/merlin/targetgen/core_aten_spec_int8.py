@@ -286,7 +286,9 @@ def mq_host_only(op):
     )
 
 
-def admission_plan(module, selection, *, captured=False, native=False, provider_proof=None):
+def admission_plan(
+    module, selection, *, captured=False, native=False, provider_proof=None, planned_exact_readout=False
+):
     """Independently screen all six steps at each source contraction's actual ranks."""
     from merlin.kernels.shapes import accumulator_init, observe_contractions, zero_initialised
     from merlin.llvmlower.contraction_quantization import closed_float_mac
@@ -430,7 +432,11 @@ def admission_plan(module, selection, *, captured=False, native=False, provider_
         )
         screen(3, "contraction", signature, "accelerator")
         cast_obligation = None
-        if readout is not None:
+        # A recapture explicitly requesting integer_readout has no i32->f32
+        # cast. This provisional plan must still be requalified against the
+        # actual captured source and provider proof before any device routing.
+        planned_integer_readout = planned_exact_readout and not captured and not native
+        if readout is not None or planned_integer_readout:
             policy = (spec.get("numerical_semantics") or {}).get("readout") or {}
             declared = host.get("exact_readout") or {}
             admitted = (
@@ -445,7 +451,11 @@ def admission_plan(module, selection, *, captured=False, native=False, provider_
                     op="exact_rational_host_readout",
                     placement="host",
                     status="admitted" if admitted else "refused",
-                    device_readout={key: value for key, value in readout.items() if key != "operation"},
+                    device_readout={key: value for key, value in (readout or {}).items() if key != "operation"},
+                    qualification="pending_integer_capture_and_provider_proof"
+                    if planned_integer_readout
+                    else "captured",
+                    rank=readout_rank,
                     source=declared,
                 )
             )
@@ -454,7 +464,7 @@ def admission_plan(module, selection, *, captured=False, native=False, provider_
             # The device returns the full accumulator. The retained source
             # readout owns coefficient signs and activation order; no device
             # ReLU or floating scale replaces that host expression.
-        if not native and readout is None:
+        if not native and readout is None and not planned_integer_readout:
             screen(
                 5,
                 "aten._to_copy.default",
@@ -533,7 +543,7 @@ def admission_plan(module, selection, *, captured=False, native=False, provider_
                 "source is not a closed unflagged MAC from zero (or from an int32 seed it reads out on device)"
             )
         try:
-            bound = integer_split_k_limit(spec, tile_dim=1, full_k=shape.reduction[0])
+            bound = integer_split_k_limit(spec, tile_dim=1, full_k=math.prod(shape.reduction))
             if bound is None:
                 reasons.append("no declared internal partial-sum arithmetic")
         except (ValueError, IndexError) as exc:
@@ -546,7 +556,13 @@ def admission_plan(module, selection, *, captured=False, native=False, provider_
                 source_dtypes=list(shape.dtypes),
                 result_rank=rank,
                 host_readout_bridge=readout_proof,
-                readout="int32_host_exact" if readout is not None else "host",
+                readout=(
+                    "int32_host_exact"
+                    if readout is not None
+                    else "int32_host_exact_pending_capture"
+                    if planned_integer_readout
+                    else "host"
+                ),
                 accumulator_init="int32_seed" if seeded else "zero",
                 steps=sorted(steps, key=lambda s: s["step"]),
                 partial_sum_obligation=bound,
