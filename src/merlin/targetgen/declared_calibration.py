@@ -103,9 +103,16 @@ def normalize_quantizer_nans(model, policy):
         for added in (mask,fill,selected):
             added.meta.update({key:source.meta[key] for key in ('val','tensor_meta','stack_trace','nn_module_stack','source_fn_stack') if key in source.meta})
         if 'val' in mask.meta:
-            mask.meta['val']=mask.meta['val'].to(dtype=torch.bool)
+            mask.meta['val']=dtype_metadata(mask.meta['val'],torch.bool)
         node.args=(selected,*node.args[1:])
         count+=1
     model.graph.lint()
     model.recompile()
     return count
+
+
+def dtype_metadata(value,dtype):
+    """Change observed metadata without reading even a real metadata payload."""
+    from torch._subclasses.fake_tensor import FakeTensor,FakeTensorMode
+    if not isinstance(value,FakeTensor):value=FakeTensorMode().from_tensor(value)
+    return value.to(dtype=dtype)
