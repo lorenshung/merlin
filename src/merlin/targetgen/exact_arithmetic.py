@@ -52,7 +52,7 @@ def round_binary(value, bits=32, *, bfloat16=False):
     unit = Fraction(2) ** (max(minimum_exp, exponent) - fraction_bits)
     rounded = round(value / unit) * unit
     if abs(rounded) >= Fraction(2) ** (maximum_exp + 1):
-        raise ValueError("exact floating boundary overflows")
+        return -math.inf if value < 0 else math.inf
     return -0.0 if not rounded and value < 0 else float(rounded)
 
 

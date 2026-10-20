@@ -192,3 +192,17 @@ assert torch.equal(materialize(clamped),torch.clamp(x.float()*.25,-1,1))
 reduced=evaluate_operation(torch.ops.aten.mean.dim,(value,[2],False),{'dtype':torch.float64})
 assert materialize(reduced).dtype==torch.float64
 """)
+
+
+def test_required_ieee_output_overflow_has_exact_thresholds():
+    run_torch(r"""
+import math
+from fractions import Fraction as F
+from merlin.targetgen.exact_arithmetic import round_binary
+for bits,p,emax in [(16,11,15),(32,24,127)]:
+ threshold=F(2)**(emax+1)-F(2)**(emax-p)
+ maximum=F(2)**(emax+1)-F(2)**(emax-p+1)
+ assert round_binary(threshold-F(1,2**100),bits)==float(maximum)
+ assert round_binary(threshold,bits)==math.inf
+ assert round_binary(-threshold,bits)==-math.inf
+""")
