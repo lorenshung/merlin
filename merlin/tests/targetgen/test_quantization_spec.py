@@ -377,3 +377,18 @@ def test_unknown_block_size_does_not_block_a_derived_per_tensor_format():
     match = build_quantization_contract(spec, _hardware())["formats"][0]["hardware_matches"][0]
     assert match["status"] == "candidate"
     assert match["parameters"]["block_size"]["status"] == "not_applicable"
+
+
+def test_evidence_prose_is_not_an_unknown_numerical_parameter():
+    from merlin.targetgen.quantization_spec import _unresolved
+
+    semantics = {
+        "domain": {
+            "minimum": -1.0,
+            "maximum": 1.0,
+            "provenance": "authored fixed observer range; pending operator review",
+            "evidence": {"review_status": "authored, pending operator review"},
+        },
+        "rounding": "unknown",
+    }
+    assert _unresolved(semantics, "numerical_semantics") == ["numerical_semantics.rounding"]
