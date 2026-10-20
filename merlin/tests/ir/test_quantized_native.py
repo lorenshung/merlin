@@ -388,3 +388,25 @@ def test_rational_divisors_survive_layouts_until_exported_quantize(tmp_path):
         [min(127, max(-128, round(Fraction(2 * i, 3)))) / 64 for i in range(-128, 128)], np.float32
     ).reshape(16, 16)
     assert y.tobytes() == expected.tobytes()
+
+
+def test_storage_obligation_refuses_quantization_before_any_payload_or_provider_access(tmp_path, monkeypatch):
+    import json
+
+    import merlin.targetgen.core_aten_spec_int8 as specs
+    import merlin.targetgen.functional_truth as truth
+    from merlin.targetgen.quantized_native import prepare
+
+    monkeypatch.setattr(truth, "expectation", lambda _: dict(precision_class="bit_exact_vs_eager"))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a storage obligation must not enter quantized preparation")
+
+    monkeypatch.setattr(specs, "select_spec", forbidden)
+    for value in (0.0, float("inf"), float("nan")):
+        report = dict(cases=[dict(status="bundled", case=dict(schema={}, arguments=dict(values=[value]), expected={}))])
+        assert prepare(tmp_path, report, target="test", facts={}, software_spec=None, host_capabilities=None) is None
+        assert (
+            json.loads((tmp_path / "quantized-native-refusal.json").read_text())["code"]
+            == "precision_class_requires_native_eager_bits"
+        )

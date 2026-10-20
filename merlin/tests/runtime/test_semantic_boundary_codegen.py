@@ -179,3 +179,64 @@ def test_aggregate_keeps_numeric_and_mutation_passes_when_aliases_fail(tmp_path)
     assert verdict["values_mutation_passed_count"] == 1
     assert verdict["numeric_passed_count"] == 1
     assert verdict["numeric_only_passed_count"] == 0
+
+
+@pytest.mark.parametrize("defect", [None, "output", "post", "alias", "metadata", "missing_reference"])
+def test_rational_reference_survives_full_semantic_evaluation(tmp_path, monkeypatch, defect):
+    pytest.importorskip("torch")
+    from merlin.targetgen.core_aten_batch_grade import grade_core_aten_batch
+    from merlin.targetgen.core_aten_eval import _validate_observation
+
+    record, observed = run_boundary(tmp_path)
+    record.update(overload="fixture", case_id="fixture", status="bundled", numeric_policy="spec_int8")
+    record["case"].update(case_id="fixture", comparison_parameters={"rtol": 0, "atol": 0})
+    # Capture-time values deliberately disagree with the independently prepared
+    # rational contract; metadata, mutation and aliases remain source-owned.
+    record["case"]["expected"]["values"] = [[9.0, 9.0], [9.0, 9.0]]
+    reference = {str(i): raw.hex() for i, raw in enumerate(observed["output_bytes"])}
+    record["numeric_admission"] = dict(
+        status="admitted",
+        quantized_contract={"scale_denominator": 64},
+        quantized_non_contraction_sites=1,
+        integer_reference=dict(status="prepared", engine="independent_source", expected_output_bytes=reference),
+    )
+    record["routing"] = dict(
+        lane="device",
+        routed=True,
+        target="gemmini",
+        routed_operations=[{}],
+        execution_evidence=dict(
+            case_id="fixture",
+            status="measured",
+            attribution="single_case_shard",
+            executed_instructions=1,
+            target="gemmini",
+        ),
+    )
+    monkeypatch.setattr("merlin.targetgen.core_aten_device.verify_execution_evidence", lambda _: True)
+    if defect in {"output", "post"}:
+        index = 0 if defect == "output" else 1
+        observed["output_bytes"][index] = bytes(len(observed["output_bytes"][index]))
+    elif defect == "alias":
+        observed["semantic_readback"]["aliases"][0] = []
+    elif defect == "metadata":
+        observed["semantic_readback"]["metadata"][0]["storage_offset"] = 1
+    elif defect == "missing_reference":
+        reference.pop("1")
+    verdict = grade_core_aten_batch(
+        {"cases": [record]}, observed["output_bytes"], semantic_readback=observed["semantic_readback"]
+    )["cases"]["fixture"]
+    if defect:
+        assert verdict["status"] != "pass"
+    else:
+        assert verdict["status"] == "pass"
+        _validate_observation(
+            record["case"],
+            {
+                **verdict["observation"],
+                "semantic_scope": verdict["semantic_scope"],
+                "imposed_by_harness": verdict["imposed_by_harness"],
+            },
+            allow_unobserved_autograd=True,
+        )
+        assert verdict["observation"]["output"]["values"] == [[1.0, 2.0], [3.0, 4.0]]

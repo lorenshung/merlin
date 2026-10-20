@@ -5,6 +5,30 @@ import json
 
 
 def prepare(directory, report, *, target, facts, software_spec, host_capabilities, provider=None, package=None, **_):
+    from merlin.targetgen.functional_truth import expectation
+
+    # Storage identities and literal fills retain their eager-bit obligation.
+    # Replacing that obligation with calibrated byte arithmetic would silently
+    # change the contract even if the quantized oracle itself were exact.
+    commitments = [
+        expectation(record["case"])
+        for record in report.get("cases", ())
+        if record.get("status") in {None, "bundled"}
+        and {"schema", "arguments", "expected"} <= record.get("case", {}).keys()
+    ]
+    if any(row["precision_class"] != "quantized_exact" for row in commitments):
+        (directory / "quantized-native-refusal.json").write_text(
+            json.dumps(
+                dict(
+                    code="precision_class_requires_native_eager_bits",
+                    reason="quantized arithmetic cannot discharge a storage or identity eager-bit obligation",
+                    precision_classes=sorted({row["precision_class"] for row in commitments}),
+                )
+            )
+            + "\n"
+        )
+        return None
+
     from merlin.frontends.linalg_mlir import parse_mlir_file
     from merlin.llvmlower.quantized_native import parameters
     from merlin.targetgen.core_aten_components import prepare_integer_components

@@ -442,12 +442,32 @@ def grade_core_aten_batch(
                 record["numeric_admission"].get("quantized_contractions", 0)
                 or record["numeric_admission"].get("quantized_non_contraction_sites", 0)
             ):
+                expected_case = record["case"]
+                if record["numeric_admission"].get("quantized_contract"):
+                    from merlin.targetgen.core_aten_semantics import full_observation
+
+                    # The rational byte oracle owns numeric values. Capture-time
+                    # eager/legacy quantized values are a different contract.
+                    # Reconstruct only from independently prepared oracle bytes;
+                    # the normal semantic validator still checks all metadata,
+                    # aliases and mutations against the sealed source case.
+                    reference_bytes = record["numeric_admission"]["integer_reference"]["expected_output_bytes"]
+                    required = [*record["output_indices"], *record["semantic_boundary"]["post_indices"]]
+                    if any(str(i) not in reference_bytes for i in required):
+                        verdict.update(status="ungradable", reason="rational oracle lacks complete boundary bytes")
+                        continue
+                    oracle_raw = [bytes.fromhex(reference_bytes.get(str(i), "")) for i in range(len(output_bytes))]
+                    oracle_observation = full_observation(record, oracle_raw, semantic_readback)
+                    expected_case = {
+                        "expected": oracle_observation["output"],
+                        "post_arguments": oracle_observation["post_arguments"],
+                    }
                 verdict["observation"]["numeric_reference"] = {
                     "policy": "spec_int8",
                     "gate": verdict["integer_reference"],
                     "admission_status": record["numeric_admission"]["status"],
-                    "expected": record["case"]["expected"],
-                    "post_arguments": record["case"]["post_arguments"],
+                    "expected": expected_case["expected"],
+                    "post_arguments": expected_case["post_arguments"],
                 }
 
     counts: dict[str, int] = {}
