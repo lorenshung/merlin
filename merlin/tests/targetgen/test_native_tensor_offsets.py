@@ -83,3 +83,33 @@ def test_magic_bias_through_storage_rne_is_excluded(offset):
 
 def test_literal_affine_offset_without_rounding_remains_eligible():
     assert construction_evidence(source('dense<0.5>', '%v = arith.addf %sum,%a : f32'))['status'] == 'eligible'
+
+
+def _sign_bias(body):
+    return parse_mlir_text('''module { func.func @f(%x: tensor<4xf32>) -> tensor<4xf32> {
+      %e = tensor.empty() : tensor<4xf32>
+      %r = linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>], iterator_types=["parallel"]}
+        ins(%x : tensor<4xf32>) outs(%e : tensor<4xf32>) {
+        ^bb0(%a:f32,%unused:f32):
+          ''' + body + '''
+          %n = arith.fptosi %sum : f32 to i32
+          %v = arith.sitofp %n : i32 to f32
+          linalg.yield %v : f32
+        } -> tensor<4xf32>
+      func.return %r : tensor<4xf32>
+    }}''')
+
+
+def test_literal_magnitude_with_runtime_sign_is_an_offset():
+    # Round half away from zero: x + copysign(0.5, x), then truncate.
+    m = _sign_bias('%h = arith.constant 0.5 : f32\n%b = math.copysign %h, %a : f32\n%sum = arith.addf %a,%b : f32')
+    m.verify()
+    result = construction_evidence(m, excluded=['readout_offset_rounding'])
+    assert result['status'] == 'host', result
+
+
+def test_runtime_magnitude_sign_transfer_is_not_an_offset():
+    # copysign(x, 0.5) = |x| carries runtime magnitude; adding it is not a literal bias.
+    m = _sign_bias('%h = arith.constant 0.5 : f32\n%b = math.copysign %a, %h : f32\n%sum = arith.addf %a,%b : f32')
+    m.verify()
+    assert construction_evidence(m, excluded=['readout_offset_rounding'])['status'] == 'eligible'

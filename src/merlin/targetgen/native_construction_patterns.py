@@ -160,6 +160,11 @@ class Payloads:
             edges = carrier_sources(value)
             owner = value.owner
             name = op_name(owner)
+            if name == "math.copysign":
+                # A sign transfer keeps its first operand's magnitude: a
+                # literal magnitude with a runtime sign is still a literal
+                # offset (round-half-away bias x + copysign(0.5, x)).
+                edges = (owner.operands[0],)
             if edges is None and name is not None and name.startswith(("arith.", "math.")):
                 # A closed literal expression remains a possible offset, also
                 # when loop backedges carry it through arithmetic. Runtime
