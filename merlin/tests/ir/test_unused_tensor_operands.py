@@ -38,3 +38,18 @@ def test_live_tensor_dependencies_are_not_pruned():
     }}""")
     original = str(module)
     assert prune_unused_tensor_inputs(module) == 0 and str(module) == original
+
+
+def test_unused_scalar_operand_still_defines_a_reduction_iteration_domain():
+    module = parse_mlir_text("""module {func.func @forward(%x:tensor<4xf32>) -> tensor<f32> {
+      %zero=arith.constant 0.0 : f32
+      %seed=tensor.splat %zero : tensor<f32>
+      %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->()>],iterator_types=["reduction"]}
+        ins(%x:tensor<4xf32>) outs(%seed:tensor<f32>) {
+        ^bb0(%unused:f32,%acc:f32):
+        linalg.yield %acc : f32
+      } -> tensor<f32>
+      return %r : tensor<f32>
+    }}""")
+    before = str(module)
+    assert prune_unused_tensor_inputs(module) == 0 and str(module) == before
