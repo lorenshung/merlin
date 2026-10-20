@@ -149,6 +149,36 @@ def test_runtime_parallel_products_do_not_gain_native_admission(tmp_path, monkey
     assert (tmp_path / "model.mlir").read_bytes() == original
 
 
+def test_reduction_dependent_parallel_product_is_still_a_composition(tmp_path, monkeypatch):
+    import merlin.targetgen.core_aten_spec_int8 as spec
+    from merlin.targetgen.quantized_native import prepare
+
+    software = load_yaml(ROOT / "examples/gemmini/target/software-spec.yaml")
+    monkeypatch.setattr(spec, "select_spec", lambda *a: dict(spec=software))
+    (tmp_path / "model.mlir").write_text("""module {
+      func.func @forward(%x:tensor<2xf32>) -> tensor<2xf32> {
+        %z=arith.constant 0.0 : f32
+        %seed=tensor.splat %z : tensor<1xf32>
+        %sum=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(0)>],iterator_types=["reduction"]}
+          ins(%x:tensor<2xf32>) outs(%seed:tensor<1xf32>) {
+        ^bb0(%a:f32,%acc:f32):
+          %s=arith.addf %a,%acc : f32
+          linalg.yield %s : f32
+        } -> tensor<1xf32>
+        %e=tensor.empty() : tensor<2xf32>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x,%sum:tensor<2xf32>,tensor<1xf32>) outs(%e:tensor<2xf32>) {
+        ^bb0(%a:f32,%b:f32,%out:f32):
+          %v=arith.mulf %a,%b : f32
+          linalg.yield %v : f32
+        } -> tensor<2xf32>
+        return %r : tensor<2xf32>
+    }}""")
+    report = dict(cases=[dict(status="bundled", input_abi=[dict(dtype="f32")], output_abi=[dict(dtype="f32")])])
+    assert prepare(tmp_path, report, target="test", facts={}, software_spec=None, host_capabilities=None) is None
+    assert "parallel runtime product" in (tmp_path / "quantized-native-refusal.json").read_text()
+
+
 def test_native_exact_success_does_not_try_quantization(tmp_path, monkeypatch):
     import merlin.targetgen.core_aten_admission as admission
     import merlin.targetgen.quantized_native as fallback
@@ -162,6 +192,67 @@ def test_native_exact_success_does_not_try_quantization(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fallback, "prepare", forbidden)
     assert prepare_spec_int8(tmp_path, {}) is expected
+
+
+@pytest.mark.parametrize("oracle_failure", [False, True])
+def test_payload_changes_cannot_choose_host_placement(tmp_path, monkeypatch, oracle_failure):
+    import json
+    from types import SimpleNamespace
+
+    import merlin.targetgen.core_aten_components as components
+    import merlin.targetgen.core_aten_numeric as numeric
+    import merlin.targetgen.core_aten_spec_int8 as spec
+    from merlin.targetgen.quantized_native import prepare
+
+    software = load_yaml(ROOT / "examples/gemmini/target/software-spec.yaml")
+    monkeypatch.setattr(spec, "select_spec", lambda *a: dict(spec=software))
+    prepared_sources = []
+
+    def component_plan(directory, report, selection, provider, package, module, **kw):
+        prepared_sources.append(str(module))
+        return dict(status="admitted", exact_dtype_sites=1, quantized_contract=kw["quantized_contract"])
+
+    def independent_reference(directory, mode):
+        if oracle_failure:
+            return SimpleNamespace(returncode=1, stderr="oracle qualification failed")
+        request = json.loads((directory / "quantized-native-request.json").read_text())
+        value = request["records"][0]["case"]["values"][0]
+        (directory / "quantized-native-reference.json").write_text(
+            json.dumps(dict(expected_output_bytes={"0": np.array([value], np.float32).tobytes().hex()}))
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(components, "prepare_integer_components", component_plan)
+    monkeypatch.setattr(numeric, "_source_reference", independent_reference)
+    plans = []
+    for ordinal, values in enumerate(([0.0], [float("inf")], [float("nan")])):
+        directory = tmp_path / str(ordinal)
+        directory.mkdir()
+        source = "module { func.func @forward(%x:tensor<1xf32>) -> tensor<1xf32> { return %x : tensor<1xf32> } }"
+        (directory / "model.mlir").write_text(source)
+        report = dict(
+            output_count=1,
+            cases=[
+                dict(
+                    status="bundled",
+                    input_abi=[dict(dtype="f32")],
+                    output_abi=[dict(dtype="f32")],
+                    case=dict(values=values),
+                )
+            ],
+        )
+        kwargs = dict(target="test", facts={}, software_spec=None, host_capabilities=None)
+        if oracle_failure:
+            with pytest.raises(ArithmeticError, match="qualification failed"):
+                prepare(directory, report, **kwargs)
+            assert (directory / "model.mlir").read_text() == source
+        else:
+            plan = prepare(directory, report, **kwargs)
+            assert plan["native_admission"]["status"] == "device"
+            plans.append({k: v for k, v in plan.items() if k != "integer_reference"})
+    assert len(set(prepared_sources)) == 1
+    if plans:
+        assert plans[0] == plans[1] == plans[2]
 
 
 def test_nan_word_overlay_is_removed_but_live_nan_is_refused():

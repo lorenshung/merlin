@@ -44,3 +44,13 @@ An oracle failure is a qualification error and cannot choose host placement
 based on payload data. Metadata, post-input storage, aliases and mutations
 retain the existing separate whole-call checks. FireSim expectations come from
 this oracle and independently recorded input storage.
+
+A parallel product of two runtime payloads remains a composition even when an
+operand depends on a reduction. Only a compile-time numeric operand removes
+that objection. Quantized placement does not turn a reduction-dependent
+parallel product into a primitive.
+
+The tests cover nonfinite quantizer inputs, ties, unchanged post-input bytes,
+all byte codes through a rational divisor and a layout change, negative oracle
+grading, native-path priority and payload-independent admission. Source oracle
+failures raise qualification errors rather than selecting a host lane.

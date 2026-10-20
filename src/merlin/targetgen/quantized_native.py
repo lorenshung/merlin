@@ -50,22 +50,6 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
     from merlin.llvmlower.uniform_numeric_literals import compile_time_operand
     from merlin.targetgen.native_construction_patterns import Payloads
 
-    payloads = Payloads(module)
-    for primitive in module.walk():
-        if primitive.name != "math.fma":
-            continue
-        if any(compile_time_operand(v) or payloads.contraction_dependent(v) for v in primitive.operands[:2]):
-            continue
-        parent = primitive.parent_op()
-        if (
-            parent is not None
-            and parent.name == "linalg.generic"
-            and all(it.data.value == "parallel" for it in parent.get_iterator_types())
-        ):
-            (directory / "quantized-native-refusal.json").write_text(
-                json.dumps(dict(reason="parallel runtime product requires a composition")) + "\n"
-            )
-            return None
     policy = construction_evidence(
         module, excluded=selection["spec"]["numerical_semantics"]["native_unit_contract"]["excluded_constructions"]
     )
@@ -82,6 +66,24 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
     except ValueError as exc:
         (directory / "quantized-native-refusal.json").write_text(json.dumps(dict(reason=str(exc))) + "\n")
         return None
+    payloads = Payloads(module)
+    for primitive in module.walk():
+        if primitive.name not in {"arith.mulf", "math.fma"}:
+            continue
+        if any(compile_time_operand(v) or payloads.constant(v) is not None for v in primitive.operands[:2]):
+            continue
+        parent = primitive.parent_op()
+        if (
+            parent is not None
+            and parent.name == "linalg.generic"
+            and all(it.data.value == "parallel" for it in parent.get_iterator_types())
+        ):
+            # Reduction-dependent operands do not change a parallel product's
+            # mathematical role: it is still a composition of native units.
+            (directory / "quantized-native-refusal.json").write_text(
+                json.dumps(dict(reason="parallel runtime product requires a composition")) + "\n"
+            )
+            return None
     normalized = construction_evidence(
         module, excluded=selection["spec"]["numerical_semantics"]["native_unit_contract"]["excluded_constructions"]
     )
