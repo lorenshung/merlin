@@ -1212,7 +1212,7 @@ pins:
       verdict without changing anything in merlin. Pinned separately from the chipyard root because it
       is a submodule with its own revision: the outer tree can move while this one does not, and vice
       versa, so recording only one of the two leaves the result ambiguous.
-    repo_canonical: https://github.com/ucb-bar/gemmini
+    repo_canonical: https://github.com/ucb-bar/gemmini.git
     commit: "6ad65b90b1eb270c20ce4f04109e3dde0180b36f"
     targets: [gemmini]
     branch: HEAD
