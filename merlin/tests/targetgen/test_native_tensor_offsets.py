@@ -28,7 +28,6 @@ ROUNDINGS = [
     '%v = math.trunc %sum : f32',
     '%v = math.round %sum : f32',
     '%v = math.roundeven %sum : f32',
-    '%n = arith.truncf %sum : f32 to f16\n%v = arith.extf %n : f16 to f32',
     '%wide = arith.extf %sum : f32 to f64\n%n = arith.fptosi %wide : f64 to i32\n%v = arith.sitofp %n : i32 to f32',
     '%one = arith.constant 1.0 : f32\n%p = arith.mulf %sum,%one : f32\n%v = math.floor %p : f32',
 ]
@@ -54,6 +53,32 @@ def test_scalar_splat_offset_is_not_an_escape(rounding):
 def test_zero_tensor_offset_is_not_biased_rounding(rounding):
     assert construction_evidence(source('dense<-0.0>', rounding),
                                  excluded=['readout_offset_rounding'])['status'] == 'eligible'
+
+
+# An IEEE float-to-float RNE narrowing (f32 -> f16 here) rounds to the storage
+# format's significand, not to an integer: it is the exact storage boundary of
+# an ordinary affine result (eager f16/bf16 add.Scalar computes x + c in f32 and
+# rounds once to storage). Literal offsets before it, uniform or not, are not
+# offset-rounding constructions. Magic-bias rounding through the same boundary,
+# (x + C) narrowed and widened, then - C, stays excluded.
+STORAGE_RNE = '%n = arith.truncf %sum : f32 to f16\n%v = arith.extf %n : f16 to f32'
+
+
+@pytest.mark.parametrize('offset', ['dense<0.5>', 'dense<[0.0,0.5,0.0,-0.5]>'])
+def test_storage_rne_after_literal_offset_is_not_offset_rounding(offset):
+    assert construction_evidence(source(offset, STORAGE_RNE),
+                                 excluded=['readout_offset_rounding'])['status'] == 'eligible'
+    assert construction_evidence(source('0.5', STORAGE_RNE, splat=True),
+                                 excluded=['readout_offset_rounding'])['status'] == 'eligible'
+
+
+@pytest.mark.parametrize('offset', ['dense<1536.0>', 'dense<[1536.0,3072.0,1536.0,6144.0]>'])
+def test_magic_bias_through_storage_rne_is_excluded(offset):
+    m = source(offset, STORAGE_RNE.replace('%v = arith.extf %n : f16 to f32',
+                                           '%w = arith.extf %n : f16 to f32\n%v = arith.subf %w,%b : f32'))
+    m.verify()
+    result = construction_evidence(m, excluded=['readout_offset_rounding'])
+    assert result['status'] == 'host', result
 
 
 def test_literal_affine_offset_without_rounding_remains_eligible():

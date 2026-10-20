@@ -31,6 +31,13 @@ EXTREMA = {
 ROUNDING = {"math.floor", "math.ceil", "math.trunc", "math.round", "math.roundeven"}
 
 
+def same_literal(first, second):
+    """Equal literal tables; a uniform table equals its scalar or splat form."""
+    if first is None or second is None:
+        return False
+    return first == second or (len(set(first)) == 1 and set(first) == set(second))
+
+
 def dataflow(root, memo, expand, combine=any):
     """Evaluate a scalar SSA DAG iteratively, including deeply split programs."""
     stack, active, dependencies = [root], set(), {}
@@ -110,12 +117,33 @@ class Payloads:
                 return first
         return None
 
+    def literal_values(self, value):
+        """Return every element of a closed literal, uniform or not; None otherwise.
+
+        A literal whose elements are not materialized in the IR (for example a
+        resource blob) is still closed, but its values are unknown: it yields
+        one ``None`` element, which no zero test can discharge.
+        """
+        op = self.operation(value)
+        if getattr(op, "name", None) != "arith.constant":
+            return None
+        attr = op.properties.get("value", op.attributes.get("value"))
+        if hasattr(attr, "value") and hasattr(attr.value, "data"):
+            return (attr.value.data,)
+        from xdsl.dialects.builtin import DenseIntOrFPElementsAttr
+
+        if isinstance(attr, DenseIntOrFPElementsAttr):
+            return tuple(attr.get_values())
+        return (None,)
+
     def nonzero_literal(self, root):
         """Prove a literal addend, rather than a runtime value with literal ancestry.
 
-        Every carrier alternative must supply a literal scalar/splat.
-        Runtime selects containing IEEE masks or NaN encodings are not offsets.
-        Opaque carriers remain subject to the independent fail-closed screen.
+        Every carrier alternative must supply a closed literal: a scalar, a
+        splat, or a non-uniform dense table (a per-element bias table is as
+        much an offset as a uniform one). Runtime selects containing IEEE
+        masks or NaN encodings are not offsets. Opaque carriers remain subject
+        to the independent fail-closed screen.
         """
         from merlin.targetgen.native_payload_carriers import carrier_sources, op_name
 
@@ -125,9 +153,9 @@ class Payloads:
             if value in seen:
                 continue
             seen.add(value)
-            direct = self.constant(value)
+            direct = self.literal_values(value)
             if direct is not None:
-                literals.append(direct)
+                literals.extend(direct)
                 continue
             edges = carrier_sources(value)
             owner = value.owner
@@ -144,7 +172,8 @@ class Payloads:
             pending.extend(edges)
         # Backedges introduce no new value by themselves. Every external leaf
         # must be a literal, and a cycle without a literal seed proves nothing.
-        return bool(literals) and any(value != 0 for value in literals)
+        # An element of unknown value (None) is conservatively nonzero.
+        return bool(literals) and any(value is None or value != 0 for value in literals)
 
     def offset_before(self, root):
         """Find a literal addend through casts, arithmetic and all known carriers."""
@@ -337,10 +366,15 @@ class Payloads:
             if (floating or self.readout(op.results[0])) and self.offset_before(op.operands[0]):
                 reasons.append("readout_offset_rounding")
         # Floating magic-bias rounding: (x + C) - C, C nonzero.
+        # A non-uniform literal table of magic biases is screened the same way.
         if name == "arith.subf":
             addition = self.operation(op.operands[0])
-            offset = self.constant(op.operands[1])
-            if offset is not None and offset != 0 and getattr(addition, "name", None) == "arith.addf":
-                if any(self.constant(v) == offset for v in addition.operands):
-                    reasons.append("readout_offset_rounding")
+            offset = self.literal_values(op.operands[1])
+            if (
+                offset
+                and any(v is None or v != 0 for v in offset)
+                and getattr(addition, "name", None) == "arith.addf"
+                and any(same_literal(self.literal_values(v), offset) for v in addition.operands)
+            ):
+                reasons.append("readout_offset_rounding")
         return sorted(set(reasons))
