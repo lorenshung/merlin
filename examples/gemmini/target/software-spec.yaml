@@ -214,6 +214,7 @@ numerical_semantics:
     status: authored_pending_operator_review
     minimum: -1.0
     maximum: 1.0
+    scale_policy: enclosing_power_of_two
     evaluation_inputs: never_read
     provenance: authored fixed observer range for all static recipe tensors; values outside the range clamp at quantization
   component_domain:

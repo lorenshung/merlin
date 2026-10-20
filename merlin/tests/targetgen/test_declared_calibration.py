@@ -14,7 +14,7 @@ def test_program_qparams_and_integer_kernel_are_payload_independent():
     recipe=dict(schema='quant_recipe_v1',status='derived',families=['contraction'],
         weight=dict(dtype='int8',granularity='tensor',symmetric=True,quant_min=-127,quant_max=127),
         activation=dict(dtype='int8',granularity='tensor',symmetric=True,quant_min=-128,quant_max=127,mode='static'),
-        calibration_domain=dict(schema='merlin.declared_observer_domain.v1',minimum=-1.,maximum=1.,evaluation_inputs='never_read'))
+        calibration_domain=dict(schema='merlin.declared_observer_domain.v1',minimum=-1.,maximum=1.,evaluation_inputs='never_read',scale_policy='enclosing_power_of_two'))
     graphs=[];qparams=[]
     class ForbiddenStream:
         def __iter__(self):raise AssertionError('evaluation calibration stream was inspected')

@@ -35,5 +35,20 @@ def initialize_observers(prepared, declaration, observer_type):
         sample_shape[varying_axis] = 2
         sample = torch.tensor([lower,upper],dtype=torch.float32).reshape(sample_shape).expand(shape)
         observer(sample)
+        if declaration.get('scale_policy') == 'enclosing_power_of_two':
+            from types import MethodType
+
+            original = observer.calculate_qparams
+
+            def qparams(self, original=original):
+                scales, zero = original()
+                def enclose(value):
+                    fraction, exponent = math.frexp(value)
+                    return value if fraction == .5 else math.ldexp(1., exponent)
+                rounded = torch.tensor([enclose(v) for v in scales.reshape(-1).tolist()],
+                                       dtype=scales.dtype,device=scales.device).reshape(scales.shape)
+                return rounded, zero
+
+            observer.calculate_qparams = MethodType(qparams,observer)
         count += 1
     return count
