@@ -83,6 +83,7 @@ def fold_ieee_identity_selectors(module):
 
 def fold_zero_sign_selectors(module):
     """select(x == 0, copysign(0,x), x) preserves every IEEE storage word."""
+    from xdsl.dialects import arith
     from xdsl.ir import BlockArgument
     from xdsl.rewriter import Rewriter
 
@@ -127,11 +128,15 @@ def fold_zero_sign_selectors(module):
                 and isinstance(bits, int)
                 and bits % (1 << width) == 1 << (width - 1)
             ):
+                block = op.parent_block()
                 Rewriter.replace_op(op, [], [data])
                 # Only remove the proved, now-dead scalar wiring. Unknown
                 # effects and other region operations retain their identity.
                 for dead in (cast, mask, raw, predicate):
                     if all(not value.uses for value in dead.results):
+                        Rewriter.erase_op(dead)
+                for dead in list(block.ops):
+                    if isinstance(dead, arith.ConstantOp) and all(not value.uses for value in dead.results):
                         Rewriter.erase_op(dead)
                 count += 1
                 break
