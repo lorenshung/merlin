@@ -74,3 +74,21 @@ def test_rational_aggregate_can_feed_a_declared_nan_selector():
         inputs=(torch.full((1,1,2,2),value),)
         expected=run(model,inputs).output
         assert torch.equal(expected.view(torch.uint8),model(*inputs).view(torch.uint8))
+
+
+@pytest.mark.parametrize('value',[0.,float('nan'),float('inf'),-float('inf')])
+def test_pool_adjoint_reads_only_primal_shape(value):
+    torch=pytest.importorskip('torch')
+    import numpy as np
+    from fractions import Fraction
+    from merlin.targetgen.exact_arithmetic import ExactTensor
+    from merlin.targetgen.exact_quantized_reference import evaluate_operation
+    gradient=ExactTensor(np.full((1,1,2,2),Fraction(1,7),dtype=object),torch.float32)
+    primal=torch.full((1,1,3,3),value)
+    for target,args in [
+        (torch.ops.aten._adaptive_avg_pool2d_backward.default,(gradient,primal)),
+        (torch.ops.aten.avg_pool2d_backward.default,(gradient,primal,[2,2],[1,1],[0,0],False,True,None)),
+    ]:
+        actual=evaluate_operation(target,args,{})
+        expected=np.array([[1,2,1],[2,4,2],[1,2,1]],dtype=object)*Fraction(1,28)
+        assert np.array_equal(actual.values[0,0],expected)

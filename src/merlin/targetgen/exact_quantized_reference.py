@@ -365,6 +365,11 @@ def evaluate_operation(target, args, kwargs):
         value = 0 if op.startswith("zeros") else 1 if op.startswith("ones") else args[1]
         shape = args[0] if op in {"full", "zeros", "ones"} else (args[0].values.shape if isinstance(args[0], ExactTensor) else args[0].shape)
         return ExactTensor(np.full(shape, rational(value), dtype=object), dtype)
+    if op.startswith(("avg_pool", "adaptive_avg_pool", "_adaptive_avg_pool")) and op.endswith("backward"):
+        # The primal tensor supplies geometry only. Its storage values have no
+        # dependence path to the adjoint, including nonfinite unused payloads.
+        shape = args[1].values.shape if isinstance(args[1], ExactTensor) else args[1].shape
+        return ExactTensor(_pool_backward(exact_array(args[0]), shape, name, args, kwargs), dtype)
     a = [exact_array(x) if isinstance(x, (ExactTensor, torch.Tensor)) else x for x in args]
     if op in {"add", "sub", "mul", "div", "true_divide"}:
         alpha = rational(args[2] if len(args) > 2 and op in {"add", "sub"} else kwargs.get("alpha", 1))
