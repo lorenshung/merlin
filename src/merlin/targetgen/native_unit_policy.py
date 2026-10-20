@@ -112,13 +112,17 @@ def construction_evidence(module, *, excluded=None):
             "arith.extf", "arith.truncf", "arith.sitofp", "arith.uitofp",
         }:
             return (owner.operands[0],)
-        if name == "tensor.insert_slice":
+        if name in {"tensor.insert_slice", "tensor.insert"}:
             return tuple(owner.operands[:2])
+        if name in {"tensor.gather", "tensor.pack", "tensor.unpack"}:
+            return (owner.operands[0],)
+        if name == "tensor.generate":
+            return (owner.regions[0].block.last_op.operands[0],)
         if name == "tensor.pad":
             return (owner.operands[0], owner.regions[0].block.last_op.operands[0])
         if name in {"linalg.broadcast", "linalg.transpose", "linalg.copy", "linalg.fill"}:
             return tuple(owner.operands[:1])
-        if name == "tensor.concat":
+        if name in {"tensor.concat", "tensor.from_elements"}:
             return tuple(owner.operands)
         if name == "scf.if":
             return tuple(region.block.last_op.operands[value.index] for region in owner.regions)

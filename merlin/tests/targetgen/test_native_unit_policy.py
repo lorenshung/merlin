@@ -297,6 +297,8 @@ import pytest
 
 
 @pytest.mark.parametrize('carrier,result_type',[
+ ('%i=arith.constant 0:index\n%a=tensor.extract %table[%i,%i]:tensor<2x2xi32>\n%r=tensor.insert %a into %x[%i,%i]:tensor<2x2xi32>','2x2xi32'),
+ ('%i=arith.constant 0:index\n%a=tensor.extract %table[%i,%i]:tensor<2x2xi32>\n%r=tensor.from_elements %a:tensor<1xi32>','1xi32'),
  ('%r="tensor.concat"(%x,%table) <{dim=0:i64}> : (tensor<2x2xi32>,tensor<2x2xi32>) -> tensor<4x2xi32>','4x2xi32'),
  ('%r="tensor.insert_slice"(%table,%x) <{static_offsets=array<i64:0,0>,static_sizes=array<i64:2,2>,static_strides=array<i64:1,1>,operandSegmentSizes=array<i32:1,1,0,0,0>}> : (tensor<2x2xi32>,tensor<2x2xi32>) -> tensor<2x2xi32>','2x2xi32'),
  ('%r="tensor.extract_slice"(%table) <{static_offsets=array<i64:0,0>,static_sizes=array<i64:2,2>,static_strides=array<i64:1,1>,operandSegmentSizes=array<i32:1,0,0,0>}> : (tensor<2x2xi32>) -> tensor<2x2xi32>','2x2xi32'),
