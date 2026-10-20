@@ -36,6 +36,47 @@ def test_program_qparams_and_integer_kernel_are_payload_independent():
     assert all(graph==graphs[0] for graph in graphs)  # Complete executable integer graph, not a near-value comparison.
 
 
+@pytest.mark.parametrize('code', [1, 15])
+def test_nonexact_affine_intermediate_refuses_before_payload_agreement(code):
+    torch = pytest.importorskip('torch')
+    from merlin.targetgen._recipe_quantizer import apply_recipe, NoEligibleRecipeOperations
+
+    class Model(torch.nn.Module):
+        def forward(self, x):return x * 1.1
+
+    recipe = dict(schema='quant_recipe_v1', status='derived', families=['contraction', 'affine_map'],
+        weight=dict(dtype='int8', granularity='tensor', symmetric=True, quant_min=-127, quant_max=127),
+        activation=dict(dtype='int8', granularity='tensor', symmetric=True, quant_min=-128, quant_max=127, mode='static'),
+        calibration_domain=dict(schema='merlin.declared_observer_domain.v1', minimum=-1., maximum=1.,
+            evaluation_inputs='never_read', scale_policy='enclosing_power_of_two'))
+    # Code 1 happened to agree, whereas code 15 rounds the exact 16.5+epsilon
+    # to an intermediate f32 tie. Both programs must receive the same refusal.
+    with pytest.raises(NoEligibleRecipeOperations) as caught:
+        apply_recipe(Model(), recipe, example_inputs=(torch.tensor([code / 64.]),))
+    assert caught.value.code == 'declared_affine_domain_unproved'
+    assert caught.value.details['integer_recipes'][0]['declared_affine_domain']['status'] == 'refused'
+
+
+def test_affine_lattice_proof_covers_all_byte_codes_and_partial_sums():
+    torch = pytest.importorskip('torch')
+    from fractions import Fraction
+    from merlin.targetgen.affine_float_domain import prove_affine_domain
+
+    coefficients = (Fraction(3, 128), Fraction(-5, 64))
+    offset = Fraction(7, 256)
+    prove_affine_domain(coefficients, offset)
+    left = torch.arange(-128, 128, dtype=torch.float32)[:, None]
+    right = torch.arange(-128, 128, dtype=torch.float32)[None, :]
+    got = left * float(coefficients[0]) + right * float(coefficients[1]) + float(offset)
+    # Integer-grid expected words cover every pair, independent of input data.
+    expected = (left.to(torch.int64) * 6 - right.to(torch.int64) * 20 + 7).double() / 256
+    assert torch.equal(got.double(), expected)
+    with pytest.raises(ValueError, match='intermediate floating rounding'):
+        prove_affine_domain((Fraction(float(1.1)) / 64,), Fraction(0))
+    with pytest.raises(ValueError, match='non-dyadic'):
+        prove_affine_domain((Fraction(1, 3),), Fraction(0))
+
+
 @pytest.mark.parametrize('token,low,high',[('int8',-128,127),('uint8',0,255),('int8',-8,7)])
 def test_declared_nonfinite_byte_boundary_matches_every_half_nan_word(token,low,high):
     torch=pytest.importorskip('torch')

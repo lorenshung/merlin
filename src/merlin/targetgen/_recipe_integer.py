@@ -88,7 +88,7 @@ def _window_divisor(node: Any) -> int | None:
     return None
 
 
-def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
+def integer_recipes(graph_module: Any, *, declared_domain=None) -> list[dict[str, Any]]:
     """Integer recipe parameters for each converted affine map and movement, keyed by node name.
 
     Reads the scales PT2E calibrated on the node's own dequantize inputs and quantize output, and
@@ -136,6 +136,11 @@ def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
                 or arg.args[4] != 127
                 for arg in parameter_nodes
             ):
+                if declared_domain is not None and family in {"affine_map", "operand_sum"}:
+                    row["declared_affine_domain"] = dict(
+                        status="refused", reason="centered affine byte domain lacks a floating intermediate proof"
+                    )
+                    raise RN.RecipeNumericsError(row["declared_affine_domain"]["reason"])
                 # The source Q/DQ expression retains all centering, boundary
                 # predicates and one final RNE. These parameters do not grant
                 # a device schedule: integerization, independent exact oracle
@@ -190,6 +195,14 @@ def integer_recipes(graph_module: Any) -> list[dict[str, Any]]:
                 coefficients = (rational(inputs[0]),)
             recipe = None
             if coefficients is not None:
+                if declared_domain is not None:
+                    from merlin.targetgen.affine_float_domain import prove_affine_domain
+
+                    try:
+                        row["declared_affine_domain"] = prove_affine_domain(coefficients, offset)
+                    except ValueError as exc:
+                        row["declared_affine_domain"] = dict(status="refused", reason=str(exc))
+                        raise RN.RecipeNumericsError(str(exc)) from exc
                 activation = "relu" if name.startswith("aten.relu") else "none"
                 try:
                     if len(coefficients) == 1:

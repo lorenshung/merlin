@@ -1391,7 +1391,7 @@ def apply_recipe(
 
         scale_changes = canonicalize_pt2e_scales(quantized)
     restore_floating_readout_widths(quantized)
-    from merlin.targetgen.declared_calibration import normalize_quantizer_nans
+    from merlin.targetgen.declared_calibration import declared_integer_recipes, normalize_quantizer_nans
 
     normalize_quantizer_nans(quantized, recipe.get("quantization_nonfinite"))
     if original_frontend_snapshot is not None:
@@ -1423,7 +1423,7 @@ def apply_recipe(
         # Float dtype conversions and fills spelt at float32 and read out at their requested width.
         "floating_readout_widths": quantizer.readout_widths,
         # The exact integer form of every quantized affine map and movement, from its observed scales.
-        "integer_recipes": integer_recipes(quantized),
+        "integer_recipes": declared_integer_recipes(quantized, declared_domain),
         "scale_canonicalization": {"dtype": "float32", "changes": scale_changes},
         # Sums and means the recipe's families cover and the graph does not requantize: left alone.
         "sums_and_means_left_in_float": quantizer.left_in_float,

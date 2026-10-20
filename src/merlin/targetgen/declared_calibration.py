@@ -116,3 +116,19 @@ def dtype_metadata(value,dtype):
     from torch._subclasses.fake_tensor import FakeTensor,FakeTensorMode
     if not isinstance(value,FakeTensor):value=FakeTensorMode().from_tensor(value)
     return value.to(dtype=dtype)
+
+
+def declared_integer_recipes(model, domain):
+    """Refuse an unproved affine domain before any payload agreement gate."""
+    from merlin.targetgen._recipe_integer import integer_recipes
+
+    rows = integer_recipes(model, declared_domain=domain)
+    refused = [row for row in rows if row.get('declared_affine_domain', {}).get('status') == 'refused']
+    if refused:
+        from merlin.targetgen._recipe_quantizer import NoEligibleRecipeOperations
+
+        error = NoEligibleRecipeOperations('retained affine intermediates lack a full declared-domain exactness proof')
+        error.code = 'declared_affine_domain_unproved'
+        error.details = dict(integer_recipes=refused)
+        raise error
+    return rows
