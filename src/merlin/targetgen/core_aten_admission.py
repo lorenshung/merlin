@@ -90,6 +90,14 @@ def prepare(directory, report, implementation, **kwargs):
         admission["precision_class"] = "quantized_exact"
         if not proves_quantized_model(plan, software):
             admission.update(status="host", reason_code="declared_quantized_precision_requires_quantized_model")
+    if plan.get("capture_recipe"):
+        from merlin.targetgen.native_integer_work import uncovered
+
+        missing = uncovered(parse_mlir_text((directory / "model.mlir").read_text()), plan.get("schedule_proof"))
+        if missing:
+            admission.update(
+                status="host", reason_code="native_integer_family_work_uncovered", uncovered_source_ordinals=missing
+            )
     # Static descriptor queries are exported through a tensor wrapper, but
     # carry no tensor data. A capture-owned proof distinguishes them from real
     # literal fills and rank-zero tensor arithmetic without an overload roster.
