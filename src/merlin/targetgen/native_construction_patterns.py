@@ -111,27 +111,32 @@ class Payloads:
         return None
 
     def nonzero_literal(self, root):
-        from xdsl.dialects.builtin import DenseIntOrFPElementsAttr
+        """Prove a literal addend, rather than a runtime value with literal ancestry.
 
-        from merlin.targetgen.native_payload_carriers import carrier_sources, op_name
+        All carrier alternatives must supply the same nonzero scalar/splat.
+        Runtime selects containing IEEE masks or NaN encodings are not offsets.
+        Opaque carriers remain subject to the independent fail-closed screen.
+        """
+        from merlin.targetgen.native_payload_carriers import carrier_sources
 
-        pending, seen = [root], set()
-        while pending:
-            value = pending.pop()
-            if value in seen:
-                continue
-            seen.add(value)
-            op = value.owner
-            if op_name(op) == "arith.constant":
-                attr = op.properties.get("value", op.attributes.get("value"))
-                if isinstance(attr, DenseIntOrFPElementsAttr):
-                    if any(v != 0 for v in attr.get_values()):
-                        return True
-                elif hasattr(attr, "value") and attr.value.data != 0:
-                    return True
-            else:
-                pending.extend(carrier_sources(value) or ())
-        return False
+        active = set()
+
+        def literal(value):
+            if value in active:
+                return None
+            direct = self.constant(value)
+            if direct is not None:
+                return direct
+            active.add(value)
+            edges = carrier_sources(value)
+            values = [literal(edge) for edge in edges] if edges else []
+            active.remove(value)
+            if values and values[0] is not None and all(v == values[0] for v in values):
+                return values[0]
+            return None
+
+        value = literal(root)
+        return value is not None and value != 0
 
     def offset_before(self, root):
         """Find a literal addend through casts, arithmetic and all known carriers."""
@@ -301,9 +306,13 @@ class Payloads:
         # offset-rounding implementation. Its input may be an ordinary affine
         # expression. Magic-bias arithmetic and float-to-integer rounding are
         # still checked independently below.
-        storage_rne = name == "arith.truncf" and (
-            str(op.operands[0].type), str(op.results[0].type)
-        ) in {("f64", "f32"), ("f64", "f16"), ("f64", "bf16"), ("f32", "f16"), ("f32", "bf16")}
+        storage_rne = name == "arith.truncf" and (str(op.operands[0].type), str(op.results[0].type)) in {
+            ("f64", "f32"),
+            ("f64", "f16"),
+            ("f64", "bf16"),
+            ("f32", "f16"),
+            ("f32", "bf16"),
+        }
         storage_rne = storage_rne and not any(
             key in op.properties or key in op.attributes for key in ("roundingmode", "roundingMode")
         )

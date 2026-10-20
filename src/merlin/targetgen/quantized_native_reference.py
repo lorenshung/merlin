@@ -10,6 +10,34 @@ from fractions import Fraction
 from pathlib import Path
 
 
+def canonical_scalar(dtype, operation, value):
+    """ATen scalar promotion precedes the exact rational operation.
+
+    Add/sub materialize their scalar in storage; mul/div use opmath. This
+    depends only on the declared dtype and literal, never tensor payloads.
+    """
+    import math
+
+    from merlin.targetgen.exact_arithmetic import round_binary
+
+    if isinstance(value, complex):
+        component = {"complex<f32>": "f32", "complex<f64>": "f64"}.get(dtype, dtype)
+        return complex(
+            canonical_scalar(component, operation, value.real), canonical_scalar(component, operation, value.imag)
+        )
+    if dtype not in {"f16", "bf16", "f32", "f64"} or not math.isfinite(value):
+        return value
+    target = dtype if operation in {"aten.add.Scalar", "aten.sub.Scalar"} else "f64" if dtype == "f64" else "f32"
+    try:
+        return round_binary(
+            Fraction(value),
+            16 if target in {"f16", "bf16"} else 32 if target == "f32" else 64,
+            bfloat16=target == "bf16",
+        )
+    except OverflowError:
+        return math.copysign(float("inf"), value)
+
+
 def main():
     import numpy as np
     import torch
@@ -57,6 +85,14 @@ def main():
         # Dtypes govern only the final required dequantization, not accumulation.
         args, kwargs = arguments["args"], arguments["kwargs"]
         kwargs = dict(kwargs)
+        if case["overload"] in {"aten.add.Scalar", "aten.sub.Scalar", "aten.mul.Scalar", "aten.div.Scalar"}:
+            dtype = record["input_abi"][0]["dtype"]
+            if len(args) > 1:
+                args = list(args)
+                args[1] = canonical_scalar(dtype, case["overload"], args[1])
+            elif "other" in kwargs:
+                kwargs["other"] = canonical_scalar(dtype, case["overload"], kwargs["other"])
+
         if "dtype" in kwargs and kwargs["dtype"] is not None:
             kwargs["dtype"] = torch.float32
         op = source._op(case["overload"])

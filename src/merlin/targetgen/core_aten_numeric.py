@@ -149,7 +149,34 @@ def prepare_spec_int8(
     **kwargs,
 ):
     from merlin.targetgen.core_aten_admission import prepare
+    from merlin.targetgen.functional_truth import expectation
 
+    records = [r for r in report.get("cases", []) if r.get("status") in {None, "bundled"}]
+    commitments = [
+        expectation(r["case"]) for r in records if {"schema", "arguments", "expected"} <= r.get("case", {}).keys()
+    ]
+    if commitments and len(commitments) == len(records) and any(c["lane"] != "device" for c in commitments):
+        from merlin.targetgen.core_aten_spec_int8 import select_spec
+
+        selection = select_spec(kwargs["target"], kwargs["facts"], kwargs["software_spec"], kwargs["host_capabilities"])
+        guard = next(c for c in commitments if c["lane"] != "device")
+        result = dict(
+            selection=selection,
+            status="host",
+            sites=[],
+            exact_dtype_sites=0,
+            native_contractions=0,
+            quantized_contractions=0,
+            quantized_non_contraction_sites=0,
+            refusal_code=guard["truth"],
+            host_reason=guard["reason"],
+            functional_truth=commitments,
+            native_admission=dict(status="host", reason_code=guard["truth"]),
+        )
+        for r, c in zip(records, commitments):
+            r.update(numeric_admission=result, functional_truth=c)
+        (directory / "spec-int8-admission.json").write_text(json.dumps(result, indent=2) + "\n")
+        return result
     result = prepare(directory, report, _prepare_spec_int8, **kwargs)
     if result.get("native_admission", {}).get("status") != "device" and result.get("refusal_code") not in {
         "empty_tensor_no_device_work",
@@ -190,6 +217,15 @@ def _prepare_spec_int8(
     if empty is not None:
         return empty
     module = parse_mlir_file(directory / "model.mlir")
+    from merlin.llvmlower.empty_reductions import fold_empty_reductions
+
+    if fold_empty_reductions(module):
+        from merlin.llvmlower.entry_weight_projection import _pure_dce
+
+        for function in module.walk():
+            if function.name == "func.func":
+                _pure_dce(function)
+        (directory / "model.mlir").write_text(str(module) + "\n")
     if any("prov.input_metadata_mutation" in op.attributes for op in module.walk()):
         # Resizing/restriding caller storage is a host descriptor effect. Device
         # materialization cannot replace that effect or prove its alias ABI.

@@ -65,8 +65,7 @@ def test_integer_conversion_does_not_admit_a_retained_host_float_sum(tmp_path):
     assert decision is None
     assert (tmp_path / "model.mlir").read_text() == original
     assert (
-        json.loads((tmp_path / "exact-dtype-refusal.json").read_text())["code"]
-        == "native_conversion_semantics_unproved"
+        json.loads((tmp_path / "exact-dtype-refusal.json").read_text())["code"] == "native_aggregate_nan_order_unproved"
     )
 
 
@@ -124,7 +123,7 @@ def test_device_pointwise_prelude_does_not_hide_a_host_bilinear_loop(tmp_path):
     assert decision is None
     assert (tmp_path / "model.mlir").read_text() == original
     refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
-    assert refusal["code"] == "native_ieee_arithmetic_semantics_unproved"
+    assert refusal["code"] == "native_competing_nan_priority_unproved"
 
 
 @pytest.mark.parametrize("predicate", ["cmpf", "maximumf", "minimumf"])
@@ -217,7 +216,7 @@ def test_fused_components_retain_only_self_nan_classification(tmp_path, monkeypa
     assert decision is None  # The provider deliberately withholds its proof.
     assert not called
     refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
-    assert refusal["code"] == "native_external_semantics_unproved"
+    assert refusal["code"] == "native_parallel_runtime_product_construction"
 
 
 def test_nan_classification_after_conversion_has_no_arithmetic_witness():

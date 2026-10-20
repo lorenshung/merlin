@@ -1,5 +1,7 @@
 """Native roles are derived from source scalar dataflow, never overload names."""
 
+import pytest
+
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.native_unit_policy import construction_evidence
 
@@ -293,30 +295,130 @@ def test_readout_uses_only_the_current_module_during_prelude_rewriting():
     assert construction_evidence(module, excluded=["multi_op_identity"])["status"] == "host"
 
 
-import pytest
-
-
-@pytest.mark.parametrize('carrier,result_type',[
- ('%r=linalg.generic {indexing_maps=[affine_map<(d0,d1)->(d0,d1)>],iterator_types=["parallel","parallel"]} outs(%table:tensor<2x2xi32>) { ^bb0(%old:i32): linalg.yield %old:i32 } -> tensor<2x2xi32>','2x2xi32'),
- ('%r=linalg.generic {indexing_maps=[affine_map<(d0,d1)->(d0,d1)>,affine_map<(d0,d1)->(d0,d1)>],iterator_types=["parallel","parallel"]} ins(%x:tensor<2x2xi32>) outs(%table:tensor<2x2xi32>) { ^bb0(%unused:i32,%old:i32): linalg.yield %old:i32 } -> tensor<2x2xi32>','2x2xi32'),
- ('%i=arith.constant 0:index\n%a=tensor.extract %table[%i,%i]:tensor<2x2xi32>\n%r=tensor.insert %a into %x[%i,%i]:tensor<2x2xi32>','2x2xi32'),
- ('%i=arith.constant 0:index\n%a=tensor.extract %table[%i,%i]:tensor<2x2xi32>\n%r=tensor.from_elements %a:tensor<1xi32>','1xi32'),
- ('%r="tensor.concat"(%x,%table) <{dim=0:i64}> : (tensor<2x2xi32>,tensor<2x2xi32>) -> tensor<4x2xi32>','4x2xi32'),
- ('%r="tensor.insert_slice"(%table,%x) <{static_offsets=array<i64:0,0>,static_sizes=array<i64:2,2>,static_strides=array<i64:1,1>,operandSegmentSizes=array<i32:1,1,0,0,0>}> : (tensor<2x2xi32>,tensor<2x2xi32>) -> tensor<2x2xi32>','2x2xi32'),
- ('%r="tensor.extract_slice"(%table) <{static_offsets=array<i64:0,0>,static_sizes=array<i64:2,2>,static_strides=array<i64:1,1>,operandSegmentSizes=array<i32:1,0,0,0>}> : (tensor<2x2xi32>) -> tensor<2x2xi32>','2x2xi32'),
- ('%r=tensor.cast %table : tensor<2x2xi32> to tensor<?x2xi32>','?x2xi32'),
- ('%r=tensor.collapse_shape %table [[0,1]] : tensor<2x2xi32> into tensor<4xi32>','4xi32'),
- ('%flat=tensor.collapse_shape %table [[0,1]] : tensor<2x2xi32> into tensor<4xi32>\n%r=tensor.expand_shape %flat [[0,1]] output_shape [2,2] : tensor<4xi32> into tensor<2x2xi32>','2x2xi32'),
- ('%shape=arith.constant dense<[4]> : tensor<1xi64>\n%r=tensor.reshape %table(%shape) : (tensor<2x2xi32>,tensor<1xi64>) -> tensor<4xi32>','4xi32'),
- ('%e=tensor.empty() : tensor<2x2x2xi32>\n%r=linalg.broadcast ins(%table:tensor<2x2xi32>) outs(%e:tensor<2x2x2xi32>) dimensions=[0]','2x2x2xi32'),
- ('%z=arith.constant 0:i32\n%r=tensor.pad %table low[1,1] high[1,1] { ^bb0(%i:index,%j:index): tensor.yield %z:i32 } : tensor<2x2xi32> to tensor<4x4xi32>','4x4xi32'),
-])
-def test_nonuniform_literal_tables_cannot_hide_behind_movement(carrier,result_type):
-    module=parse_mlir_text('module { func.func @forward(%x:tensor<2x2xi32>) -> tensor<'+result_type+'> {\n%table=arith.constant dense<[[1,2],[3,4]]> : tensor<2x2xi32>\n'+carrier+'\nfunc.return %r : tensor<'+result_type+'>\n}}')
+@pytest.mark.parametrize(
+    "carrier,result_type",
+    [
+        (
+            (
+                "%r=linalg.generic {indexing_maps=[affine_map<(d0,d1)->(d0,d1)>],iterat"
+                'or_types=["parallel","parallel"]} outs(%table:tensor<2x2xi32>) { ^bb0('
+                "%old:i32): linalg.yield %old:i32 } -> tensor<2x2xi32>"
+            ),
+            "2x2xi32",
+        ),
+        (
+            (
+                "%r=linalg.generic {indexing_maps=[affine_map<(d0,d1)->(d0,d1)>,affine_"
+                'map<(d0,d1)->(d0,d1)>],iterator_types=["parallel","parallel"]} ins(%x:'
+                "tensor<2x2xi32>) outs(%table:tensor<2x2xi32>) { ^bb0(%unused:i32,%old:"
+                "i32): linalg.yield %old:i32 } -> tensor<2x2xi32>"
+            ),
+            "2x2xi32",
+        ),
+        (
+            (
+                "%i=arith.constant 0:index\n%a=tensor.extract %table[%i,%i]:tensor<2x2xi"
+                "32>\n%r=tensor.insert %a into %x[%i,%i]:tensor<2x2xi32>"
+            ),
+            "2x2xi32",
+        ),
+        (
+            (
+                "%i=arith.constant 0:index\n%a=tensor.extract %table[%i,%i]:tensor<2x2xi"
+                "32>\n%r=tensor.from_elements %a:tensor<1xi32>"
+            ),
+            "1xi32",
+        ),
+        (
+            '%r="tensor.concat"(%x,%table) <{dim=0:i64}> : (tensor<2x2xi32>,tensor<2x2xi32>) -> tensor<4x2xi32>',
+            "4x2xi32",
+        ),
+        (
+            (
+                '%r="tensor.insert_slice"(%table,%x) <{static_offsets=array<i64:0,0>,st'
+                "atic_sizes=array<i64:2,2>,static_strides=array<i64:1,1>,operandSegment"
+                "Sizes=array<i32:1,1,0,0,0>}> : (tensor<2x2xi32>,tensor<2x2xi32>) -> te"
+                "nsor<2x2xi32>"
+            ),
+            "2x2xi32",
+        ),
+        (
+            (
+                '%r="tensor.extract_slice"(%table) <{static_offsets=array<i64:0,0>,stat'
+                "ic_sizes=array<i64:2,2>,static_strides=array<i64:1,1>,operandSegmentSi"
+                "zes=array<i32:1,0,0,0>}> : (tensor<2x2xi32>) -> tensor<2x2xi32>"
+            ),
+            "2x2xi32",
+        ),
+        ("%r=tensor.cast %table : tensor<2x2xi32> to tensor<?x2xi32>", "?x2xi32"),
+        ("%r=tensor.collapse_shape %table [[0,1]] : tensor<2x2xi32> into tensor<4xi32>", "4xi32"),
+        (
+            (
+                "%flat=tensor.collapse_shape %table [[0,1]] : tensor<2x2xi32> into tens"
+                "or<4xi32>\n%r=tensor.expand_shape %flat [[0,1]] output_shape [2,2] : te"
+                "nsor<4xi32> into tensor<2x2xi32>"
+            ),
+            "2x2xi32",
+        ),
+        (
+            (
+                "%shape=arith.constant dense<[4]> : tensor<1xi64>\n%r=tensor.reshape %ta"
+                "ble(%shape) : (tensor<2x2xi32>,tensor<1xi64>) -> tensor<4xi32>"
+            ),
+            "4xi32",
+        ),
+        (
+            (
+                "%e=tensor.empty() : tensor<2x2x2xi32>\n%r=linalg.broadcast ins(%table:t"
+                "ensor<2x2xi32>) outs(%e:tensor<2x2x2xi32>) dimensions=[0]"
+            ),
+            "2x2x2xi32",
+        ),
+        (
+            (
+                "%z=arith.constant 0:i32\n%r=tensor.pad %table low[1,1] high[1,1] { ^bb0"
+                "(%i:index,%j:index): tensor.yield %z:i32 } : tensor<2x2xi32> to tensor"
+                "<4x4xi32>"
+            ),
+            "4x4xi32",
+        ),
+    ],
+)
+def test_nonuniform_literal_tables_cannot_hide_behind_movement(carrier, result_type):
+    module = parse_mlir_text(
+        "module { func.func @forward(%x:tensor<2x2xi32>) -> tensor<"
+        + result_type
+        + "> {\n%table=arith.constant dense<[[1,2],[3,4]]> : tensor<2x2xi32>\n"
+        + carrier
+        + "\nfunc.return %r : tensor<"
+        + result_type
+        + ">\n}}"
+    )
     module.verify()
     # prepare() applies this same structural classifier to both source and
     # prepared IR; no source spelling or producer provenance grants an escape.
-    for screened in (module,module.clone()):
-        proof=construction_evidence(screened)
-        assert proof['status']=='host'
-        assert any(e['reason']=='nonuniform_literal_result_construction' for e in proof['evidence'])
+    for screened in (module, module.clone()):
+        proof = construction_evidence(screened)
+        assert proof["status"] == "host"
+        assert any(e["reason"] == "nonuniform_literal_result_construction" for e in proof["evidence"])
+
+
+def test_runtime_ieee_selection_with_literal_ancestry_is_not_an_offset():
+    module = source("""%z=arith.constant 0.0 : f32
+        %nan=arith.cmpf uno, %a,%a : f32
+        %lhs=arith.select %nan,%z,%a : f32
+        %rhs=arith.select %nan,%z,%b : f32
+        %sum=arith.addf %lhs,%rhs : f32
+        %i=arith.fptosi %sum : f32 to i32
+        %v=arith.sitofp %i : i32 to f32""")
+    assert construction_evidence(module, excluded=["readout_offset_rounding"])["status"] == "eligible"
+
+
+def test_dense_splat_literal_offset_still_refuses():
+    module = source(
+        """%sum=arith.addf %a,%b : f32
+        %i=arith.fptosi %sum : f32 to i32
+        %v=arith.sitofp %i : i32 to f32""",
+        literal=True,
+    )
+    assert construction_evidence(module, excluded=["readout_offset_rounding"])["status"] == "host"

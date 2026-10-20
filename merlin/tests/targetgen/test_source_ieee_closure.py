@@ -110,7 +110,7 @@ def test_unproved_native_source_refuses_without_reading_eager_or_inputs(tmp_path
         is None
     )
     refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
-    assert refusal["code"] == "native_ieee_arithmetic_semantics_unproved"
+    assert refusal["code"] == "native_component_transfer_unadmitted"
     assert "source_agreement" not in refusal
     assert (tmp_path / "model.mlir").read_text() == source
 
@@ -223,5 +223,5 @@ def test_native_reduced_storage_requires_complete_source_observation(tmp_path):
         is None
     )
     refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
-    assert refusal["code"] == "native_external_semantics_unproved"
+    assert refusal["code"] == "native_parallel_runtime_product_construction"
     assert (tmp_path / "model.mlir").read_text() == source

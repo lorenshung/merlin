@@ -353,10 +353,11 @@ def _target(context: InvocationContext) -> str:
     return _target_sim_via(context)[0]
 
 
-# gsim shares verilator's rung: both are elaborated-RTL, cycle-accurate engines over the SAME
+# gsim and vcs share verilator's rung: all are elaborated-RTL, cycle-accurate engines over the SAME
 # design (GemminiGsimMonitorsConfig is GemminiRocketConfig plus a harness-level clock
-# instantiator, so the DUT is identical). It is the tier that differs by ENGINE, never by name.
-SIM_TIER = {"spike": "L2", "verilator": "L3", "gsim": "L3", "vcs": "L4"}
+# instantiator, so the DUT is identical; the VCS simv compiles the same firtool Verilog the
+# Verilator harness does). It is the tier that differs by ENGINE, never by name.
+SIM_TIER = {"spike": "L2", "verilator": "L3", "gsim": "L3", "vcs": "L3"}
 
 
 def _required_rtl_engine() -> str | None:
@@ -422,34 +423,16 @@ def _adapters(sim: str, target: str, sim_via: str | None, *, readback_policy=Non
     if policy_error:
         raise ValueError(policy_error)
     kwargs = {} if readback_policy is None else {"readback_policy": readback_policy}
-    if sim == "vcs" and readback_policy is not None:
-        raise ValueError("VCS self-check does not support the selected invocation readback policy")
     if sim_via == "chipyard":
         ad = {"L2": CR.simulator_adapter("spike", target, **kwargs)}
-        if sim in ("verilator", "gsim"):
+        if sim in ("verilator", "gsim", "vcs"):
             # Build L3 from the engine the caller NAMED. This used to hardcode "verilator", which made
             # --sim gsim silently certify on verilator -- a result attributed to the wrong engine. The
             # adapter factory is engine-generic (it forwards simulator=sim and gates on
             # backend.available(sim)), so an absent engine fails closed here rather than substituting.
+            # VCS is the same L3 rung through the provider's own `run_elf(simulator="vcs")`; the old
+            # L4 branch imported a `merlin.targetgen.vcs_adapter` module that was never shipped.
             ad["L3"] = CR.simulator_adapter(sim, target, **kwargs)
-        if sim == "vcs":
-            # In the unpinned legacy ladder VCS is an L4 addition above Verilator L3.  An experiment-wide
-            # VCS pin, however, means *no other RTL engine may run*, so do not build that Verilator rung.
-            # If VCS is unavailable the pinned run must refuse instead of silently substituting.
-            required = _required_rtl_engine()
-            if required is None:
-                ad["L3"] = CR.simulator_adapter("verilator", target)
-            try:
-                from merlin.targetgen import vcs_adapter as VA  # optional, config-gated
-
-                ad["L4"] = VA.adapter()
-            except Exception as exc:
-                if required is not None:
-                    raise ValueError(
-                        f"required RTL engine {required!r} is unavailable: {type(exc).__name__}: {exc}"
-                    ) from exc
-                print("  (vcs adapter unavailable in this environment — falling back to verilator L3)", file=sys.stderr)
-                sim = "verilator"
         return ad, sim
     # non-chipyard target: its contract-resolved tiers (arc / program oracle); --sim does not apply.
     return CR.oracle_adapters(target, sim_via, **kwargs), sim

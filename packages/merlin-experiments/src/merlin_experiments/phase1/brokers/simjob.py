@@ -389,15 +389,22 @@ def _per_capsule_timeout(
     derived, why = _cert_budget_s(str(context.target or ""))
     if derived:
         return max(_CERT_TIMEOUT_FLOOR_S, int(derived)), f"derived from {why}"
-    from merlin_experiments.phase1.timing import read_verified_timing, requires_chipyard_timing, timing_path
+    from merlin_experiments.phase1.timing import (
+        per_capsule_seconds,
+        read_verified_timing,
+        record_engine,
+        requires_chipyard_timing,
+        timing_path,
+    )
 
     descriptor = getattr(context, "descriptor", None)
+    engine = "verilator"
     if requires_chipyard_timing(descriptor):
         tf = timing_file or timing_path(context.experiment, context.target)
         try:
-            measured = int(
-                2 * read_verified_timing(tf, descriptor=descriptor, target=context.target)["verilator_per_capsule_s"]
-            )
+            record = read_verified_timing(tf, descriptor=descriptor, target=context.target)
+            engine = record_engine(record)
+            measured = int(2 * per_capsule_seconds(record))
         except ValueError as exc:  # absent/foreign observations cannot shorten a Chipyard cert budget
             return _CERT_TIMEOUT_FALLBACK_S, f"no engine cost law and no target-bound measurement ({why}; {exc})"
     else:
@@ -407,7 +414,7 @@ def _per_capsule_timeout(
         except Exception:  # noqa: BLE001 -- no measurement: the historical constant
             return _CERT_TIMEOUT_FALLBACK_S, f"no engine cost law and no recorded measurement ({why})"
     return max(_CERT_TIMEOUT_FLOOR_S, measured), (
-        f"no engine cost law ({why}); fell back to the recorded verilator measurement"
+        f"no engine cost law ({why}); fell back to the recorded {engine} measurement"
     )
 
 

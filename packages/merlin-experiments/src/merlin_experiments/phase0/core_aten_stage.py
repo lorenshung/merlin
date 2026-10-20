@@ -114,9 +114,11 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
                 batches.append(dict(cohort=cohort, retained=entries))
                 continue
             lane = row.get("lane", "host-guard" if cohort == "host_guard" else "device")
-            if lane not in {"device", "host-guard", "any", "admission"} or (cohort == "host_guard" and lane != "host-guard"):
+            if lane not in {"device", "host-guard", "any", "admission", "truth"} or (
+                cohort == "host_guard" and lane not in {"host-guard", "no-work"}
+            ):
                 raise ValueError("invalid selected capsule lane")
-            if lane == "admission" and flow is None:
+            if lane in {"admission", "truth"} and flow is None:
                 raise ValueError("admission-derived lanes require numeric_flow")
             prepare_numeric = row.get("prepare_numeric", False)
             if "prepare_numeric" in row and (lane != "any" or type(prepare_numeric) is not bool):
@@ -393,7 +395,7 @@ def generate(
                 manifests.append({"retained": batch["retained"]})
                 continue
             lane = batch.get("lane", "host-guard" if cohort == "host_guard" else "device")
-            device, scored = lane == "device", lane != "host-guard"
+            device, scored = lane == "device", lane not in {"host-guard", "no-work"}
             # Each batch uses its own writer manifest; aggregate only our actual members.
             writer_manifest = category / "manifest.json"
             if writer_manifest.exists():
@@ -407,10 +409,12 @@ def generate(
                     label="hidden" if cohort == "hidden" else "public",
                     tiers=("L2",),
                     **({"admission_lanes": True} if lane == "admission" else {}),
+                    **({"truth_lanes": True} if lane == "truth" else {}),
                     **({"workers": block["workers"]} if block.get("workers", 1) != 1 else {}),
                     **(
                         {"numeric_flow": {**block["numeric_flow"], "target": target}}
-                        if (device or lane == "admission" or batch.get("prepare_numeric")) and block.get("numeric_flow")
+                        if (device or lane in {"admission", "truth"} or batch.get("prepare_numeric"))
+                        and block.get("numeric_flow")
                         else {}
                     ),
                 )
@@ -421,8 +425,8 @@ def generate(
                 continue
             manifests.append(manifest)
             for row in manifest["capsules"]:
-                member_lane = row["lane_expectation"] if lane == "admission" else lane
-                device, scored = member_lane == "device", member_lane != "host-guard"
+                member_lane = row["lane_expectation"] if lane in {"admission", "truth"} else lane
+                device, scored = member_lane == "device", member_lane not in {"host-guard", "no-work"}
                 member = category / row["id"]
                 declaration_path = member / "capsule.yaml"
                 capsule = yaml.safe_load(declaration_path.read_bytes())

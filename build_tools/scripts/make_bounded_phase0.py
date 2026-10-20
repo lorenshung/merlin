@@ -34,12 +34,18 @@ def generate(args):
     selected = cases if args.limit is None else cases[: args.limit]
     if len(selected) < 2:
         raise ValueError("strict experiment requires disjoint public and hidden cases")
-    # Visibility is independent of placement. Every case's actual lane is
-    # derived from the same general native proof used by numeric preparation.
-    public = selected[1:]
-    hidden = selected[0]
+    # Commit semantic truth before asking the compiler for any placement.
+    from merlin.targetgen.functional_truth import expectation
+
+    commitments = {c.get("case_id", c["overload"]): expectation(c) for c in selected}
+    native = [c for c in selected if commitments[c.get("case_id", c["overload"])]["lane"] == "device"]
+    guards = [c for c in selected if commitments[c.get("case_id", c["overload"])]["lane"] != "device"]
+    if len(native) < 2:
+        raise ValueError("strict truth experiment needs disjoint public and hidden native cases")
+    public, hidden = native[1:], native[0]
     output = args.output
     output.mkdir(parents=True, exist_ok=False, mode=0o700)
+    (output / "expectations.json").write_text(json.dumps(commitments, sort_keys=True, indent=2) + "\n")
     selected_suite = output / "cases.json"
     selected_suite.write_text(
         json.dumps({"cases": selected, "denominator_sha256": suite.get("denominator_sha256")}, sort_keys=True) + "\n"
@@ -83,9 +89,9 @@ def generate(args):
             "overlay": str(args.overlay),
             "numeric_flow": flow,
             "cohorts": {
-                "public": [row(public, "admission")],
-                "hidden": [row([hidden], "admission")],
-                "host_guard": [],
+                "public": [row(public, "truth")],
+                "hidden": [row([hidden], "truth")],
+                "host_guard": [row(guards, "truth")] if guards else [],
             },
         },
     }
@@ -101,7 +107,7 @@ def generate(args):
                 "schema_version": 1,
                 "id": f"{target}-bounded-core-aten-phase0",
                 "target": target,
-                "description": "Strict full calls with native-admission-derived lane expectations.",
+                "description": "Phase 0 (functional, all native ops): strict independent truth lanes.",
                 "inputs": {"target": str(output / "descriptor.yaml")},
                 "phases": {
                     0: {
@@ -120,9 +126,12 @@ def generate(args):
     receipt = {
         "suite_sha256": hashlib.sha256(args.suite.read_bytes()).hexdigest(),
         "selected_count": len(selected),
-        "lane_policy": "native_admission",
+        "lane_policy": "functional_truth",
         "hidden_count": 1,
-        "placement": "derived during capsule construction; no support roster or exceptions",
+        "device_count": len(native),
+        "no_work_count": sum(c["lane"] == "no-work" for c in commitments.values()),
+        "host_guard_count": len(guards),
+        "placement": "user-reviewed semantic truth; compiler placement must match in both directions",
         "scope": "definition only; no execution claim",
     }
     (output / "definition.json").write_text(json.dumps(receipt, indent=2) + "\n")

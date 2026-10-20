@@ -213,7 +213,18 @@ def simplify_static_controls(module):
         xs = [known[v] for v in op.operands]
         result = None
         if name in {"arith.extf", "arith.truncf", "arith.sitofp", "arith.uitofp"}:
-            result = xs[0]
+            from merlin.targetgen.exact_arithmetic import round_binary
+
+            token = str(op.results[0].type)
+            if token not in {"f16", "bf16", "f32", "f64"}:
+                continue
+            # These are compile-time scalar conversions. Their storage RNE
+            # fixes the coefficient before rational device arithmetic begins.
+            result = Fraction(
+                round_binary(
+                    xs[0], 16 if token in {"f16", "bf16"} else 32 if token == "f32" else 64, bfloat16=token == "bf16"
+                )
+            )
         elif name in {"arith.addf", "arith.addi"}:
             result = xs[0] + xs[1]
         elif name in {"arith.subf", "arith.subi"}:

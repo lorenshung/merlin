@@ -14,9 +14,28 @@ def construction_evidence(module, *, excluded=None):
     # Classify the canonical arithmetic role, without mutating source bytes.
     # A one-contribution monoid identity is storage movement, not a predicate
     # implementation. The emitted movement path repeats this exact proof.
-    if any(operation.name == "linalg.reduce" for operation in module.walk()):
+    candidates = any(
+        op.name == "linalg.reduce"
+        or (
+            op.name == "linalg.generic"
+            and any(hasattr(v.type, "get_shape") and 0 in v.type.get_shape() for v in op.operands)
+        )
+        for op in module.walk()
+    )
+    if candidates:
         canonical = module.clone()
-        if fold_singleton_reductions(canonical):
+        from merlin.llvmlower.empty_reductions import fold_empty_reductions
+
+        empty_folds = fold_empty_reductions(canonical)
+        singleton_folds = (
+            fold_singleton_reductions(canonical) if any(op.name == "linalg.reduce" for op in canonical.walk()) else 0
+        )
+        if empty_folds or singleton_folds:
+            from merlin.llvmlower.entry_weight_projection import _pure_dce
+
+            for function in canonical.walk():
+                if function.name == "func.func":
+                    _pure_dce(function)
             module = canonical
     evidence = []
     payloads = Payloads(module)
@@ -87,13 +106,19 @@ def construction_evidence(module, *, excluded=None):
     for ordinal, op in enumerate(module.walk()):
         if op.name == "func.return":
             masks = [literal_payloads.classify(v) for v in op.operands]
-            for mask, reason in ((TABLE, "nonuniform_literal_result_construction"),
-                                 (UNKNOWN, "unproved_payload_carrier")):
+            for mask, reason in (
+                (TABLE, "nonuniform_literal_result_construction"),
+                (UNKNOWN, "unproved_payload_carrier"),
+            ):
                 if any(value & mask for value in masks):
-                    evidence.append(dict(
-                        ordinal=ordinal, operation=op.name, reason=reason,
-                        **({"carriers": sorted(literal_payloads.unknown_operators)} if mask == UNKNOWN else {}),
-                    ))
+                    evidence.append(
+                        dict(
+                            ordinal=ordinal,
+                            operation=op.name,
+                            reason=reason,
+                            **({"carriers": sorted(literal_payloads.unknown_operators)} if mask == UNKNOWN else {}),
+                        )
+                    )
         for reason in payloads.patterns(op):
             evidence.append(dict(ordinal=ordinal, operation=op.name, reason=reason))
         if op.name == "linalg.generic":
@@ -127,10 +152,13 @@ def construction_evidence(module, *, excluded=None):
         # An unrelated reduction elsewhere in the module grants no exemption.
         if not any(payloads.contraction_dependent(v) for v in op.operands):
             evidence.append(dict(ordinal=ordinal, operation=op.name, reason="parallel_runtime_product_construction"))
-    selected = evidence if excluded is None else [
-        entry for entry in evidence
-        if entry["reason"] in excluded or entry["reason"] == "unproved_payload_carrier"
-    ]
+    selected = (
+        evidence
+        if excluded is None
+        else [
+            entry for entry in evidence if entry["reason"] in excluded or entry["reason"] == "unproved_payload_carrier"
+        ]
+    )
     return dict(
         schema="merlin.native_unit_policy.v1",
         status="host" if selected else "eligible",

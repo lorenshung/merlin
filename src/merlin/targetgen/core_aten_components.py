@@ -267,25 +267,25 @@ def prepare_integer_components(
             ):
                 from merlin.llvmlower.native_cpu_layout import joint_profile
 
-            selected_profile = (
-                joint_profile(
-                    list(input_layouts(report, functions[0].body.block.args).values()),
-                    output_shape,
-                    block=loop["reduced_vector_elements"],
-                    grain=loop["parallel_grain"],
+                selected_profile = (
+                    joint_profile(
+                        list(input_layouts(report, functions[0].body.block.args).values()),
+                        output_shape,
+                        block=loop["reduced_vector_elements"],
+                        grain=loop["parallel_grain"],
+                    )
+                    if complete_context
+                    else None
                 )
-                if complete_context
-                else None
-            )
-            if selected_profile is None:
-                (directory / "exact-dtype-refusal.json").write_text(
+                if selected_profile is None:
+                    (directory / "exact-dtype-refusal.json").write_text(
                         json.dumps(
                             dict(
                                 family="F2",
                                 code="native_reduced_binary_layout_unproved",
                                 reason=(
-                                    "reduced-storage scalar/vector readout needs "
-                                    "equal dense/rank-one input profiles or one scalar"
+                                    "reduced-storage scalar/vector readout needs equal dense/rank-one input"
+                                    " profiles or one scalar"
                                 ),
                             )
                         )
@@ -426,6 +426,16 @@ def prepare_integer_components(
     )
     observe("integer_components")
     if not plans:
+        (directory / "exact-dtype-refusal.json").write_text(
+            json.dumps(
+                dict(
+                    family="F2",
+                    code="native_component_producer_unavailable",
+                    reason="no complete exact integer component producer matches the source",
+                )
+            )
+            + "\n"
+        )
         return None
     from merlin.llvmlower.entry_weight_projection import _pure_dce
     from merlin.llvmlower.literal_zero_components import fold_literal_zero_components
@@ -469,6 +479,17 @@ def prepare_integer_components(
             result_layout="row_major_contiguous",
         )
         if decision["status"] != "admitted":
+            (directory / "exact-dtype-refusal.json").write_text(
+                json.dumps(
+                    dict(
+                        family="F2",
+                        code="native_component_transfer_unadmitted",
+                        reason="exact component transfer has no admitted declaration",
+                        transfer=decision,
+                    )
+                )
+                + "\n"
+            )
             return None
     from merlin.xdsl_dialects._common import text
 
@@ -537,6 +558,10 @@ def prepare_integer_components(
             )
             return None
         numeric = binding[0]["numeric"]
+        from merlin.targetgen.native_mac_bound import require_mesh_mac_bound
+
+        mesh = selection["spec"].get("numerical_semantics", {}).get("native_unit_contract", {}).get("mesh_mac", {})
+        require_mesh_mac_bound(numeric, mesh_signed_bits=mesh.get("signed_bits"))
         if numeric.get("readout") != "full_i32" or numeric.get("recombination") != "retained_source_host_exact_integer":
             raise ValueError("component producer would replace the exact host epilogue")
         sites.append(

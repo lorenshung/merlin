@@ -149,6 +149,18 @@ def _install_formal_model_simulator(target: str) -> tuple[dict, str | None]:
     return selected, inherited
 
 
+def private_gate_completion(required, record, *, deferred_reason=None):
+    """An explicit operator deferral is separate from a private-model pass."""
+    if deferred_reason is not None:
+        if not isinstance(deferred_reason, str) or not deferred_reason.strip():
+            raise ValueError("private gate deferral requires an operator reason")
+        if record.get("models"):
+            raise ValueError("cannot defer a private gate after executing models")
+        record.update(status="deferred", deferred=True, reason=deferred_reason, passed=False)
+        return True
+    return bool(required) and record.get("passed") is True
+
+
 def phase_completion(score: Mapping | None, *, required_tier: str = FORMAL_REQUIRED_TIER) -> tuple[bool, list[str]]:
     """Fail-closed completion predicate for one official grading phase.
 
@@ -430,7 +442,14 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
         type=Path,
         help="operator-only frozen validation input; never passed to an authoring workspace",
     )
+    ap.add_argument(
+        "--defer-private-full-models",
+        metavar="REASON",
+        help="operator deferral; records the gate as deferred, never passed",
+    )
     a = ap.parse_args(argv)
+    if a.defer_private_full_models is not None and a.private_full_model_spec is not None:
+        ap.error("private models cannot be supplied and deferred together")
     if a.qa_timeout < 1:
         ap.error("--qa-timeout must be positive")
     if a.rtl_facts is not None:
@@ -579,7 +598,9 @@ def main(argv: list[str] | None = None, *, context: InvocationContext | None = N
             private_models["reason"] = f"{type(exc).__name__}: {exc}"
     # A descriptor with no private full-model declaration cannot silently make a new
     # Phase 1 success claim.  Older diagnostic experiments remain runnable, incomplete.
-    private_models_complete = bool(required_full_models) and private_models.get("passed") is True
+    private_models_complete = private_gate_completion(
+        required_full_models, private_models, deferred_reason=a.defer_private_full_models
+    )
     formal_grade_complete = bool(
         public_phase["formal_complete"] and hidden_phase["formal_complete"] and private_models_complete
     )

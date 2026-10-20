@@ -1352,8 +1352,18 @@ def test_oracles_endtoend(reference_backend: str | None = None):
         # spike check above reads), so the old tiers["L3"] read was a field-name bug that ALWAYS yielded
         # None: a false NO-GO that also blocked .oracle_timing.json, which the launcher refuses to start
         # without. Verilator was running fine the whole time.
+        #
+        # The engine measured is the experiment's RTL pin (MERLIN_REQUIRED_RTL_ENGINE=vcs measures the
+        # VCS simv); an unpinned run keeps the historical Verilator measurement.
+        from merlin_experiments.phase1.timing import TIMING_ENGINES
+
+        l3_engine = _os.environ.get("MERLIN_REQUIRED_RTL_ENGINE", "").strip() or "verilator"
         t0 = _time.monotonic()
-        ve = _grade(ref, "verilator", 900, cap="A2_single_tile_matmul")
+        ve = (
+            _grade(ref, l3_engine, 900, cap="A2_single_tile_matmul")
+            if l3_engine in TIMING_ENGINES
+            else {"error": f"no oracle-timing measurement for RTL engine {l3_engine!r}"}
+        )
         dt = _time.monotonic() - t0
         cv = (ve.get("per_capsule") or [{}])[0]
         l3 = (
@@ -1363,13 +1373,13 @@ def test_oracles_endtoend(reference_backend: str | None = None):
             and cv.get("barrier_status") == "pass"
         )
         _ok(
-            "verilator RUNS to a real L3=pass (not 0-capsules / timeout)",
+            f"{l3_engine} RUNS to a real L3=pass (not 0-capsules / timeout)",
             l3,
             f"{dt:.0f}s n={ve.get('n_passed')}/{ve.get('n_capsules')} "
             f"barrier={cv.get('barrier_tier')}/{cv.get('barrier_status')}",
         )
         if l3:
-            from merlin_experiments.phase1.timing import timing_path
+            from merlin_experiments.phase1.timing import selected_simulator, simulator_identity, timing_path
 
             from merlin.common.digest import sha256_file
             from merlin.targetgen.target_experiment import declared_vs_resolved_contract, load_capability_manifest
@@ -1382,28 +1392,26 @@ def test_oracles_endtoend(reference_backend: str | None = None):
                 if agreement == "agree" and contract_path is not None
                 else None
             )
-            sim = _cy / "sims" / "verilator" / f"simulator-chipyard.harness-{config}" if config else None
+            sim = selected_simulator(l3_engine, TARGET, config) if isinstance(config, str) and config.strip() else None
             if not isinstance(config, str) or not config.strip() or sim is None or not sim.is_file():
                 _ok("target-bound oracle timing record", False, "declared RTL sim config/binary unavailable")
             else:
                 selected = timing_path(EXP, TARGET)
-                selected.write_text(
-                    _json.dumps(
-                        {
-                            "target": TARGET,
-                            "config": config,
-                            "verilator_per_capsule_s": round(dt, 1),
-                            "simulator_sha256": sha256_file(sim),
-                            "reference_backend": str(ref),
-                            "reference_package_id": ref_manifest.get("package_id"),
-                            "reference_manifest_sha256": sha256_file(ref / "manifest.yaml"),
-                            "measured_capsule": "A2_single_tile_matmul",
-                            "measured_by": "readiness_check",
-                        },
-                        sort_keys=True,
-                    )
-                    + "\n"
-                )
+                record = {
+                    "target": TARGET,
+                    "config": config,
+                    **simulator_identity(l3_engine, sim),
+                    "reference_backend": str(ref),
+                    "reference_package_id": ref_manifest.get("package_id"),
+                    "reference_manifest_sha256": sha256_file(ref / "manifest.yaml"),
+                    "measured_capsule": "A2_single_tile_matmul",
+                    "measured_by": "readiness_check",
+                }
+                if l3_engine == "verilator":
+                    record["verilator_per_capsule_s"] = round(dt, 1)  # legacy record shape, unchanged
+                else:
+                    record.update(engine=l3_engine, per_capsule_s=round(dt, 1), simulator_path=str(sim))
+                selected.write_text(_json.dumps(record, sort_keys=True) + "\n")
                 _ok("wrote target-bound oracle timing record", True, f"{selected} T_obs={dt:.0f}s")
         # WHICH ENGINE WOULD CERTIFY, AND WHAT IT WAS CHOSEN OVER — reported, never gated.
         #
@@ -1436,6 +1444,7 @@ def test_oracles_endtoend(reference_backend: str | None = None):
         )
     finally:
         _kill_our_simulators()
+        _kill_our_simulators("simv")  # VCS L3 engine; ancestry-restricted like the Verilator token
 
 
 # ---- K. semantic coverage is MEASURABLE (not: is the score good) ----------------------------------

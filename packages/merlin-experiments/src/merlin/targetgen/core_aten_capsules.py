@@ -77,6 +77,7 @@ def write_capsules(
     numeric_flow=None,
     workers=1,
     admission_lanes=False,
+    truth_lanes=False,
 ):
     """Write one capsule per case, using precisely the round-2 result projection.
 
@@ -85,6 +86,8 @@ def write_capsules(
     """
     if type(workers) is not int or not 1 <= workers <= 8:
         raise ValueError("capsule workers must be an integer in 1..8")
+    if truth_lanes:
+        admission_lanes = True
     if admission_lanes and numeric_flow is None:
         raise ValueError("admission-derived lanes require numeric_flow")
     public, private, captures = public.resolve(), private.resolve(), captures.resolve()
@@ -103,7 +106,17 @@ def write_capsules(
     # small window of single-case documents; a full-suite copy per task is quadratic.
     metadata = {key: value for key, value in corpus.items() if key not in {"cases", "selected_cases"}}
     tasks = (
-        ({**metadata, "cases": [case]}, captures, public, private, label, tiers, numeric_flow, admission_lanes)
+        (
+            {**metadata, "cases": [case]},
+            captures,
+            public,
+            private,
+            label,
+            tiers,
+            numeric_flow,
+            admission_lanes,
+            truth_lanes,
+        )
         for case in corpus["cases"]
     )
     if workers == 1:
@@ -148,7 +161,8 @@ def _try_write_case(task):
 
 
 def _write_case(task):
-    corpus, captures, public, private, label, tiers, numeric_flow, admission_lanes = task
+    corpus, captures, public, private, label, tiers, numeric_flow, admission_lanes, *policy = task
+    truth_lanes = bool(policy and policy[0])
     case = corpus["cases"][0]
     capture_name = case_capture_name(case)
     name = capture_name.replace("-", "_")
@@ -176,6 +190,15 @@ def _write_case(task):
         if numeric_flow is not None:
             admission = prepare_numeric_fixture(bundle, report, numeric_flow, require_device=not admission_lanes)
         device = admission is not None and _device_fixture(admission)
+        commitment = None
+        if truth_lanes:
+            from merlin.targetgen.functional_truth import expectation, require_placement
+
+            commitment = expectation(case)
+            try:
+                require_placement(commitment, device=device)
+            except ValueError as exc:
+                raise NumericFixtureError(str(exc), admission or {}) from exc
         if admission_lanes and not device:
             # Refused numeric preparations cannot alter the original host ABI.
             # Rebuild the raw call, preserving the precise admission decision.
@@ -266,8 +289,13 @@ def _write_case(task):
                 path.chmod(0o600)
         return {
             **(
-                {"lane_expectation": "device" if device else "host-guard", "native_admission": admission}
-                if admission_lanes else {}
+                {
+                    "lane_expectation": commitment["lane"] if commitment else "device" if device else "host-guard",
+                    "native_admission": admission,
+                    **({"functional_truth": commitment} if commitment else {}),
+                }
+                if admission_lanes
+                else {}
             ),
             "id": name,
             "overload": case["overload"],
@@ -306,8 +334,7 @@ def _device_fixture(plan: dict) -> bool:
         plan.get(key, 0) or 0
         for key in ("quantized_contractions", "native_contractions", "quantized_non_contraction_sites")
     )
-    return _native_fixture(plan) or (
-        admitted > 0 and (plan.get("integer_reference") or {}).get("status") == "prepared")
+    return _native_fixture(plan) or (admitted > 0 and (plan.get("integer_reference") or {}).get("status") == "prepared")
 
 
 def prepare_numeric_fixture(bundle: Path, report: dict, flow: dict, *, require_device=True) -> dict:
@@ -700,7 +727,7 @@ def run_capsule(capsule, package_dir, paths, config, adapters, pkg, contract, ti
             passed = row["status"] == "pass"
             if capsule.get("lane_expectation") == "device":
                 passed = passed and result["lane"] == "device" and result["executed_instructions"] > 0
-            elif capsule.get("lane_expectation") == "host-guard":
+            elif capsule.get("lane_expectation") in {"host-guard", "no-work"}:
                 passed = passed and result["lane"] == "host" and result["executed_instructions"] == 0
             result["tiers"][tier] = {
                 "status": "pass" if passed else "fail",

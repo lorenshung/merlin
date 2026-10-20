@@ -243,10 +243,9 @@ def empty_host_plan(directory, report, selection):
     if not cases:
         return None
     for record in cases:
-        outputs, inputs = record.get("output_abi", []), record.get("input_abi", [])
+        outputs = record.get("output_abi", [])
         empty_outputs = bool(outputs) and all(prod(abi["shape"]) == 0 for abi in outputs)
-        empty_inputs = bool(inputs) and all(prod(abi["shape"]) == 0 for abi in inputs)
-        if not (empty_outputs or empty_inputs):
+        if not empty_outputs:
             return None
     plan = dict(
         status="host",

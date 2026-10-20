@@ -1,7 +1,7 @@
 # Authored software semantics. RTL geometry/protocol and qualification are generated evidence.
 schema: merlin.software_spec.v1
 target: gemmini
-execution_provider_revision: dc17bd2e5e6863eece1f6815fc563c8d47703c5f
+execution_provider_revision: 302b9b274287395a8b4a1bf19bc54adf160a9adf
 status: reviewed
 # Scope: accelerator contraction and exact-op host declarations below. The
 # dequantization declaration is limited to its stated operand/result types and
@@ -46,6 +46,13 @@ numerical_semantics:
     runtime_complex_products: composition_requires_host
     evidence: {review_status: "authored, pending operator review"}
   native_unit_contract:
+    # Authored, pending operator review: the mesh wraps after every MAC in
+    # either dataflow. Int32 accumulator memory does not widen the mesh.
+    mesh_mac:
+      signed_bits: 20
+      overflow: wrap_each_mac
+      dataflows: [WS, OS]
+      evidence: {review_status: "authored, pending operator review"}
     status: authored_pending_operator_review
     eligibility: source_scalar_dataflow_and_reduction_domains
     allowed_representation: exact_signed_byte_limbs_and_retained_ieee_host_readout

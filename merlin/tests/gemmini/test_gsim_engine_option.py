@@ -104,7 +104,7 @@ def test_an_unknown_engine_still_raises(G):
     depends on an engine this backend does not implement being distinguishable from one whose build is
     merely absent."""
     with pytest.raises(G.GemminiError):
-        G.available("vcs")
+        G.available("not_an_engine")
 
 
 def test_gsim_carries_an_rtl_derived_oracle_record(G):
@@ -190,7 +190,38 @@ def test_run_elf_still_rejects_an_unknown_simulator(G, tmp_path):
     elf = tmp_path / "kernel.elf"
     elf.write_text("", encoding="utf-8")
     with pytest.raises(G.GemminiError):
-        G.run_elf(elf, simulator="vcs")
+        G.run_elf(elf, simulator="not_an_engine")
+
+
+def test_run_elf_builds_the_chipyard_vcs_argv(monkeypatch, G, tmp_path, toolchain_present):
+    """VCS runs the Chipyard sims/vcs convention (DRAMSim2, +loadmem) and is an RTL-derived L3 oracle."""
+    simv = _executable(tmp_path / "simv")
+    (tmp_path / "simv.daidir").mkdir()
+    monkeypatch.setenv("MERLIN_GEMMINI_SIMV", str(simv))
+    monkeypatch.setenv("MERLIN_GEMMINI_DRAMSIM_INI", "/ini")
+    monkeypatch.delenv("MERLIN_GEMMINI_VCS_SEED", raising=False)
+    monkeypatch.setenv("SNPSLMD_LICENSE_FILE", "1@license")
+    monkeypatch.delenv("MERLIN_GEMMINI_VCS_MAXCYCLES", raising=False)
+    assert G.available("vcs") is True and G.ORACLE["vcs"]["derived_from_rtl"] is True
+    elf = tmp_path / "kernel.elf"
+    elf.write_text("", encoding="utf-8")
+    seen = _capture(monkeypatch, G, stdout="OUT y 1 1 7\nMETRIC cycles 3\nDONE\n")
+    G.run_elf(elf, simulator="vcs", timeout=42)
+    assert seen["cmd"] == [
+        str(simv),
+        "+permissive",
+        "-no_save",
+        "+dramsim",
+        "+dramsim_ini_dir=/ini",
+        "+max-cycles=10000000",
+        "+ntb_random_seed=1",
+        f"+loadmem={elf}",
+        "+permissive-off",
+        str(elf),
+    ]
+    assert sum(arg.startswith("+loadmem=") for arg in seen["cmd"]) == 1
+    (tmp_path / "simv.daidir").rmdir()
+    assert G.available("vcs") is False
 
 
 # --- the selection this unlocks ---------------------------------------------------------------------
@@ -200,6 +231,10 @@ def test_the_l3_policy_now_selects_gsim_for_this_target(monkeypatch, G, tmp_path
     """The end-to-end claim: with a GSIM emu present, the chipyard L3 tier resolves to it over Verilator,
     with no edit to the selection code."""
     from merlin.targetgen import capsule_runner as CR
+    from merlin.targetgen import gsim_emulator as GE
+
+    # This availability unit test assumes an independently qualified RTL build.
+    monkeypatch.setattr(GE, "selected_firrtl_status", lambda *a, **kw: (True, "fixture selected RTL"))
     from merlin.targetgen import rtl_engine_policy as POL
 
     emu = _executable(tmp_path / "emu")
@@ -219,6 +254,10 @@ def test_the_derived_home_registers_the_engine_with_no_env_var(monkeypatch, G, t
     the policy exists to make was never reached. The env override still wins (previous test); what
     changed is that it is no longer the only door."""
     from merlin.targetgen import capsule_runner as CR
+    from merlin.targetgen import gsim_emulator as GE
+
+    # This availability unit test assumes an independently qualified RTL build.
+    monkeypatch.setattr(GE, "selected_firrtl_status", lambda *a, **kw: (True, "fixture selected RTL"))
     from merlin.targetgen import gsim_emulator as GE
 
     monkeypatch.delenv("MERLIN_GEMMINI_GSIM_EMU", raising=False)

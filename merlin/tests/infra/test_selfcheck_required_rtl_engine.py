@@ -65,7 +65,7 @@ def test_direct_selfcheck_refuses_verilator_and_builds_gsim_adapter(monkeypatch)
 
 
 def test_required_vcs_never_constructs_the_legacy_verilator_rung(monkeypatch):
-    """The general engine pin is fail-closed even on VCS's historical L4 ladder."""
+    """A VCS pin builds L3 on VCS itself (same rung as Verilator/GSIM) and never a Verilator rung."""
     selfcheck = _module("agent_selfcheck")
     selected = []
     monkeypatch.setenv("MERLIN_REQUIRED_RTL_ENGINE", "vcs")
@@ -75,11 +75,10 @@ def test_required_vcs_never_constructs_the_legacy_verilator_rung(monkeypatch):
         lambda engine, target: selected.append((engine, target)) or object(),
     )
 
-    try:
-        selfcheck._adapters("vcs", "gemmini", "chipyard")
-    except ValueError:
-        pass  # An unavailable required VCS engine is the expected fail-closed result.
-    assert selected == [("spike", "gemmini")]
+    adapters, sim = selfcheck._adapters("vcs", "gemmini", "chipyard")
+    assert selected == [("spike", "gemmini"), ("vcs", "gemmini")]
+    assert sorted(adapters) == ["L2", "L3"] and sim == "vcs"
+    assert selfcheck.SIM_TIER["vcs"] == "L3"
 
 
 def test_both_brokers_narrow_rtl_requests_to_gsim_but_keep_spike(monkeypatch):

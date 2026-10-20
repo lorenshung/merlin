@@ -43,5 +43,5 @@ def test_bf16_nan_negation_needs_explicit_source_policy(tmp_path):
     )
     assert (tmp_path / "model.mlir").read_text() == original
     assert json.loads((tmp_path / "exact-dtype-refusal.json").read_text())["code"] == (
-        "native_reduced_precision_nan_semantics_unproved"
+        "native_cpu_word_layout_unproved"
     )
