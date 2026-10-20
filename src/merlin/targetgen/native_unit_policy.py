@@ -9,6 +9,7 @@ express them with contractions. Index arithmetic remains address selection.
 
 def construction_evidence(module, *, excluded=None):
     from merlin.llvmlower.boolean_domain import fold_boolean_domain
+    from merlin.llvmlower.boolean_image_predicates import fold_boolean_image_predicates
     from merlin.llvmlower.integer_image_predicates import fold_integer_image_predicates
     from merlin.llvmlower.singleton_carriers import fold_singleton_carriers
     from merlin.llvmlower.singleton_reductions import fold_singleton_reductions
@@ -36,7 +37,7 @@ def construction_evidence(module, *, excluded=None):
         from merlin.llvmlower.empty_reductions import fold_empty_reductions
 
         image_folds = fold_integer_image_predicates(canonical)
-        boolean_folds = fold_boolean_domain(canonical)
+        boolean_folds = fold_boolean_image_predicates(canonical) + fold_boolean_domain(canonical)
         empty_folds = fold_empty_reductions(canonical)
         singleton_folds = (
             fold_singleton_reductions(canonical) if any(op.name == "linalg.reduce" for op in canonical.walk()) else 0

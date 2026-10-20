@@ -218,6 +218,7 @@ def _prepare_spec_int8(
         return empty
     module = parse_mlir_file(directory / "model.mlir")
     from merlin.llvmlower.boolean_domain import fold_boolean_domain
+    from merlin.llvmlower.boolean_image_predicates import fold_boolean_image_predicates
     from merlin.llvmlower.empty_reductions import fold_empty_reductions
     from merlin.llvmlower.integer_image_predicates import fold_integer_image_predicates
     from merlin.llvmlower.singleton_carriers import fold_singleton_carriers
@@ -227,6 +228,7 @@ def _prepare_spec_int8(
 
     folds = fold_integer_image_predicates(module)
     folds += fold_empty_reductions(module)
+    folds += fold_boolean_image_predicates(module)
     folds += fold_boolean_domain(module)
     folds += fold_singleton_reductions(module)
     folds += fold_singleton_selectors(module)

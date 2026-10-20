@@ -144,14 +144,19 @@ def prepare_bitwise(directory, report, selection, provider, package, module):
     if any(k.startswith("prov.quant.") for op in module.walk() for k in op.attributes):
         return None
     from merlin.llvmlower.boolean_domain import fold_boolean_domain
+    from merlin.llvmlower.boolean_image_predicates import fold_boolean_image_predicates
     from merlin.llvmlower.singleton_carriers import fold_singleton_carriers
     from merlin.llvmlower.singleton_reductions import fold_singleton_reductions
     from merlin.llvmlower.singleton_selectors import fold_singleton_selectors
 
+    fold_boolean_image_predicates(module)
     fold_boolean_domain(module)
     fold_singleton_reductions(module)
     fold_singleton_selectors(module)
     fold_singleton_carriers(module)
+    from merlin.llvmlower.uniform_literal_carriers import expose_uniform_literal_carriers
+
+    expose_uniform_literal_carriers(module)
     # These operations cannot be byte selectors even when a later copy matches.
     if any(
         op.name in {"linalg.matmul", "linalg.batch_matmul", "linalg.reduce"}
