@@ -10,7 +10,7 @@ def preserve_integer_width_boundaries(module):
     from xdsl.dialects import tensor
     from xdsl.dialects.builtin import ArrayAttr, TensorType, UnitAttr
     from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
+    from xdsl.ir import Block, BlockArgument, Region
     from xdsl.rewriter import Rewriter
 
     from merlin.llvmlower.pointwise_primitives import expose_pointwise_primitives
@@ -30,6 +30,14 @@ def preserve_integer_width_boundaries(module):
             continue
         source_index = list(op.body.block.args).index(cast.operands[0])
         if any(it.data != L.IteratorType.PARALLEL for it in op.get_iterator_types()):
+            continue
+        source = op.inputs[source_index]
+        if not isinstance(source, BlockArgument) or source.owner.parent_op().name != "func.func":
+            # Intermediate source-width producers are lowered independently.
+            # Their already recombined storage requires only the original host
+            # cast, never another device identity producer for each bit cast.
+            op.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
+            count += 1
             continue
         source_type = op.inputs[source_index].type.element_type
         typ = TensorType(source_type, op.results[0].type.get_shape())

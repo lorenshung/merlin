@@ -364,3 +364,14 @@ def test_truncation_before_signed_extension_keeps_its_modular_boundary(bits):
     expected=evaluate(source,[values,[0]*4])
     assert rewrite_integer_components(source,limb_attribute='test.limb',input_bounds=[1<<63,0])
     assert evaluate(source,[values,[0]*4])==expected
+
+
+def test_real_frontend_uint8_cast_review_repro():
+    torch=pytest.importorskip('torch')
+    m2m=pytest.importorskip('m2m')
+    class Cast(torch.nn.Module):
+        def forward(self,x):return torch.ops.aten._to_copy.default(x,dtype=torch.int32)
+    values=torch.tensor([255,128,0,127],dtype=torch.uint8)
+    original=parse_mlir_text(str(m2m.convert(Cast(),(values,),backend='fx_importer',fully_standard=True).module))
+    assert rewrite_integer_components(original,limb_attribute='test.limb',input_bounds=[128])
+    assert evaluate(original,[[-1,-128,0,127]])==[255,128,0,127]
