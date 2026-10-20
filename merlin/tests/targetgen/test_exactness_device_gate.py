@@ -182,8 +182,19 @@ def test_pinned_cross_repo_bounded_device_results(tmp_path, record_property):
         else:
             reference = verdict["integer_reference"]
             assert reference["status"] == "pass", (case, reference)
-            assert reference["engine"] == "independent_pt2e_exact_rational", (case, reference)
+            comparisons = {
+                "independent_pt2e_exact_rational": "exact_i32_or_f32_bits_signed_zero_distinct",
+                "independent_source_quantized_exact_rational": "independent_quantized_exact_rational_bytes",
+            }
+            assert reference["engine"] in comparisons, (case, reference)
             assert reference["results"] and all(row["status"] == "pass" for row in reference["results"])
+            assert all(
+                row["comparison"] == comparisons[reference["engine"]] for row in reference["results"]
+            ), (case, reference)
+            if reference["engine"] == "independent_source_quantized_exact_rational":
+                from merlin.llvmlower.quantized_native import parameters
+
+                assert verdict["quantized_contract"] == parameters(software), (case, verdict)
         execution = evidence["routing"]["execution_evidence"]
         assert execution["status"] == "measured" and execution["executed_instructions"] > 0
 
