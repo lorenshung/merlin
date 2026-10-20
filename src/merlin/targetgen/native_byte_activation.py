@@ -265,6 +265,8 @@ def prepare(directory, report, selection, provider, package, module):
         input_bound_proof=dict(method="full_dtype_storage_domain", dtypes=["i8"], absolute_bounds=[128]),
         host_floor=dict(status="required", comparison="native_eager_bits_every_boundary_result"),
     )
+    # Seal the same normalized bytes the public catalog authenticated.
+    (directory / "model.mlir").write_text(source + "\n")
     (directory / "spec-int8-admission.json").write_text(json.dumps(plan, indent=2) + "\n")
     for record in report["cases"]:
         if record.get("status") in {None, "bundled"}:
