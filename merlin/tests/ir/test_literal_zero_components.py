@@ -60,6 +60,25 @@ def test_unknown_float_times_zero_is_not_an_integer_zero_proof():
     assert fold_literal_zero_components(module, "test.limb") == 0
 
 
+def test_index_arithmetic_is_not_treated_as_a_fixed_width_integer():
+    module = parse_mlir_text("""module {
+      func.func @forward(%x:tensor<2xi32>) -> tensor<2xi32> {
+        %e=tensor.empty() : tensor<2xi32>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x:tensor<2xi32>) outs(%e:tensor<2xi32>) attrs={test.limb="integer"} {
+        ^bb0(%v:i32,%unused:i32):
+          %zero=arith.constant 0 : index
+          %one=arith.constant 1 : index
+          %index=arith.addi %zero,%one : index
+          %converted=arith.index_cast %index : index to i32
+          linalg.yield %converted : i32
+        } -> tensor<2xi32>
+        return %r : tensor<2xi32>
+      }}""")
+    assert fold_literal_zero_components(module, "test.limb") == 0
+    assert any(op.name == "arith.index_cast" for op in module.walk())
+
+
 def test_zero_result_does_not_erase_an_opaque_call():
     module = parse_mlir_text("""module {
       func.func private @effect() -> i8
@@ -79,20 +98,20 @@ def test_zero_result_does_not_erase_an_opaque_call():
 
 
 def test_deep_complete_limb_chain_does_not_exhaust_literal_fold_stack():
-    pieces = ['module { func.func @forward(%x:tensor<1xi32>)->tensor<1xi32> {']
-    prior = '%x'
+    pieces = ["module { func.func @forward(%x:tensor<1xi32>)->tensor<1xi32> {"]
+    prior = "%x"
     for i in range(1100):
-        marker = ' attrs={test.limb="integer"}' if i == 1099 else ''
-        pieces.append(f'''%e{i}=tensor.empty():tensor<1xi32>
+        marker = ' attrs={test.limb="integer"}' if i == 1099 else ""
+        pieces.append(f"""%e{i}=tensor.empty():tensor<1xi32>
           %r{i}=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
           ins({prior}:tensor<1xi32>) outs(%e{i}:tensor<1xi32>){marker} {{
           ^bb{i}(%a:i32,%unused:i32):
             %one=arith.constant 1:i32
             %sum=arith.addi %a,%one:i32
             linalg.yield %sum:i32
-          }}->tensor<1xi32>''')
-        prior = f'%r{i}'
-    pieces.append(f'return {prior}:tensor<1xi32> }} }}')
-    module = parse_mlir_text('\n'.join(pieces))
-    assert fold_literal_zero_components(module, 'test.limb') == 0
-    assert sum('test.limb' in op.attributes for op in module.walk()) == 1
+          }}->tensor<1xi32>""")
+        prior = f"%r{i}"
+    pieces.append(f"return {prior}:tensor<1xi32> }} }}")
+    module = parse_mlir_text("\n".join(pieces))
+    assert fold_literal_zero_components(module, "test.limb") == 0
+    assert sum("test.limb" in op.attributes for op in module.walk()) == 1

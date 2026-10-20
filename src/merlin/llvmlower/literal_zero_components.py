@@ -24,6 +24,10 @@ def fold_literal_zero_components(module, limb_attribute):
                 result = attr.value.data
             return result if result is not unknown and (isinstance(result, int) or math.isfinite(result)) else unknown
         integer = isinstance(op.results[0].type, IntegerType) if op.results else False
+        # Index arithmetic has a target-dependent width. It can select a
+        # literal threshold, but cannot justify a fixed-width zero payload.
+        if op.results and not integer and str(op.results[0].type) == "index":
+            return unknown
         if name in {"arith.extsi", "arith.extui", "arith.trunci"} and values[0] is not unknown:
             width = op.results[0].type.width.data
             value = int(values[0])
