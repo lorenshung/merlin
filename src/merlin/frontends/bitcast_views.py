@@ -15,6 +15,9 @@ def lower_captured_bitcast_views(module, metadata):
     from xdsl.ir import Block,Region
     from xdsl.ir.affine import AffineMap
     from xdsl.rewriter import Rewriter
+    # This normalization is for immutable tensor-level capture, before any
+    # memory bridge can expose storage aliases or writes behind an SSA value.
+    if any(op.name.startswith(('memref.','bufferization.')) for op in module.walk()):return 0
     record=(metadata or {}).get('frontend_trace') or {}
     if not record:return 0
     path=Path(record['path']);raw=path.read_bytes()
@@ -33,7 +36,7 @@ def lower_captured_bitcast_views(module, metadata):
             if not value.uses:return False
             for use in value.uses:
                 client=use.operation
-                if client.name=='linalg.generic' and use.index<len(client.inputs) and value not in client.outputs:continue
+                if client.name=='linalg.generic' and use.index<len(client.inputs) and value not in client.outputs and all(child.name=='linalg.yield' or child.name.startswith(('arith.','math.')) for child in client.body.block.ops):continue
                 if client.name=='tensor.extract' and use.index==0:continue
                 if client.name in {'tensor.cast','tensor.expand_shape','tensor.collapse_shape','tensor.reshape'} and use.index==0:
                     if any(not isinstance(r.type,TensorType) or r.type.element_type!=value.type.element_type for r in client.results):return False

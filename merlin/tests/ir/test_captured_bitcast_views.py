@@ -39,3 +39,21 @@ def test_unproved_views_stay_opaque(tmp_path,case):
         with pytest.raises(ValueError,match='digest changed'):lower_captured_bitcast_views(module,meta)
     else:assert lower_captured_bitcast_views(module,meta)==0
     assert sum(op.name=='func.call' for op in module.walk())==1
+
+
+def test_effectful_tensor_clients_cannot_hide_a_storage_alias(tmp_path):
+    module,meta=fixture(tmp_path)
+    from xdsl.dialects import arith,memref
+    from xdsl.dialects.builtin import IndexType,IntegerType,MemRefType
+    from xdsl.ir import BlockArgument
+    function=next(op for op in module.walk() if op.name=='func.func' and op.sym_name.data=='forward')
+    block=function.body.block;pointer=block.insert_arg(MemRefType(IntegerType(32),[1]),len(block.args))
+    function.update_function_type()
+    generic=next(op for op in module.walk() if op.name=='linalg.generic')
+    zero=arith.ConstantOp.from_int_and_width(0,IndexType())
+    block.insert_op_before(zero,generic)
+    store=memref.StoreOp.get(generic.body.block.args[0],pointer,[zero.result])
+    generic.body.block.insert_op_before(store,generic.body.block.last_op)
+    module.verify()
+    assert lower_captured_bitcast_views(module,meta)==0
+    assert sum(op.name=='func.call' for op in module.walk())==1
