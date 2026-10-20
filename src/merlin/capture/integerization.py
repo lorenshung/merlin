@@ -201,6 +201,7 @@ def integerize_static_pt2e(model, inputs, *, numerics: str = "integer_readout"):
 
     from m2m.capture.pt2e_integerize import integerize_pt2e
 
+    boundary_policy = getattr(model, "_recipe_quantization_stats", {}).get("framework_capture_policy", {}).get("quantization_nonfinite")
     layouts = {}
     for node in model.graph.nodes:
         value = node.meta.get("val")
@@ -236,4 +237,8 @@ def integerize_static_pt2e(model, inputs, *, numerics: str = "integer_readout"):
     graph.lint()
     model.recompile()
     receipt["result_layout_restorations"] = restorations
+    from merlin.targetgen.declared_readout_specials import retain_special_readouts
+
+    retain_special_readouts(model, boundary_policy)
+    receipt["ieee_quantizer_residuals"] = getattr(model, "_merlin_special_readout_proofs", [])
     return model, receipt
