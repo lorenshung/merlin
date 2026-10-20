@@ -239,6 +239,14 @@ def _validate_host_sources(
     if not hosts and not private_denials:
         return
     private = [path.absolute() for _, path in hosts] + [path.absolute() for path in private_denials]
+    private_paths = set(private)
+    private_ancestors = {parent for path in private_paths for parent in path.parents}
+
+    def private_member(path: Path) -> bool:
+        # Query ancestors once per member rather than walking the complete
+        # private roster for every file in a large retained-call corpus.
+        return path in private_paths or any(parent in private_paths for parent in path.parents)
+
     private_inodes = set()
     for _, path in hosts:
         if path.resolve() != path or path.is_symlink():
@@ -286,12 +294,12 @@ def _validate_host_sources(
                 raise RuntimeError("private validation source has an unsupported member")
 
     def inspect(member: Path, ancestry: tuple[tuple[int, int], ...]) -> None:
-        if any(member == path or path in member.parents for path in private):
+        if private_member(member):
             return  # A private child of a broad grant is always masked.
         resolved = member.resolve()
-        if any(resolved == path or path in resolved.parents for path in private):
+        if private_member(resolved):
             raise RuntimeError("allowed grant contains an alias to host-only inputs")
-        if resolved != member and any(resolved in path.parents for path in private):
+        if resolved != member and resolved in private_ancestors:
             raise RuntimeError("allowed grant contains an alias to host-only inputs")
         stat = member.stat()
         key = (stat.st_dev, stat.st_ino)
@@ -307,7 +315,7 @@ def _validate_host_sources(
 
     for _, source in grants:
         source = source.absolute()
-        if any(source == path or path in source.parents for path in private):
+        if private_member(source):
             raise RuntimeError("allowed grant overlaps a host-only input")
         inspect(source, ())
 
