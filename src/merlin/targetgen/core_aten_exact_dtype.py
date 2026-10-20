@@ -40,6 +40,7 @@ def bitwise_catalog_coverage(module, manifest):
     if not bindings:
         raise ValueError("no source-bound bitwise movement kernel")
     visited = set()
+    word_epilogues = set()
 
     def covered(value):
         if value in function.body.block.args:
@@ -49,6 +50,14 @@ def bitwise_catalog_coverage(module, manifest):
         if ordinal in visited:
             return
         if ordinal not in bindings:
+            from merlin.targetgen.native_nan_boundary import prove
+
+            boundary = prove(owner)
+            if boundary is not None:
+                if ordinal not in word_epilogues:
+                    word_epilogues.add(ordinal)
+                    covered(owner.inputs[boundary["runtime_input"]])
+                return
             raise ValueError(f"native result depends on unbound {owner.name} at ordinal {ordinal}")
         visited.add(ordinal)
         for source in bindings[ordinal]["operands"].values():
@@ -162,6 +171,9 @@ def prepare_bitwise(directory, report, selection, provider, package, module):
     from merlin.llvmlower.static_reshape_movement import expose_static_reshape_movement
 
     expose_static_reshape_movement(module)
+    from merlin.targetgen.native_nan_boundary import expose_device_transport
+
+    nan_boundaries = expose_device_transport(module)
     # These operations cannot be byte selectors even when a later copy matches.
     if any(
         op.name in {"linalg.matmul", "linalg.batch_matmul", "linalg.reduce"}
@@ -237,6 +249,7 @@ def prepare_bitwise(directory, report, selection, provider, package, module):
         exact_dtype_sites=len(sites),
         sites=sites,
         provider_catalog=manifest,
+        native_nan_storage_boundaries=nan_boundaries,
         host_floor=dict(status="required", comparison="native_eager_bits_every_boundary_result"),
     )
     if materialized_aliases:

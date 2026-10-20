@@ -1,0 +1,80 @@
+"""Storage transport with a proved NaN-only epilogue retains every other bit."""
+
+import hashlib
+
+import pytest
+
+from merlin.frontends.linalg_mlir import parse_mlir_text
+from merlin.targetgen.core_aten_exact_dtype import bitwise_catalog_coverage
+from merlin.targetgen.native_nan_boundary import expose_device_transport, prove
+
+
+def source(dtype="f32", *, zero=False, reversed=False, finite_mask=False, unknown=False):
+    constants = {"f16": "0x7e00", "bf16": "0x7fc0", "f32": "0x7fc01234", "f64": "0x7ff8123456789abc"}
+    value = "0.0" if zero else constants[dtype]
+    extra = '%opaque="fixture.opaque"(%word) : (' + dtype + ")->" + dtype if unknown else ""
+    if finite_mask:
+        n = 64 if dtype == "f64" else 32 if dtype == "f32" else 16
+        extra = f"""%raw=arith.bitcast %word : {dtype} to i{n}
+          %mask=arith.constant 1 : i{n}
+          %changed=arith.xori %raw,%mask : i{n}
+          %bad=arith.bitcast %changed : i{n} to {dtype}"""
+    data = "%bad" if finite_mask else "%word"
+    yes, no = (data, "%nan") if reversed else ("%nan", data)
+    return parse_mlir_text(f"""module {{func.func @forward(%x:tensor<4x{dtype}>) -> (tensor<4x{dtype}>,tensor<4x{dtype}>) {{
+      %e=tensor.empty() : tensor<4x{dtype}>
+      %out=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
+        ins(%x:tensor<4x{dtype}>) outs(%e:tensor<4x{dtype}>) {{
+        ^bb0(%word:{dtype},%unused:{dtype}):
+        %nan=arith.constant {value} : {dtype}
+        {extra}
+        %p=arith.cmpf uno,%word,%word : {dtype}
+        %v=arith.select %p,{yes},{no} : {dtype}
+        linalg.yield %v : {dtype}
+      }} -> tensor<4x{dtype}>
+      return %out,%x : tensor<4x{dtype}>,tensor<4x{dtype}>
+    }} }}""")
+
+
+@pytest.mark.parametrize("dtype", ["f16", "bf16", "f32", "f64"])
+def test_all_input_words_are_identity_outside_the_explicit_nan_boundary(dtype):
+    module = source(dtype)
+    op = next(op for op in module.walk() if op.name == "linalg.generic")
+    proof = prove(op)
+    assert proof and proof["input_domain"] == "all_storage_bit_patterns"
+    assert proof["runtime_input_observations"] is False
+    assert len(expose_device_transport(module)) == 1
+    module.verify()
+    assert op.inputs[0].owner.name == "linalg.generic"
+
+
+@pytest.mark.parametrize("options", [dict(zero=True), dict(reversed=True), dict(finite_mask=True), dict(unknown=True)])
+def test_numeric_changes_and_unknown_operations_refuse(options):
+    op = next(op for op in source(**options).walk() if op.name == "linalg.generic")
+    assert prove(op) is None
+
+
+def test_word_epilogue_requires_real_device_storage_lineage():
+    module = source()
+    expose_device_transport(module)
+    operations = list(module.walk())
+    transport = next(op for op in operations if op.name == "linalg.generic")
+    ordinal = operations.index(transport)
+    manifest = dict(
+        source_sha256=hashlib.sha256(str(module).encode()).hexdigest(),
+        bindings=[
+            dict(
+                root_ordinal=ordinal,
+                symbol="transport",
+                operands=dict(x=dict(func_arg=0)),
+                numeric=dict(family="F1", quantization="none", exact_arithmetic=True, byte_order="little"),
+            )
+        ],
+        kernels=[
+            dict(symbol="transport", meta=dict(proof="closed_static_element_selectors", readout="scratchpad_bytes"))
+        ],
+    )
+    assert bitwise_catalog_coverage(module, manifest) == [ordinal]
+    manifest["bindings"] = []
+    with pytest.raises(ValueError, match="no source-bound"):
+        bitwise_catalog_coverage(module, manifest)
