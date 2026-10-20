@@ -305,6 +305,11 @@ def _prepare_spec_int8(
     activation = prepare_activation(directory, report, selection, provider, package, module)
     if activation is not None:
         return activation
+    from merlin.targetgen.native_wide_activation import prepare as prepare_wide_activation
+
+    activation = prepare_wide_activation(directory, report, selection, provider, package, module)
+    if activation is not None:
+        return activation
     from merlin.targetgen.core_aten_components import prepare_integer_components
 
     components = prepare_integer_components(
