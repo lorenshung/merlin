@@ -157,3 +157,23 @@ def test_runtime_guard_is_not_folded_by_literal_closure():
       }}""")
     assert fold_uniform_numeric_literals(module, close_guards=True) == 0
     assert any(op.name == "arith.select" for op in module.walk())
+
+
+def test_widening_does_not_license_binary64_arithmetic():
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+    from merlin.targetgen.native_typed_semantics import prove
+
+    module = parse_mlir_text("""module {
+      func.func @forward(%x:tensor<4xf32>) -> tensor<4xf64> {
+        %e=tensor.empty():tensor<4xf64>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x:tensor<4xf32>) outs(%e:tensor<4xf64>) {
+        ^bb0(%a:f32,%unused:f64):
+          %v=arith.extf %a:f32 to f64
+          %c=arith.constant 2.0:f64
+          %result=arith.addf %v,%c:f64
+          linalg.yield %result:f64
+        } -> tensor<4xf64>
+        return %r:tensor<4xf64>
+      }}""")
+    assert prove(module)["code"] == "native_binary64_arithmetic_form_unproved"
