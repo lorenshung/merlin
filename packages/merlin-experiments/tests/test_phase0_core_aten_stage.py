@@ -439,3 +439,38 @@ def test_parallel_failure_receipt_never_promotes_and_continues_other_cohorts(tmp
     assert failure.stat().st_mode & 0o077 == 0
     assert not output.exists()
     assert not list(output.parent.glob(".core-aten-*"))
+
+
+def test_truth_lanes_prepare_and_preserve_no_work_host_guards(tmp_path, monkeypatch):
+    recipe = fixture_recipe(tmp_path)
+    document = yaml.safe_load(recipe.read_bytes())
+    flow = {"policy": "spec_int8"}
+    for key in ("software_spec", "host_capabilities", "execution_provider", "rtl_facts"):
+        path = tmp_path / key
+        path.write_text(key)
+        flow[key] = str(path)
+    package = tmp_path / "provider"
+    package.mkdir()
+    flow["device_package"] = str(package)
+    document["core_aten"]["numeric_flow"] = flow
+    for cohort in stage.COHORTS:
+        document["core_aten"]["cohorts"][cohort][0]["lane"] = "truth"
+    recipe.write_text(yaml.safe_dump(document))
+    result = stage.derive(recipe, tmp_path / "derive", target="synthetic", descriptor=tmp_path / "descriptor.yaml")
+    calls = []
+
+    def writer(*args, truth_lanes=False, numeric_flow=None, **kwargs):
+        calls.append((truth_lanes, numeric_flow))
+        manifest = fake_writer(*args, **kwargs)
+        for row in manifest["capsules"]:
+            row["lane_expectation"] = "no-work" if row["id"] == "host_guard" else "device"
+        return manifest
+
+    install_writer(monkeypatch, writer)
+    output = tmp_path / "run/phase0/capsules"
+    stage.generate(Path(result["recipe"]), output, target="synthetic")
+    assert calls == [(True, {**flow, "target": "synthetic"})] * 3
+    guard = yaml.safe_load(next(output.rglob("host_guard/capsule.yaml")).read_text())
+    assert guard["lane_expectation"] == "no-work"
+    assert guard["scored"] is False
+    assert guard["lanes"] == {"forbid": ["on_mesh"]}

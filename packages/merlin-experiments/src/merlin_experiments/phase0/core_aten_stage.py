@@ -115,7 +115,7 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
                 continue
             lane = row.get("lane", "host-guard" if cohort == "host_guard" else "device")
             if lane not in {"device", "host-guard", "any", "admission", "truth"} or (
-                cohort == "host_guard" and lane not in {"host-guard", "no-work"}
+                cohort == "host_guard" and lane not in {"host-guard", "truth"}
             ):
                 raise ValueError("invalid selected capsule lane")
             if lane in {"admission", "truth"} and flow is None:
