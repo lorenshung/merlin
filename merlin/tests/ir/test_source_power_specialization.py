@@ -135,7 +135,7 @@ def test_incomplete_semantic_binding_is_not_a_source_specialization(tmp_path, fa
     assert not (tmp_path / "native-source-specialization.json").exists()
 
 
-def complex_fixture(tmp_path, real, imaginary):
+def complex_fixture(tmp_path, real, imaginary, component_map="affine_map<(d0)->(d0)>"):
     """The frontend's complex lowering: project, map each component, interleave by index."""
     tmp_path.joinpath("model.mlir").write_text(f"""module {{func.func @forward(%x:tensor<3x2xf32>)
       -> (tensor<3x2xf32>,tensor<3x2xf32>) {{
@@ -152,13 +152,13 @@ def complex_fixture(tmp_path, real, imaginary):
         linalg.yield %a : f32
       }} -> tensor<3xf32>
       %e2=tensor.empty() : tensor<3xf32>
-      %fr=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
+      %fr=linalg.generic {{indexing_maps=[{component_map},{component_map},affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
         ins(%re,%im:tensor<3xf32>,tensor<3xf32>) outs(%e2:tensor<3xf32>) {{
         ^bb0(%r:f32,%i:f32,%u:f32):
         {real}
       }} -> tensor<3xf32>
       %e3=tensor.empty() : tensor<3xf32>
-      %fi=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
+      %fi=linalg.generic {{indexing_maps=[{component_map},{component_map},affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
         ins(%re,%im:tensor<3xf32>,tensor<3xf32>) outs(%e3:tensor<3xf32>) {{
         ^bb0(%r:f32,%i:f32,%u:f32):
         {imaginary}
@@ -192,6 +192,12 @@ def test_complex_unit_power_is_an_exact_component_copy(tmp_path):
     imaginary = "%w=arith.extf %i : f32 to f64\n%n=arith.truncf %w : f64 to f32\nlinalg.yield %n : f32"
     complex_fixture(tmp_path, real, imaginary)
     assert specialize(tmp_path, report(complex_output=True))["family"] == "storage_copy_or_declared_conversion"
+
+
+def test_complex_component_reversal_is_not_a_copy(tmp_path):
+    # flip on complex storage: each component reads its projection reversed.
+    complex_fixture(tmp_path, "linalg.yield %r : f32", "linalg.yield %i : f32", "affine_map<(d0)->(2-d0)>")
+    assert specialize(tmp_path, report(complex_output=True)) is None
 
 
 def test_complex_component_swap_is_not_a_copy(tmp_path):

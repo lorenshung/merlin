@@ -145,10 +145,20 @@ def classify_complex(function, result):
     first = body.args.index(select.operands[1 if predicate == 0 else 2])
     components = [final.inputs[first], final.inputs[1 - first]]  # real, imaginary
     values = []
+    from xdsl.dialects.builtin import AffineMapAttr
+    from xdsl.ir.affine import AffineDimExpr, AffineMap
+
+    rank = len(shape) - 1
+    leading = [AffineDimExpr(i) for i in range(rank)]
+    final_maps = [list(m.data.results) for m in final.get_indexing_maps()]
+    if final_maps[:2] != [leading, leading] or final_maps[2] != [AffineDimExpr(i) for i in range(rank + 1)]:
+        return None  # The interleave must not move elements.
     for index, component in enumerate(components):
         owner = component.owner
         if op_name(owner) != "linalg.generic" or any(it.data.value != "parallel" for it in owner.get_iterator_types()):
             return None
+        if any(m != AffineMapAttr(AffineMap.identity(rank)) for m in owner.get_indexing_maps()):
+            return None  # An elementwise component map; a reversal or gather is not a copy.
         projections = [_projection(v, argument) for v in owner.inputs]
         if any(p is None for p in projections):
             return None
