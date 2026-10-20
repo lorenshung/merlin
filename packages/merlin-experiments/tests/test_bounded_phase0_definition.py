@@ -9,8 +9,19 @@ import yaml
 
 
 @pytest.fixture
-def definition_inputs(tmp_path):
+def definition_inputs(tmp_path, monkeypatch):
     from merlin.common.paths import repo_root
+    from merlin.targetgen import functional_truth
+
+    # The strict definition commits the independent truth lanes before any
+    # compiler placement. These synthetic cases carry no schema, so the truth
+    # commitment is stubbed: "support" cases are device obligations, the rest
+    # are host guards.
+    def expectation(case):
+        device = case["overload"] == "support"
+        return dict(lane="device" if device else "host-guard", truth="must_accelerate" if device else "not_native")
+
+    monkeypatch.setattr(functional_truth, "expectation", expectation)
 
     root = repo_root()
     generate = runpy.run_path(str(root / "build_tools/scripts/make_bounded_phase0.py"))["generate"]
@@ -48,9 +59,10 @@ def test_strict_definition_retains_every_case_and_derives_both_lanes(definition_
     generate(args)
     recipe = yaml.safe_load((args.output / "recipe.yaml").read_bytes())
     cohorts = recipe["core_aten"]["cohorts"]
-    assert cohorts["public"][0]["lane"] == "admission"
-    assert cohorts["hidden"][0]["lane"] == "admission"
-    assert cohorts["host_guard"] == []
+    assert all(row["lane"] == "truth" for rows in cohorts.values() for row in rows)
+    assert cohorts["hidden"][0]["select"] == ["support::0"]
+    assert cohorts["public"][0]["select"] == ["support::1", "support::2", "support::3"]
+    assert cohorts["host_guard"][0]["select"] == sorted(f"other::{n}" for n in range(6))
     all_ids = [key for rows in cohorts.values() for row in rows for key in row["select"]]
     assert len(all_ids) == len(set(all_ids)) == 10
     assert recipe["core_aten"]["workers"] == 2
@@ -58,7 +70,10 @@ def test_strict_definition_retains_every_case_and_derives_both_lanes(definition_
     assert {case["overload"] for case in cases["cases"]} == {"support", "other0", "other1", "other2"}
     assert cases["denominator_sha256"] == "original"
     definition = json.loads((args.output / "definition.json").read_bytes())
-    assert definition["lane_policy"] == "native_admission"
+    assert definition["lane_policy"] == "functional_truth"
+    assert definition["device_count"] == 4 and definition["host_guard_count"] == 6
+    expectations = json.loads((args.output / "expectations.json").read_bytes())
+    assert sorted(expectations) == sorted(all_ids)
     assert "host_exceptions" not in definition and "support_count" not in definition
 
 
