@@ -75,6 +75,25 @@ def fold_boolean_unit_image(module):
                 predicate_literal = _relation(
                     op.predicate.value.data, (a > b) - (a < b), math.isnan(a) or math.isnan(b), floating=True
                 )
+            else:
+                for slot in (0, 1):
+                    threshold = literal(op.operands[1 - slot])
+                    if not unit(op.operands[slot]) or not isinstance(threshold, (int, float)):
+                        continue
+                    answers = []
+                    for bit in (0.0, 1.0):
+                        left, right = (bit, threshold) if slot == 0 else (threshold, bit)
+                        answers.append(
+                            _relation(
+                                op.predicate.value.data,
+                                (left > right) - (left < right),
+                                math.isnan(threshold),
+                                floating=True,
+                            )
+                        )
+                    if answers[0] == answers[1]:
+                        predicate_literal = answers[0]
+                        break
         elif name in {"arith.andi", "arith.ori", "arith.xori"} and str(op.results[0].type) == "i1":
             a, b = [literal(v) for v in op.operands]
             if a is not None and b is not None:
@@ -83,6 +102,17 @@ def fold_boolean_unit_image(module):
                     "arith.ori": bool(a) or bool(b),
                     "arith.xori": bool(a) != bool(b),
                 }[name]
+            else:
+                for slot, bound in enumerate((a, b)):
+                    if bound is None:
+                        continue
+                    if name == "arith.andi" and not bound:
+                        predicate_literal = False
+                    elif name == "arith.ori" and bound:
+                        predicate_literal = True
+                    elif (name == "arith.andi" and bound) or (name in {"arith.ori", "arith.xori"} and not bound):
+                        replacement = op.operands[1 - slot]
+                    break
         elif name == "arith.select":
             condition = literal(op.operands[0])
             if condition is not None:

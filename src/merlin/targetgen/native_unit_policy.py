@@ -23,6 +23,8 @@ def construction_evidence(module, *, excluded=None, result_abi=None):
     # implementation. The emitted movement path repeats this exact proof.
     candidates = any(
         (op.name == "arith.cmpf" and op.predicate.value.data in {1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13})
+        or getattr(getattr(op, "op_name", None), "data", op.name)
+        in {"math.floor", "math.ceil", "math.trunc", "math.round", "math.roundeven"}
         or op.name == "linalg.index"
         or op.name == "arith.cmpi"
         or op.name == "linalg.reduce"
@@ -39,8 +41,17 @@ def construction_evidence(module, *, excluded=None, result_abi=None):
     if candidates:
         canonical = module.clone()
         from merlin.llvmlower.empty_reductions import fold_empty_reductions
+        from merlin.llvmlower.ieee_identity_selectors import fold_ieee_identity_selectors
+        from merlin.llvmlower.integral_float_rounding import fold_integral_float_rounding
+        from merlin.llvmlower.singleton_reduction_boundaries import expose_singleton_reduction_boundaries
 
-        image_folds = fold_static_unit_indices(canonical) + fold_integer_image_predicates(canonical)
+        image_folds = (
+            fold_static_unit_indices(canonical)
+            + fold_integer_image_predicates(canonical)
+            + fold_integral_float_rounding(canonical)
+            + fold_ieee_identity_selectors(canonical)
+            + expose_singleton_reduction_boundaries(canonical)
+        )
         boolean_folds = (
             fold_boolean_unit_image(canonical)
             + fold_boolean_image_predicates(canonical)

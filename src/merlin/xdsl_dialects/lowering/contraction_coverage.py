@@ -200,7 +200,34 @@ def is_compare_select_relu(op) -> bool:
         return False
     block = op.regions[0].blocks[0]
     operations = list(block.ops)
-    if len(operations) != 5 or len(block.args) != 2:
+    if len(block.args) != 2:
+        return False
+    if len(operations) == 4:
+        zero, compare, select, yielded = operations
+        from math import copysign
+
+        from xdsl.dialects.builtin import FloatAttr, IntegerAttr
+
+        value = zero.properties.get("value")
+        literal_zero = (
+            isinstance(value, (FloatAttr, IntegerAttr))
+            and value.value.data == 0
+            and (not isinstance(value, FloatAttr) or copysign(1.0, value.value.data) > 0)
+        )
+        return (
+            zero.name == "arith.constant"
+            and literal_zero
+            and zero.results[0].type == block.args[0].type
+            and compare.name in {"arith.cmpi", "arith.cmpf"}
+            and compare.properties["predicate"].value.data == (2 if compare.name == "arith.cmpi" else 4)
+            and (compare.name != "arith.cmpf" or not compare.properties["fastmath"].data)
+            and tuple(compare.operands) == (block.args[0], zero.results[0])
+            and select.name == "arith.select"
+            and tuple(select.operands) == (compare.results[0], zero.results[0], block.args[0])
+            and yielded.name == "linalg.yield"
+            and tuple(yielded.operands) == (select.results[0],)
+        )
+    if len(operations) != 5:
         return False
     zero, cast, compare, select, yielded = operations
     value = zero.properties.get("value")

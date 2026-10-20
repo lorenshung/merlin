@@ -236,6 +236,7 @@ def _prepare_spec_int8(
     from merlin.llvmlower.boolean_unit_image import fold_boolean_unit_image
     from merlin.llvmlower.empty_reductions import fold_empty_reductions
     from merlin.llvmlower.integer_image_predicates import fold_integer_image_predicates
+    from merlin.llvmlower.integral_float_rounding import fold_integral_float_rounding
     from merlin.llvmlower.singleton_carriers import fold_singleton_carriers
     from merlin.llvmlower.singleton_reductions import fold_singleton_reductions
     from merlin.llvmlower.singleton_selectors import fold_singleton_selectors
@@ -243,15 +244,25 @@ def _prepare_spec_int8(
     from merlin.llvmlower.static_unit_indices import fold_static_unit_indices
 
     folds = fold_static_unit_indices(module)
+    folds += fold_integral_float_rounding(module)
     folds += fold_boolean_unit_image(module)
     folds += fold_integer_image_predicates(module)
     folds += fold_empty_reductions(module)
     folds += fold_boolean_image_predicates(module)
     folds += fold_boolean_domain(module)
+    from merlin.llvmlower.singleton_reduction_boundaries import expose_singleton_reduction_boundaries
+
+    folds += expose_singleton_reduction_boundaries(module)
     folds += fold_singleton_reductions(module)
     folds += fold_singleton_selectors(module)
     folds += expose_static_masked_sums(module)
     folds += fold_singleton_carriers(module)
+    from merlin.llvmlower.unused_tensor_operands import prune_unused_tensor_inputs
+
+    folds += prune_unused_tensor_inputs(module)
+    from merlin.llvmlower.ieee_identity_selectors import fold_ieee_identity_selectors
+
+    folds += fold_ieee_identity_selectors(module)
     if folds:
         from merlin.llvmlower.entry_weight_projection import _pure_dce
 
@@ -289,6 +300,11 @@ def _prepare_spec_int8(
         return bitwise
     # An unsuccessful candidate must not change the original source or its ordinals.
     module = parse_mlir_file(directory / "model.mlir")
+    from merlin.targetgen.native_byte_activation import prepare as prepare_activation
+
+    activation = prepare_activation(directory, report, selection, provider, package, module)
+    if activation is not None:
+        return activation
     from merlin.targetgen.core_aten_components import prepare_integer_components
 
     components = prepare_integer_components(
