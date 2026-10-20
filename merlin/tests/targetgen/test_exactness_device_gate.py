@@ -78,7 +78,7 @@ else:
 
 
 @pytest.mark.slow
-def test_pinned_cross_repo_bounded_device_results(tmp_path):
+def test_pinned_cross_repo_bounded_device_results(tmp_path, record_property):
     if os.environ.get("MERLIN_EXACTNESS_E2E") != "1":
         pytest.skip("set MERLIN_EXACTNESS_E2E=1 with the selected provider, facts and native toolchain")
     data = fixture()
@@ -165,6 +165,9 @@ def test_pinned_cross_repo_bounded_device_results(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     responses = json.loads((tmp_path / "run/gate/response.json").read_text())["results"]
+    assert set(responses) == {case["case_id"] for case in cases}
+    record_property("case_count", len(responses))
+    record_property("case_ids", json.dumps(sorted(responses)))
     for case, result in responses.items():
         evidence = result["evidence"]
         assert evidence["lane"] == "device", (case, result)
