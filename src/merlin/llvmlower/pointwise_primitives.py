@@ -70,6 +70,10 @@ def expose_pointwise_primitives(module, *, integer_boundaries=False):
                 for child in body.ops
             )
         )
+        if integer_boundaries and not closed_integer:
+            # This late pass must not expose generated IEEE integer RNE or
+            # quotient plumbing as new data arithmetic/device producers.
+            continue
         if not any(
             child.name
             in {
