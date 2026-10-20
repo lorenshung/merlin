@@ -104,8 +104,24 @@ def construction_evidence(module, *, excluded=None):
             if getattr(parent, "name", None) == "linalg.generic" and value.index < len(parent.inputs):
                 return (parent.inputs[value.index],)
             return False
-        if name in {"tensor.cast", "tensor.reshape", "tensor.extract"}:
+        if name in {
+            "tensor.cast", "tensor.reshape", "tensor.extract", "tensor.extract_slice",
+            "tensor.expand_shape", "tensor.collapse_shape", "tensor.splat",
+            "tensor.parallel_insert_slice",
+            "arith.extsi", "arith.extui", "arith.trunci", "arith.bitcast",
+            "arith.extf", "arith.truncf", "arith.sitofp", "arith.uitofp",
+        }:
             return (owner.operands[0],)
+        if name == "tensor.insert_slice":
+            return tuple(owner.operands[:2])
+        if name == "tensor.pad":
+            return (owner.operands[0], owner.regions[0].block.last_op.operands[0])
+        if name in {"linalg.broadcast", "linalg.transpose", "linalg.copy", "linalg.fill"}:
+            return tuple(owner.operands[:1])
+        if name == "tensor.concat":
+            return tuple(owner.operands)
+        if name == "scf.if":
+            return tuple(region.block.last_op.operands[value.index] for region in owner.regions)
         if name == "arith.select":
             return tuple(owner.operands[1:])
         return False

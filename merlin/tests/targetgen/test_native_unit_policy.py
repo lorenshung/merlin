@@ -291,3 +291,28 @@ def test_readout_uses_only_the_current_module_during_prelude_rewriting():
     detached = generic.clone(value_mapper={generic.inputs[0]: generic.results[0]})
     detached.detach_region(0)
     assert construction_evidence(module, excluded=["multi_op_identity"])["status"] == "host"
+
+
+import pytest
+
+
+@pytest.mark.parametrize('carrier,result_type',[
+ ('%r="tensor.concat"(%x,%table) <{dim=0:i64}> : (tensor<2x2xi32>,tensor<2x2xi32>) -> tensor<4x2xi32>','4x2xi32'),
+ ('%r="tensor.insert_slice"(%table,%x) <{static_offsets=array<i64:0,0>,static_sizes=array<i64:2,2>,static_strides=array<i64:1,1>,operandSegmentSizes=array<i32:1,1,0,0,0>}> : (tensor<2x2xi32>,tensor<2x2xi32>) -> tensor<2x2xi32>','2x2xi32'),
+ ('%r="tensor.extract_slice"(%table) <{static_offsets=array<i64:0,0>,static_sizes=array<i64:2,2>,static_strides=array<i64:1,1>,operandSegmentSizes=array<i32:1,0,0,0>}> : (tensor<2x2xi32>) -> tensor<2x2xi32>','2x2xi32'),
+ ('%r=tensor.cast %table : tensor<2x2xi32> to tensor<?x2xi32>','?x2xi32'),
+ ('%r=tensor.collapse_shape %table [[0,1]] : tensor<2x2xi32> into tensor<4xi32>','4xi32'),
+ ('%flat=tensor.collapse_shape %table [[0,1]] : tensor<2x2xi32> into tensor<4xi32>\n%r=tensor.expand_shape %flat [[0,1]] output_shape [2,2] : tensor<4xi32> into tensor<2x2xi32>','2x2xi32'),
+ ('%shape=arith.constant dense<[4]> : tensor<1xi64>\n%r=tensor.reshape %table(%shape) : (tensor<2x2xi32>,tensor<1xi64>) -> tensor<4xi32>','4xi32'),
+ ('%e=tensor.empty() : tensor<2x2x2xi32>\n%r=linalg.broadcast ins(%table:tensor<2x2xi32>) outs(%e:tensor<2x2x2xi32>) dimensions=[0]','2x2x2xi32'),
+ ('%z=arith.constant 0:i32\n%r=tensor.pad %table low[1,1] high[1,1] { ^bb0(%i:index,%j:index): tensor.yield %z:i32 } : tensor<2x2xi32> to tensor<4x4xi32>','4x4xi32'),
+])
+def test_nonuniform_literal_tables_cannot_hide_behind_movement(carrier,result_type):
+    module=parse_mlir_text('module { func.func @forward(%x:tensor<2x2xi32>) -> tensor<'+result_type+'> {\n%table=arith.constant dense<[[1,2],[3,4]]> : tensor<2x2xi32>\n'+carrier+'\nfunc.return %r : tensor<'+result_type+'>\n}}')
+    module.verify()
+    # prepare() applies this same structural classifier to both source and
+    # prepared IR; no source spelling or producer provenance grants an escape.
+    for screened in (module,module.clone()):
+        proof=construction_evidence(screened)
+        assert proof['status']=='host'
+        assert any(e['reason']=='nonuniform_literal_result_construction' for e in proof['evidence'])
