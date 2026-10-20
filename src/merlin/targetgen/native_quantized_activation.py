@@ -29,6 +29,11 @@ def prepare(directory, report, selection, provider, package, module):
     rule = selection["spec"].get("numerical_semantics", {}).get("quantized_native_fallback")
     if not rule or not review_record(rule)["operator_accepted"]:
         return None
+    original = str(module)
+    from merlin.llvmlower.quantized_zero_threshold import normalize
+
+    module = module.clone()
+    normalize(module)
     functions = [op for op in module.walk() if op.name == "func.func"]
     if len(functions) != 1:
         return None
@@ -70,7 +75,6 @@ def prepare(directory, report, selection, provider, package, module):
             return None
         if Fraction(rounded) != q:
             return None
-    original = str(module)
     shape = argument.type.get_shape()
     prefix = "x".join(map(str, shape))
     prefix = prefix + "x" if prefix else ""
