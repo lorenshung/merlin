@@ -209,31 +209,12 @@ def prepare_spec_int8(
     return result
 
 
-def _prepare_spec_int8(
-    directory: Path,
-    report: dict,
-    *,
-    target: str,
-    facts: dict,
-    software_spec: Path,
-    host_capabilities: Path,
-    provider=None,
-    package=None,
-    construction_observer=None,
-):
-    """Emit admitted sites and preserve independently refused source contractions."""
-    import hashlib
+def normalize_closed_identities(module):
+    """Apply the closed, payload-independent identity normalizations in order.
 
-    from merlin.frontends.linalg_mlir import parse_mlir_file
-    from merlin.targetgen.core_aten_spec_int8 import admission_plan, host_readout_chain, select_spec
-
-    selection = select_spec(target, facts, software_spec, host_capabilities)
-    from merlin.targetgen.core_aten_exact_dtype import empty_host_plan
-
-    empty = empty_host_plan(directory, report, selection)
-    if empty is not None:
-        return empty
-    module = parse_mlir_file(directory / "model.mlir")
+    Returns the list of folds. Shared by native preparation and by the
+    floating-contract decision, which must see the same normalized program.
+    """
     from merlin.llvmlower.boolean_domain import fold_boolean_domain
     from merlin.llvmlower.boolean_image_predicates import fold_boolean_image_predicates
     from merlin.llvmlower.boolean_unit_image import fold_boolean_unit_image
@@ -273,6 +254,35 @@ def _prepare_spec_int8(
     from merlin.llvmlower.ieee_identity_selectors import fold_ieee_identity_selectors
 
     folds += fold_ieee_identity_selectors(module)
+    return folds
+
+
+def _prepare_spec_int8(
+    directory: Path,
+    report: dict,
+    *,
+    target: str,
+    facts: dict,
+    software_spec: Path,
+    host_capabilities: Path,
+    provider=None,
+    package=None,
+    construction_observer=None,
+):
+    """Emit admitted sites and preserve independently refused source contractions."""
+    import hashlib
+
+    from merlin.frontends.linalg_mlir import parse_mlir_file
+    from merlin.targetgen.core_aten_spec_int8 import admission_plan, host_readout_chain, select_spec
+
+    selection = select_spec(target, facts, software_spec, host_capabilities)
+    from merlin.targetgen.core_aten_exact_dtype import empty_host_plan
+
+    empty = empty_host_plan(directory, report, selection)
+    if empty is not None:
+        return empty
+    module = parse_mlir_file(directory / "model.mlir")
+    folds = normalize_closed_identities(module)
     if folds:
         from merlin.llvmlower.entry_weight_projection import _pure_dce
 

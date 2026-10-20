@@ -3,7 +3,7 @@
 import pytest
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.targetgen import functional_truth, native_byte_activation, operator_review, quantized_literal_reference
+from merlin.targetgen import floating_contract, native_byte_activation, operator_review, quantized_literal_reference
 from merlin.targetgen.native_quantized_activation import prepare
 
 
@@ -27,7 +27,9 @@ def source(dtype, *, extra=False):
 
 def setup(monkeypatch, *, precision="quantized_exact", maximum=1):
     calls = []
-    monkeypatch.setattr(functional_truth, "expectation", lambda c: dict(precision_class=precision))
+    if precision != "quantized_exact":
+        # An IR whose floating work keeps eager bits (identity/movement) cannot be quantized.
+        monkeypatch.setattr(floating_contract, "requires_quantized_model", lambda m: dict(quantized=False, ops=[]))
     monkeypatch.setattr(operator_review, "review_record", lambda r: dict(operator_accepted=True))
     monkeypatch.setattr(quantized_literal_reference, "qualify", lambda d, r, p, c: {**p, "contract": c})
 

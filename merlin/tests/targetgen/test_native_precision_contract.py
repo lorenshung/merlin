@@ -4,7 +4,6 @@ import copy
 
 import pytest
 
-from merlin.targetgen import functional_truth
 from merlin.targetgen.native_precision_contract import proves_quantized_model, requires_quantized_model
 
 
@@ -20,24 +19,78 @@ def software():
     )
 
 
+def elementwise(source, output, body):
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+
+    return parse_mlir_text(f"""module {{func.func @forward(%x:tensor<4x{source}>) -> tensor<4x{output}> {{
+      %e=tensor.empty() : tensor<4x{output}>
+      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
+        ins(%x:tensor<4x{source}>) outs(%e:tensor<4x{output}>) {{
+        ^bb0(%a:{source},%u:{output}):
+        {body}
+      }} -> tensor<4x{output}>
+      return %r : tensor<4x{output}>
+    }} }}""")
+
+
 @pytest.mark.parametrize(
-    "dtype,precision,wanted",
+    "source,output,body,wanted",
     [
-        ("f16", "quantized_exact", True),
-        ("bf16", "quantized_exact", True),
-        ("f32", "quantized_exact", True),
-        ("f64", "quantized_exact", True),
-        ("complex<f32>", "quantized_exact", True),
-        ("i64", "quantized_exact", False),
-        ("f32", "bit_exact_vs_eager", False),
+        # Floating arithmetic on floating storage: the declared quantized model.
+        ("f32", "f32", "%k=arith.constant 0.5 : f32\n%v=arith.addf %a,%k : f32\nlinalg.yield %v : f32", True),
+        ("f64", "f64", "%k=arith.constant 2.0 : f64\n%v=arith.mulf %a,%k : f64\nlinalg.yield %v : f64", True),
+        (
+            "bf16",
+            "bf16",
+            "%w=arith.extf %a : bf16 to f32\n%k=arith.constant 0.5 : f32\n%s=arith.addf %w,%k : f32\n"
+            "%v=arith.truncf %s : f32 to bf16\nlinalg.yield %v : bf16",
+            True,
+        ),
+        (
+            "f16",
+            "f16",
+            "%z=arith.constant 0.0 : f16\n%p=arith.cmpf olt,%a,%z : f16\n%v=arith.select %p,%z,%a : f16\n"
+            "linalg.yield %v : f16",
+            True,
+        ),
+        ("f32", "f64", "%v=arith.extf %a : f32 to f64\nlinalg.yield %v : f64", True),
+        # Movement, identities, NaN re-encoding and integer storage keep eager bits.
+        ("f32", "f32", "linalg.yield %a : f32", False),
+        # A literal scale or offset is an affine map whatever the literal's value.
+        ("f32", "f32", "%k=arith.constant 1.0 : f32\n%v=arith.mulf %a,%k : f32\nlinalg.yield %v : f32", True),
+        ("f32", "f32", "%k=arith.constant -0.0 : f32\n%v=arith.addf %a,%k : f32\nlinalg.yield %v : f32", True),
+        # A select between x and an exact IEEE identity of x is x for every condition.
+        (
+            "f32",
+            "f32",
+            "%z=arith.constant 0.0 : f32\n%k=arith.constant 1.0 : f32\n%p=arith.cmpf ogt,%a,%z : f32\n"
+            "%m=arith.mulf %a,%k : f32\n%v=arith.select %p,%a,%m : f32\nlinalg.yield %v : f32",
+            False,
+        ),
+        (
+            "f16",
+            "f16",
+            "%w=arith.extf %a : f16 to f32\n%v=arith.truncf %w : f32 to f16\nlinalg.yield %v : f16",
+            False,
+        ),
+        (
+            "f32",
+            "f32",
+            "%q=arith.constant 0x7FC00000 : f32\n%n=arith.cmpf uno,%a,%a : f32\n%v=arith.select %n,%q,%a : f32\n"
+            "linalg.yield %v : f32",
+            False,
+        ),
+        ("i64", "f32", "%c=arith.sitofp %a : i64 to f32\n%k=arith.constant 0.5 : f32\n%v=arith.addf %c,%k : f32\nlinalg.yield %v : f32", False),
+        ("i32", "i32", "%k=arith.constant 3 : i32\n%v=arith.addi %a,%k : i32\nlinalg.yield %v : i32", False),
     ],
 )
-def test_source_storage_and_requested_model_control_obligation(monkeypatch, dtype, precision, wanted):
-    monkeypatch.setattr(functional_truth, "expectation", lambda _: dict(precision_class=precision))
-    record = dict(status="bundled", case=dict(schema=1, arguments={}, expected={}), input_abi=[dict(dtype=dtype)])
-    assert requires_quantized_model(dict(cases=[record])) is wanted
-    record["status"] = "not_in_shard"
-    assert not requires_quantized_model(dict(cases=[record]))
+def test_ir_floating_work_controls_the_declared_model(source, output, body, wanted):
+    assert requires_quantized_model(elementwise(source, output, body)) is wanted
+
+
+def test_dead_floating_arithmetic_does_not_change_the_model():
+    body = "%w=arith.extf %a : f32 to f64\n%k=arith.constant 1.0 : f64\n%t=arith.addf %w,%k : f64\nlinalg.yield %a : f32"
+    assert requires_quantized_model(elementwise("f32", "f32", body)) is False
 
 
 def test_byte_model_requires_matching_parameters_and_independent_reference():

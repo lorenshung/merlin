@@ -1,20 +1,17 @@
 """A native IEEE proof cannot replace a requested quantized-output bit contract."""
 
 
-def requires_quantized_model(report):
-    from merlin.targetgen.functional_truth import expectation
+def requires_quantized_model(module):
+    """Does the IR's floating work require the declared quantized model?
 
-    for record in report.get("cases", ()):
-        case = record.get("case") or {}
-        if record.get("status") not in {None, "bundled"} or not {"schema", "arguments", "expected"} <= case.keys():
-            continue
-        floating = any(
-            abi.get("dtype") in {"f16", "bf16", "f32", "f64"} or abi.get("dtype", "").startswith("complex<")
-            for abi in record.get("input_abi", ())
-        )
-        if floating and expectation(case)["precision_class"] == "quantized_exact":
-            return True
-    return False
+    Decided from the normalized IR alone (floating_contract): live floating
+    arithmetic on data from floating storage is discharged only by the
+    declared quantized model; movement, exact conversions out of integer
+    storage, literal fills and identities keep their eager-bit proofs.
+    """
+    from merlin.targetgen.floating_contract import requires_quantized_model as decide
+
+    return decide(module)["quantized"]
 
 
 def proves_quantized_model(plan, software):

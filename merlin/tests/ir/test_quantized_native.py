@@ -275,7 +275,17 @@ def test_payload_changes_cannot_choose_host_placement(tmp_path, monkeypatch, ora
     for ordinal, values in enumerate(([0.0], [float("inf")], [float("nan")])):
         directory = tmp_path / str(ordinal)
         directory.mkdir()
-        source = "module { func.func @forward(%x:tensor<1xf32>) -> tensor<1xf32> { return %x : tensor<1xf32> } }"
+        # Live floating arithmetic: only the declared quantized model can discharge it.
+        source = """module { func.func @forward(%x:tensor<1xf32>) -> tensor<1xf32> {
+          %e=tensor.empty() : tensor<1xf32>
+          %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+            ins(%x:tensor<1xf32>) outs(%e:tensor<1xf32>) {
+            ^bb0(%a:f32,%u:f32):
+            %k=arith.constant 0.5 : f32
+            %v=arith.addf %a,%k : f32
+            linalg.yield %v : f32
+          } -> tensor<1xf32>
+          return %r : tensor<1xf32> } }"""
         (directory / "model.mlir").write_text(source)
         report = dict(
             output_count=1,
@@ -409,10 +419,12 @@ def test_storage_obligation_refuses_quantization_before_any_payload_or_provider_
     import json
 
     import merlin.targetgen.core_aten_spec_int8 as specs
-    import merlin.targetgen.functional_truth as truth
     from merlin.targetgen.quantized_native import prepare
 
-    monkeypatch.setattr(truth, "expectation", lambda _: dict(precision_class="bit_exact_vs_eager"))
+    # A storage copy: its IR has no floating arithmetic, so eager bits are obligatory.
+    (tmp_path / "model.mlir").write_text(
+        "module { func.func @forward(%x: tensor<2xf32>) -> tensor<2xf32> { return %x : tensor<2xf32> } }"
+    )
 
     def forbidden(*args, **kwargs):
         raise AssertionError("a storage obligation must not enter quantized preparation")

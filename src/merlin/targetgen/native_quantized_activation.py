@@ -11,7 +11,7 @@ def prepare(directory, report, selection, provider, package, module):
     from merlin.frontends.linalg_mlir import parse_mlir_text
     from merlin.llvmlower.quantized_native import parameters
     from merlin.targetgen.exact_arithmetic import round_binary
-    from merlin.targetgen.functional_truth import expectation
+    from merlin.targetgen.floating_contract import requires_quantized_model
     from merlin.targetgen.native_byte_activation import compile_activation
     from merlin.targetgen.operator_review import review_record
     from merlin.targetgen.quantized_literal_reference import qualify
@@ -20,11 +20,7 @@ def prepare(directory, report, selection, provider, package, module):
     records = [r for r in report.get("cases", ()) if r.get("status") == "bundled"]
     if len(records) != 1:
         return None
-    case = records[0].get("case") or {}
-    if (
-        not {"schema", "arguments", "expected"} <= case.keys()
-        or expectation(case)["precision_class"] != "quantized_exact"
-    ):
+    if not requires_quantized_model(module)["quantized"]:
         return None
     rule = selection["spec"].get("numerical_semantics", {}).get("quantized_native_fallback")
     if not rule or not review_record(rule)["operator_accepted"]:

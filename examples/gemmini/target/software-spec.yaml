@@ -31,6 +31,13 @@ numerical_semantics:
     zero_limb_omission: source_literals_only
     native_admission: structural_per_dtype_semantic_proof
     unproved_ieee_arithmetic: declared_quantized_fallback
+    # Live IEEE arithmetic on data from floating storage is discharged only by
+    # the declared quantized model; a literal scale or offset is such arithmetic
+    # whatever its value. Movement, integer/bool-to-float conversion, literal
+    # fills, exact widen-then-narrow round trips and selections between a value
+    # and its exact IEEE identity keep eager-bit proofs. Decided from the
+    # normalized IR (floating_contract), never from a source overload.
+    floating_storage_arithmetic: declared_quantized_model
     # Calibration qparams define the quantized program. Runtime examples never
     # narrow its code ranges or choose component kernels.
     quantized_domain: complete_declared_code_range

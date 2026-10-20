@@ -26,8 +26,20 @@ def candidate(module, family="elementwise_map", numerical="F2"):
         numerical_family=numerical, sites=[dict(status="admitted", family=family, source_operation_ordinal=ordinal)]
     )
 
-def test_policy_uses_only_bundled_logical_boundary_shapes(tmp_path):
+def eager_bits(monkeypatch):
+    # These sources negate floating data, which the IR floating contract sends
+    # to the declared quantized model; that obligation has its own tests
+    # (test_native_precision_contract). Here only construction policy and ABI
+    # boundaries are exercised.
+    from merlin.targetgen import native_precision_contract
+
+    monkeypatch.setattr(native_precision_contract, "requires_quantized_model", lambda module: False)
+
+
+def test_policy_uses_only_bundled_logical_boundary_shapes(tmp_path, monkeypatch):
     import yaml
+
+    eager_bits(monkeypatch)
 
     from merlin.targetgen.core_aten_admission import prepare
 
@@ -167,8 +179,10 @@ def test_missing_construction_policy_refuses_before_any_preparation(tmp_path, mi
         )
 
 @pytest.mark.parametrize("stage", ["prepared", "provider_prelude"])
-def test_generated_constructions_are_screened_even_if_the_prelude_is_later_removed(tmp_path, stage):
+def test_generated_constructions_are_screened_even_if_the_prelude_is_later_removed(tmp_path, stage, monkeypatch):
     import yaml
+
+    eager_bits(monkeypatch)
 
     from merlin.targetgen.core_aten_admission import prepare
 

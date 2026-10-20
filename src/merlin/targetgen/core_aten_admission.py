@@ -86,7 +86,7 @@ def prepare(directory, report, implementation, **kwargs):
         admission.update(status="host", reason_code="native_unit_operator_acceptance_required")
     from merlin.targetgen.native_precision_contract import proves_quantized_model, requires_quantized_model
 
-    if requires_quantized_model(original_report):
+    if requires_quantized_model(parse_mlir_text(original_files["model.mlir"].decode())):
         admission["precision_class"] = "quantized_exact"
         if not proves_quantized_model(plan, software):
             admission.update(status="host", reason_code="declared_quantized_precision_requires_quantized_model")
