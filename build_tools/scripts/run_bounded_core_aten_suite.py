@@ -100,23 +100,64 @@ def stamp(args):
         if path:
             sources.append(path)
     pins = {name: provenance.verify(name) for name in args.pin}
-    diff = subprocess.check_output(["git", "diff", "HEAD"], cwd=args.repo)
-    untracked = subprocess.check_output(
-        ["git", "ls-files", "--others", "--exclude-standard"], cwd=args.repo, text=True
-    ).splitlines()
-    for relative in sorted(untracked):
-        candidate = args.repo / relative
-        if candidate.is_file():
-            diff += subprocess.run(
-                ["git", "diff", "--no-index", "/dev/null", str(candidate)], capture_output=True
-            ).stdout
+    head = git(args.repo, "rev-parse", "HEAD")
+    export_digest = None
+    diff_digest = None
+    if head is None:
+        # A plain git archive intentionally has no VCS metadata. Bind its
+        # complete implementation and contract data instead of inventing a commit or
+        # running git diff outside a repository. The campaign's independent
+        # archive receipt binds the declared revision separately.
+        inventory = {
+            path.relative_to(args.repo).as_posix(): provenance.file_digest(path)
+            for tree in ("src", "packages", "build_tools")
+            for path in sorted((args.repo / tree).rglob("*"))
+            if path.suffix in {".py", ".json", ".yaml", ".yml", ".c", ".h"}
+            and path.is_file()
+            and not path.is_symlink()
+            and "__pycache__" not in path.parts
+        }
+        inventory_path = getattr(args, "output", args.suite.parent) / "merlin-source-export.json"
+        atomic_json(inventory_path, inventory)
+        sources.append(inventory_path)
+        export_digest = provenance.file_digest(inventory_path)
+    else:
+        diff = subprocess.check_output(["git", "diff", "HEAD"], cwd=args.repo)
+        untracked = subprocess.check_output(
+            [
+                "git",
+                "ls-files",
+                "--others",
+                "--exclude-standard",
+                "--",
+                "src",
+                "packages",
+                "build_tools",
+                "examples",
+                "merlin/contract",
+                "merlin/runtime",
+            ],
+            cwd=args.repo,
+            text=True,
+        ).splitlines()
+        for relative in sorted(untracked):
+            candidate = args.repo / relative
+            if candidate.is_file() and not {"out", "__pycache__", ".git", ".codex-side.git"}.intersection(
+                candidate.relative_to(args.repo).parts
+            ):
+                diff += subprocess.run(
+                    ["git", "diff", "--no-index", "/dev/null", str(candidate)], capture_output=True
+                ).stdout
+        diff_digest = hashlib.sha256(diff).hexdigest()
     return provenance.record(
         pins=pins,
         sources=sources,
         artifacts=artifacts,
         extra={
-            "merlin_commit": git(args.repo, "rev-parse", "HEAD"),
-            "merlin_diff_sha256": hashlib.sha256(diff).hexdigest(),
+            "merlin_commit": head,
+            "merlin_diff_sha256": diff_digest,
+            "merlin_source_kind": "git_worktree" if head is not None else "plain_source_export",
+            "merlin_source_export_sha256": export_digest,
             "model2mlir_commit": git(args.m2m_dir, "rev-parse", "HEAD"),
             "device_package_commit": git(args.device_package, "rev-parse", "HEAD") if args.device_package else None,
             "execution_provider_sha256": provenance.file_digest(args.execution_provider)

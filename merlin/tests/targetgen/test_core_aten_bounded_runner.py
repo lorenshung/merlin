@@ -584,3 +584,44 @@ def test_unfinished_disk_response_preserves_explicit_missing_case(tmp_path):
     records = JsonRecordMapping(tmp_path, {"pending": tmp_path / "missing.json"}, missing_value={"status": "not_run"})
     assert dict(records) == {"pending": {"status": "not_run"}}
     assert not (tmp_path / "missing.json").exists()
+
+
+def test_plain_export_stamp_binds_new_sources_without_claiming_a_git_commit(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    module = _measurement_script()
+    monkeypatch.setattr(module, "git", lambda *_: None)
+    monkeypatch.setattr(module.provenance, "record", lambda **kwargs: kwargs)
+    monkeypatch.setenv("MERLIN_SPIKE", str(tmp_path / "spike"))
+
+    def no_git(*_args, **_kwargs):
+        raise AssertionError("plain exports must not require git diff")
+
+    monkeypatch.setattr(module.subprocess, "check_output", no_git)
+    source = tmp_path / "src/new_semantic_rule.py"
+    source.parent.mkdir()
+    source.write_text("rule = 1\n")
+    suite = tmp_path / "suite.json"
+    suite.write_text("{}")
+    args = SimpleNamespace(
+        repo=tmp_path,
+        m2m_dir=tmp_path,
+        suite=suite,
+        pin=[],
+        extension_library=None,
+        facts=None,
+        execution_provider=None,
+        software_spec=None,
+        host_capabilities=None,
+        device_package=None,
+        target=None,
+        output=tmp_path / "run",
+    )
+    first = module.stamp(args)
+    source.write_text("rule = 2\n")
+    second = module.stamp(args)
+    assert first["extra"]["merlin_source_kind"] == "plain_source_export"
+    assert first["extra"]["merlin_commit"] is None
+    assert first["extra"]["merlin_diff_sha256"] is None
+    assert first["extra"]["merlin_source_export_sha256"] != second["extra"]["merlin_source_export_sha256"]
+    assert args.output / "merlin-source-export.json" in second["sources"]
