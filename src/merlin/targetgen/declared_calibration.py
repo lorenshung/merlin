@@ -52,3 +52,44 @@ def initialize_observers(prepared, declaration, observer_type):
             observer.calculate_qparams = MethodType(qparams,observer)
         count += 1
     return count
+
+
+def normalize_quantizer_nans(model, policy):
+    """Make the declared byte-quantizer NaN rule explicit before frontend Q.
+
+    The selected frontend's m2m_q CPU evaluator refuses NaN. Its input can
+    instead select a representable point in storage code zero's rounding cell.
+    For the declared binary scales and byte zero points, -zero_point*scale is
+    exact at f32 (and the declared half/bfloat16 storage range). This selector
+    belongs to quantization only; source arithmetic sees the resulting codes.
+    """
+    if policy != 'byte_storage_zero_nan_saturating_infinity':
+        return 0
+    import torch
+    count=0
+    for node in list(model.graph.nodes):
+        if node.op != 'call_function' or str(node.target) != 'quantized_decomposed.quantize_per_tensor.default':
+            continue
+        source,scale,zero,low,high=node.args[:5]
+        if not low <= 0 <= high:
+            raise ValueError('storage-zero NaN requires zero in the declared code range')
+        # Literal qparams are required by the static recipe. No payload read.
+        replacement=-int(zero)*float(scale)
+        from fractions import Fraction
+        declared_dtype=source.meta.get('val').dtype
+        encoded=torch.tensor(replacement,dtype=declared_dtype).item()
+        if Fraction(encoded) != -int(zero)*Fraction(float(scale)):
+            raise ValueError('NaN storage-zero selector lacks an exact declared-dtype representative')
+        with model.graph.inserting_before(node):
+            mask=model.graph.call_function(torch.ops.aten.isnan.default,(source,))
+            fill=model.graph.call_function(torch.ops.aten.full_like.default,(source,replacement))
+            selected=model.graph.call_function(torch.ops.aten.where.self,(mask,fill,source))
+        for added in (mask,fill,selected):
+            added.meta.update(source.meta)
+        if 'val' in mask.meta:
+            mask.meta['val']=mask.meta['val'].to(dtype=torch.bool)
+        node.args=(selected,*node.args[1:])
+        count+=1
+    model.graph.lint()
+    model.recompile()
+    return count

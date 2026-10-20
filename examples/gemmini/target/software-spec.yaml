@@ -209,6 +209,10 @@ placement_cost_model:
 # dequantization declaration is limited to its stated operand/result types and
 # ranks; it does not declare device execution or arbitrary shapes.
 numerical_semantics:
+  # Authored, pending operator review: the selected CPU byte quantizer clamps
+  # infinities and casts every NaN sign/payload to storage zero. This is solely
+  # an input quantization boundary; rational operation arithmetic stays finite.
+  quantization_nonfinite: byte_storage_zero_nan_saturating_infinity
   calibration_domain:
     schema: merlin.declared_observer_domain.v1
     status: authored_pending_operator_review

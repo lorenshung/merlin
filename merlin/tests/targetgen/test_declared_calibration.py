@@ -14,17 +14,39 @@ def test_program_qparams_and_integer_kernel_are_payload_independent():
     recipe=dict(schema='quant_recipe_v1',status='derived',families=['contraction'],
         weight=dict(dtype='int8',granularity='tensor',symmetric=True,quant_min=-127,quant_max=127),
         activation=dict(dtype='int8',granularity='tensor',symmetric=True,quant_min=-128,quant_max=127,mode='static'),
+        quantization_nonfinite='byte_storage_zero_nan_saturating_infinity',
         calibration_domain=dict(schema='merlin.declared_observer_domain.v1',minimum=-1.,maximum=1.,evaluation_inputs='never_read',scale_policy='enclosing_power_of_two'))
     graphs=[];qparams=[]
     class ForbiddenStream:
         def __iter__(self):raise AssertionError('evaluation calibration stream was inspected')
-    for number in (0.0,1.e30):
+    for number in (0.0,1.e30,float("inf"),float("nan")):
         inputs=(torch.full((2,2),number),torch.full((2,2),number))
         model=apply_recipe(Model(),recipe,example_inputs=inputs,calibration_inputs=ForbiddenStream())
         stats=model._recipe_quantization_stats
         assert stats['framework_capture_policy']['calibration_source']=='declared_observer_domain'
         qparams.append([(str(n.target),n.args[1:]) for n in model.graph.nodes if 'quantized_decomposed' in str(n.target)])
+        from merlin.targetgen.exact_quantized_reference import run
+        independent=run(model,inputs).output
         model,_=integerize_static_pt2e(model,inputs)
+        actual=model(*inputs)
+        torch.utils._pytree.tree_map(lambda a,b: torch.testing.assert_close(a,b,rtol=0,atol=0), actual, independent)
         graphs.append(model.code.encode())
-    assert qparams[0]==qparams[1]
-    assert graphs[0]==graphs[1]  # Complete executable integer graph, not a near-value comparison.
+    assert all(params==qparams[0] for params in qparams)
+    assert all(graph==graphs[0] for graph in graphs)  # Complete executable integer graph, not a near-value comparison.
+
+
+@pytest.mark.parametrize('token,low,high',[('int8',-128,127),('uint8',0,255),('int8',-8,7)])
+def test_declared_nonfinite_byte_boundary_matches_every_half_nan_word(token,low,high):
+    torch=pytest.importorskip('torch')
+    import numpy as np
+    from merlin.targetgen.exact_arithmetic import quantize
+    words=np.arange(65536,dtype=np.uint16)
+    values=torch.from_numpy(words.view(np.float16).copy()).float()
+    special=values[~torch.isfinite(values)]
+    import torch.ao.quantization.fx._decomposed
+    dtype=getattr(torch,token)
+    expected=torch.ops.quantized_decomposed.quantize_per_tensor.default(special,0.015625,0,low,high,dtype)
+    got=quantize(special,0.015625,0,low,high,nonfinite='byte_storage_zero_nan_saturating_infinity')
+    assert got.tolist()==expected.tolist()
+    with pytest.raises(ValueError,match='finite rational'):
+        quantize(special,0.015625,0,low,high)

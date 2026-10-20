@@ -360,8 +360,12 @@ def evaluate_operation(target, args, kwargs):
     dtype = kwargs.get("dtype") or getattr(source, "dtype", torch.get_default_dtype())
     if dtype not in {None, torch.float16, torch.float32, torch.float64, torch.bfloat16}:
         raise ValueError("exact reference refuses an implicit integer cast")
-    a = [exact_array(x) if isinstance(x, (ExactTensor, torch.Tensor)) else x for x in args]
     op = name.split(".")[1] if name.startswith("aten.") else name
+    if op in {"fill", "full", "full_like", "zeros", "zeros_like", "ones", "ones_like"}:
+        value = 0 if op.startswith("zeros") else 1 if op.startswith("ones") else args[1]
+        shape = args[0] if op in {"full", "zeros", "ones"} else args[0].shape
+        return ExactTensor(np.full(shape, rational(value), dtype=object), dtype)
+    a = [exact_array(x) if isinstance(x, (ExactTensor, torch.Tensor)) else x for x in args]
     if op in {"add", "sub", "mul", "div", "true_divide"}:
         alpha = rational(args[2] if len(args) > 2 and op in {"add", "sub"} else kwargs.get("alpha", 1))
         left, right = exact_array(a[0]), exact_array(a[1])
@@ -515,6 +519,7 @@ def run(model, inputs):
 
     sites = []
     counts = {"linear": 0, "conv2d": 0, "matmul": 0}
+    boundary_policy = getattr(model, "_recipe_quantization_stats", {}).get("framework_capture_policy", {}).get("quantization_nonfinite")
 
     class Reference(torch.fx.Interpreter):
         def run_node(self, node):
@@ -537,9 +542,21 @@ def run(model, inputs):
                     position = 7 if channel else 6
                     out_dtype = kwargs.get("out_dtype", args[position] if len(args) > position else torch.float32)
                     return dequantize(value, scale, zp, low, high, axis=axis, dtype=out_dtype)
-                codes = quantize(value, scale, zp, low, high, axis=axis)
+                codes = quantize(value, scale, zp, low, high, axis=axis, nonfinite=boundary_policy)
                 return torch.tensor(codes.tolist(), dtype=dtype).reshape(codes.shape)
             leaves = torch.utils._pytree.tree_leaves((args, kwargs))
+            if name == "aten.where.self" and any(isinstance(x, ExactTensor) for x in leaves):
+                def storage(value):
+                    return value.values if isinstance(value, ExactTensor) else value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else value
+
+                selected = np.where(storage(args[0]), storage(args[1]), storage(args[2]))
+                # A selector observes only selected elements. An unselected NaN
+                # does not enter rational arithmetic or invalidate that branch.
+                dtype = next(x.dtype for x in args[1:] if isinstance(x, (ExactTensor, torch.Tensor)))
+                if boundary_policy == "byte_storage_zero_nan_saturating_infinity":
+                    values = np.vectorize(lambda x: x if not isinstance(x, Fraction) and not math.isfinite(float(x)) else rational(x), otypes=[object])(selected)
+                    return ExactTensor(values, dtype)
+                return ExactTensor(exact_array(selected), dtype)
             constant = name.split(".")[1] if name.startswith("aten.") else None
             if not any(isinstance(x, ExactTensor) for x in leaves) and constant not in {
                 "fill",

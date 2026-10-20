@@ -95,7 +95,11 @@ def lower(op):
     raw = emit(arith.BitcastOp(body.args[0], i32))
     magnitude = emit(arith.AndIOp(raw, c(0x7FFFFFFF)))
     finite_or_inf = emit(arith.CmpiOp(magnitude, c(0x7F800000), "ule"))
-    body.add_op(cf.AssertOp(finite_or_inf, "exact quantization refuses NaN"))
+    nan_storage_zero = "merlin.quantizer_nan_storage_zero" in attrs
+    if nan_storage_zero and not low <= 0 <= high:
+        raise ValueError("storage-zero NaN requires zero inside the declared code range")
+    if not nan_storage_zero:
+        body.add_op(cf.AssertOp(finite_or_inf, "exact quantization refuses NaN"))
     negative = emit(arith.CmpiOp(raw, c(0), "slt"))
     key = emit(arith.XOrIOp(raw, emit(arith.SelectOp(negative, c(0xFFFFFFFF), c(0x80000000)))))
     lo, hi, one = c(0), c(high - low), c(1)
@@ -107,6 +111,8 @@ def lower(op):
         lo = emit(arith.SelectOp(above, emit(arith.AddiOp(mid, one)), lo))
         hi = emit(arith.SelectOp(above, hi, mid))
     code = emit(arith.AddiOp(lo, c(low)))
+    if nan_storage_zero:
+        code = emit(arith.SelectOp(finite_or_inf, code, c(0)))
     narrowed = emit(arith.TruncIOp(code, body.args[1].type))
     body.add_op(linalg.YieldOp(narrowed))
     rank = len(value.type.get_shape())

@@ -1391,6 +1391,9 @@ def apply_recipe(
 
         scale_changes = canonicalize_pt2e_scales(quantized)
     restore_floating_readout_widths(quantized)
+    from merlin.targetgen.declared_calibration import normalize_quantizer_nans
+
+    normalize_quantizer_nans(quantized, recipe.get("quantization_nonfinite"))
     if original_frontend_snapshot is not None:
         from m2m.capture.trace import attach_quantization_boundaries
 
@@ -1437,6 +1440,7 @@ def apply_recipe(
             "observer_epsilon": epsilon,
             "calibration_source": "declared_observer_domain" if declared_domain is not None else "explicit_calibration_stream" if calibration_inputs is not None else "example_inputs",
             "calibration_domain": declared_domain,
+            "quantization_nonfinite": recipe.get("quantization_nonfinite"),
             "calibration_count": calibrated,
         },
     }

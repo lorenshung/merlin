@@ -441,6 +441,7 @@ def _prepare_spec_int8(
         recipe = dict(
             recipes[0],
             calibration_domain=selection["spec"]["numerical_semantics"]["calibration_domain"],
+            quantization_nonfinite=selection["spec"]["numerical_semantics"].get("quantization_nonfinite"),
             accumulator_dtype=selection["readout_facets"][0]["accumulator_dtype"],
             software_admission=selection["spec"],
             software_numerical_engine="integer_reference",
@@ -502,6 +503,12 @@ def _prepare_spec_int8(
             prepared_dir = directory / "capture-bundle"
             prepared_report = build_core_aten_batch({"cases": [source_case]}, capture_root, prepared_dir)
             prepared_module = parse_mlir_file(prepared_dir / "model.mlir")
+            if recipe.get("quantization_nonfinite") == "byte_storage_zero_nan_saturating_infinity":
+                from xdsl.dialects.builtin import UnitAttr
+
+                for operation in prepared_module.walk():
+                    if getattr(operation.attributes.get("prov.aten"), "data", None) == "m2m_q.quantize.default":
+                        operation.attributes["merlin.quantizer_nan_storage_zero"] = UnitAttr()
             from merlin.llvmlower.scalar_tensor_carriers import fold_scalar_tensor_roundtrips
 
             scalar_carriers = fold_scalar_tensor_roundtrips(prepared_module)

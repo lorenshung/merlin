@@ -72,15 +72,30 @@ def _parameters(scale, zero_point, axis, ndim):
     return scales, zeros
 
 
-def quantize(value, scale, zero_point=0, quant_min=-128, quant_max=127, *, axis=None):
+def quantize(value, scale, zero_point=0, quant_min=-128, quant_max=127, *, axis=None, nonfinite=None):
     """Infinite precision divide, RNE, integer zero point, then clamp (no tolerance)."""
     if type(quant_min) is not int or type(quant_max) is not int or quant_min > quant_max:
         raise ValueError("invalid integer quantization range")
-    values = exact_array(value)
+    if nonfinite == "byte_storage_zero_nan_saturating_infinity":
+        if not quant_min <= 0 <= quant_max:
+            raise ValueError("storage-zero NaN requires zero inside the declared code range")
+        raw = value.values if isinstance(value, ExactTensor) else value.detach().cpu().tolist() if hasattr(value, "detach") else value
+        raw = np.asarray(raw, dtype=object)
+        specials = np.vectorize(lambda x: not isinstance(x, Fraction) and not math.isfinite(float(x)), otypes=[bool])(raw)
+        values = exact_array(np.where(specials, 0, raw))
+    else:
+        specials = None
+        values = exact_array(value)
     scales, zeros = _parameters(scale, zero_point, axis, values.ndim)
     from merlin.runtime.exact_readout import round_rational_codes
 
-    return round_rational_codes(values / scales, np.vectorize(int, otypes=[object])(zeros), quant_min, quant_max)
+    result = round_rational_codes(values / scales, np.vectorize(int, otypes=[object])(zeros), quant_min, quant_max)
+    if specials is not None:
+        for index in np.ndindex(raw.shape):
+            if specials[index]:
+                number = float(raw[index])
+                result[index] = 0 if math.isnan(number) else quant_max if number > 0 else quant_min
+    return result
 
 
 @dataclass
