@@ -297,6 +297,8 @@ import pytest
 
 
 @pytest.mark.parametrize('carrier,result_type',[
+ ('%r=linalg.generic {indexing_maps=[affine_map<(d0,d1)->(d0,d1)>],iterator_types=["parallel","parallel"]} outs(%table:tensor<2x2xi32>) { ^bb0(%old:i32): linalg.yield %old:i32 } -> tensor<2x2xi32>','2x2xi32'),
+ ('%r=linalg.generic {indexing_maps=[affine_map<(d0,d1)->(d0,d1)>,affine_map<(d0,d1)->(d0,d1)>],iterator_types=["parallel","parallel"]} ins(%x:tensor<2x2xi32>) outs(%table:tensor<2x2xi32>) { ^bb0(%unused:i32,%old:i32): linalg.yield %old:i32 } -> tensor<2x2xi32>','2x2xi32'),
  ('%i=arith.constant 0:index\n%a=tensor.extract %table[%i,%i]:tensor<2x2xi32>\n%r=tensor.insert %a into %x[%i,%i]:tensor<2x2xi32>','2x2xi32'),
  ('%i=arith.constant 0:index\n%a=tensor.extract %table[%i,%i]:tensor<2x2xi32>\n%r=tensor.from_elements %a:tensor<1xi32>','1xi32'),
  ('%r="tensor.concat"(%x,%table) <{dim=0:i64}> : (tensor<2x2xi32>,tensor<2x2xi32>) -> tensor<4x2xi32>','4x2xi32'),

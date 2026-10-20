@@ -101,8 +101,10 @@ def construction_evidence(module, *, excluded=None):
             return (owner.body.block.last_op.operands[value.index],)
         if name is None and hasattr(owner, "parent_op"):
             parent = owner.parent_op()
-            if getattr(parent, "name", None) == "linalg.generic" and value.index < len(parent.inputs):
-                return (parent.inputs[value.index],)
+            if getattr(parent, "name", None) == "linalg.generic":
+                payloads = (*parent.inputs, *parent.outputs)
+                if value.index < len(payloads):
+                    return (payloads[value.index],)
             return False
         if name in {
             "tensor.cast", "tensor.reshape", "tensor.extract", "tensor.extract_slice",
