@@ -98,7 +98,7 @@ def test_rank3_plan_requires_flat_captured_readout_and_retains_mac_geometry(sele
     assert str(module) == before
     assert plan["quantized_contractions"] == 0
     assert plan["calibration"]["performed"] is False
-    assert plan["calibration"]["source"] == "calibration-on-evaluation-input"
+    assert plan["calibration"]["source"] == "declared_observer_domain"
     (site,) = plan["sites"]
     contraction = next(row for row in site["steps"] if row["step"] == 3)
     assert contraction["software"]["status"] == "admitted"
