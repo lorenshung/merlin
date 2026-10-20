@@ -54,3 +54,22 @@ The tests cover nonfinite quantizer inputs, ties, unchanged post-input bytes,
 all byte codes through a rational divisor and a layout change, negative oracle
 grading, native-path priority and payload-independent admission. Source oracle
 failures raise qualification errors rather than selecting a host lane.
+
+Both operands must be runtime values for the complex-product exclusion. Frozen
+numeric coefficients retain per-component linear eligibility.
+
+The run13 qualification at base `0ae81db52` audited 2,629 native-family cases.
+The affected Spike sweep passed all 480 cases: 454 moved to the device and 26
+retained host semantics (22 runtime complex products and four literal-zero
+divisors). Device totals increased from 1,470 to 1,924. A 200-case regression
+retained device placement and identical kernel object bytes. Strict Phase 0
+reached `execution_succeeded`; all 193 measured calls passed and matched their
+admission lanes (46 device, 147 host).
+
+Qualification passed 145 unit tests with three skips. Six compact moved-only
+FireSim images cover all 454 moved cases and pass traced Spike, including
+per-case Gemmini instruction attribution and ELF-word checks. A three-case
+negative control fails exactly the case with one altered expected output byte.
+Expectations use independent rational numeric bytes and source-record boundary
+metadata. Detailed receipts and the complete audit are generated under
+`out/codex-dev/run13q/`; generated artifacts are excluded from commits.
