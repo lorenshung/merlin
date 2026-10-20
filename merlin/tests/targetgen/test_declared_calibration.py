@@ -157,3 +157,75 @@ def test_declared_special_bias_is_discarded_only_at_the_final_quantizer():
     output=next(n for n in graph.nodes if n.op=='output');output.args=(next(n for n in graph.nodes if n.target==torch.ops.aten.relu.default),)
     graph.eliminate_dead_code();model.recompile()
     with pytest.raises(ValueError,match='final byte quantizer'):run(model,inputs)
+
+
+
+@pytest.mark.parametrize('beta',[0.,1.,1.5])
+@pytest.mark.parametrize('relu',[False,True])
+def test_floating_residual_overlay_preserves_single_nan_words(beta,relu):
+    torch=pytest.importorskip('torch')
+    pytest.importorskip('m2m.capture.integer_readout')
+    from merlin.targetgen.declared_readout_specials import retain_special_readouts
+    graph=torch.fx.Graph();acc=graph.placeholder('acc');bias=graph.placeholder('bias')
+    result=graph.call_function(torch.ops.m2m_q.exact_readout.default,(acc,.015625,[.015625],1.,bias,beta,None,0,-128,127,relu))
+    graph.output(result);model=torch.fx.GraphModule(torch.nn.Module(),graph)
+    assert retain_special_readouts(model,'byte_storage_zero_nan_saturating_infinity',floating_policy='single_residual_quiet_word_f32')==1
+    original=torch.tensor([0x7f800001,0xffc00023,0x7f800000,0xff800000,0x3fa00000],dtype=torch.uint32)
+    residual=original.view(torch.float32);accumulator=torch.full((2,5),64,dtype=torch.int32)
+    actual=model(accumulator,residual)
+    if beta:
+        expected=original.clone();expected[0]=0x7fc00001
+        if relu:expected[3]=0
+        expected[4]=torch.tensor([.015625+beta*1.25]).view(torch.uint32)[0]
+    else:expected=torch.full((5,),0x3c800000,dtype=torch.uint32)
+    assert torch.equal(actual.view(torch.uint32),expected.expand(2,5))
+    assert torch.equal(residual.view(torch.uint32),original)
+
+
+def test_floating_reference_needs_a_declared_single_nan_word_contract():
+    torch=pytest.importorskip('torch')
+    import torch.ao.quantization.fx._decomposed
+    from merlin.targetgen.exact_quantized_reference import run
+    graph=torch.fx.Graph();x=graph.placeholder('x');bias=graph.placeholder('bias')
+    q=graph.call_function(torch.ops.quantized_decomposed.quantize_per_tensor.default,(x,.015625,0,-128,127,torch.int8))
+    real=graph.call_function(torch.ops.quantized_decomposed.dequantize_per_tensor.default,(q,.015625,0,-128,127,torch.int8))
+    result=graph.call_function(torch.ops.aten.add.Tensor,(real,bias));graph.output(result)
+    model=torch.fx.GraphModule(torch.nn.Module(),graph)
+    model._recipe_quantization_stats={'framework_capture_policy':{'quantization_nonfinite':'byte_storage_zero_nan_saturating_infinity','readout_specials':'single_residual_quiet_word_f32'}}
+    bias=torch.tensor([0x7f800001,0xffc00023,0x7f800000,0xff800000],dtype=torch.uint32).view(torch.float32)
+    inputs=(torch.ones(4),bias)
+    assert torch.equal(run(model,inputs).output.view(torch.uint32),model(*inputs).view(torch.uint32))
+
+
+def test_ambiguous_floating_residual_coefficient_refuses_statically():
+    torch=pytest.importorskip('torch')
+    pytest.importorskip('m2m.capture.integer_readout')
+    from merlin.targetgen.declared_readout_specials import retain_special_readouts
+    from merlin.targetgen.capture_refusals import NumericCaptureRefused
+    graph=torch.fx.Graph();acc=graph.placeholder('acc');bias=graph.placeholder('bias')
+    result=graph.call_function(torch.ops.m2m_q.exact_readout.default,(acc,.015625,[.015625],1.,bias,-1.))
+    graph.output(result);model=torch.fx.GraphModule(torch.nn.Module(),graph)
+    with pytest.raises(NumericCaptureRefused,match='single-NaN word proof'):
+        retain_special_readouts(model,'byte_storage_zero_nan_saturating_infinity',floating_policy='single_residual_quiet_word_f32')
+
+
+def test_exact_capture_agreement_compares_nonfinite_storage_words():
+    torch=pytest.importorskip('torch')
+    from merlin.targetgen._capture_integer_agreement import integerized_agreement
+    words=torch.tensor([0x7fc00001,0xffc00023,0x7f800000,0xff800000],dtype=torch.uint32)
+    def abi(value):return [value],[{'dtype':str(value.dtype),'shape':list(value.shape)}]
+    left=words.view(torch.float32)
+    same=integerized_agreement(left,left.clone(),atol=0.,rtol=0.,output_abi=abi)
+    assert same['status']=='passed' and not same['finite']
+    different=words.clone();different[0]=0x7fc00002
+    assert integerized_agreement(left,different.view(torch.float32),atol=0.,rtol=0.,output_abi=abi)['status']=='failed'
+
+
+def test_static_readout_refusal_has_a_machine_readable_capture_receipt(tmp_path,monkeypatch):
+    from merlin.capture import integerization
+    from merlin.targetgen.capture_refusals import NumericCaptureRefused,read_refusal
+    def refuse(*args,**kwargs):raise NumericCaptureRefused('unproved coefficient',code='unquantized_special_readout_unproved')
+    monkeypatch.setattr(integerization,'integerize_static_pt2e',refuse)
+    with pytest.raises(SystemExit) as caught:integerization.integerize_capture_model(None,(),numerics='integer_readout',directory=tmp_path)
+    assert caught.value.code==4
+    assert read_refusal(tmp_path/'refusal.json').code=='unquantized_special_readout_unproved'

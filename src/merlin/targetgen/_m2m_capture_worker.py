@@ -1116,7 +1116,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
         from merlin.capture.integerization import (
             INTEGER_REFERENCE,
             accelerator_readout_numerics,
-            integerize_static_pt2e,
+            integerize_capture_model as integerize_static_pt2e,
         )
 
         selected_engine = (recipe or {}).get("software_numerical_engine", "integer_reference")
@@ -1166,7 +1166,7 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
             except Exception as exc:  # noqa: BLE001 -- record a failed selected reference, never substitute portable
                 independent_error = f"{type(exc).__name__}: {exc}"[:2000]
                 independent = None
-        mdl, integerization_receipt = integerize_static_pt2e(mdl, tuple(inputs), numerics=readout_numerics)
+        mdl, integerization_receipt = integerize_static_pt2e(mdl, tuple(inputs), numerics=readout_numerics, directory=out)
         if declared_graph:
             if independent is not None:
                 leaves, _ = _output_abi(independent.output)

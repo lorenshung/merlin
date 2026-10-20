@@ -64,6 +64,7 @@ def read_refusal(path):
             "no_eligible_recipe_operations",
             "nonfinite_calibration",
             "complex_calibration",
+            "unquantized_special_readout_unproved",
             "fft_admission_refused",
             "integerization_golden_disagreement",
         }

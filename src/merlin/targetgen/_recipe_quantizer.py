@@ -1441,6 +1441,7 @@ def apply_recipe(
             "calibration_source": "declared_observer_domain" if declared_domain is not None else "explicit_calibration_stream" if calibration_inputs is not None else "example_inputs",
             "calibration_domain": declared_domain,
             "quantization_nonfinite": recipe.get("quantization_nonfinite"),
+            "readout_specials": recipe.get("readout_specials"),
             "calibration_count": calibrated,
         },
     }

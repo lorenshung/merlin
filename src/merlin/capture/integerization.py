@@ -202,6 +202,7 @@ def integerize_static_pt2e(model, inputs, *, numerics: str = "integer_readout"):
     from m2m.capture.pt2e_integerize import integerize_pt2e
 
     boundary_policy = getattr(model, "_recipe_quantization_stats", {}).get("framework_capture_policy", {}).get("quantization_nonfinite")
+    floating_policy = getattr(model, "_recipe_quantization_stats", {}).get("framework_capture_policy", {}).get("readout_specials")
     layouts = {}
     for node in model.graph.nodes:
         value = node.meta.get("val")
@@ -237,8 +238,21 @@ def integerize_static_pt2e(model, inputs, *, numerics: str = "integer_readout"):
     graph.lint()
     model.recompile()
     receipt["result_layout_restorations"] = restorations
+    from merlin.targetgen.readout_quantizer_fusion import fuse_readout_quantizers
     from merlin.targetgen.declared_readout_specials import retain_special_readouts
 
-    retain_special_readouts(model, boundary_policy)
+    receipt["readout_quantizer_fusions"] = fuse_readout_quantizers(model)
+
+    retain_special_readouts(model, boundary_policy, floating_policy=floating_policy)
     receipt["ieee_quantizer_residuals"] = getattr(model, "_merlin_special_readout_proofs", [])
     return model, receipt
+
+
+def integerize_capture_model(model,inputs,*,numerics,directory):
+    """Emit an explicitly typed static refusal for the subprocess caller."""
+    from merlin.targetgen.capture_refusals import NumericCaptureRefused,write_exception_refusal
+    try:
+        return integerize_static_pt2e(model,inputs,numerics=numerics)
+    except NumericCaptureRefused as refusal:
+        write_exception_refusal(directory,refusal,fallback_code='unquantized_special_readout_unproved')
+        raise SystemExit(4) from refusal

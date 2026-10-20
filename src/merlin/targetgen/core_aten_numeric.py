@@ -442,6 +442,7 @@ def _prepare_spec_int8(
             recipes[0],
             calibration_domain=selection["spec"]["numerical_semantics"]["calibration_domain"],
             quantization_nonfinite=selection["spec"]["numerical_semantics"].get("quantization_nonfinite"),
+            readout_specials=selection["spec"]["numerical_semantics"].get("readout_specials"),
             accumulator_dtype=selection["readout_facets"][0]["accumulator_dtype"],
             software_admission=selection["spec"],
             software_numerical_engine="integer_reference",
@@ -530,8 +531,9 @@ def _prepare_spec_int8(
                     capture_proof_error = str(exc)
             captured_plan = admission_plan(prepared_module, selection, captured=True, provider_proof=capture_proof)
             residuals = artifact.meta.get("integerization_receipt", {}).get("ieee_quantizer_residuals", [])
-            if residuals:
-                captured_plan["ieee_special_family"] = dict(family="F3", proof="broadcast_residual_byte_quantization", readouts=residuals)
+            active_residuals = [row for row in residuals if row.get("beta") != 0]
+            if active_residuals:
+                captured_plan["ieee_special_family"] = dict(family="F3", proof="declared_single_residual_boundary", readouts=active_residuals)
             captured_plan["scalar_tensor_carriers_folded"] = scalar_carriers
             captured_plan["quantized_affine_domain_proofs"] = domain_proofs
             if capture_proof_error:

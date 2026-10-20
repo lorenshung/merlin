@@ -16,7 +16,7 @@ import numpy as np
 from merlin.targetgen.exact_arithmetic import (
     ExactTensor,
     exact_array as _finite_exact_array,
-    materialize,
+    materialize as _finite_materialize,
 )
 from merlin.targetgen.exact_arithmetic import (
     dequantize as dequantize,
@@ -43,7 +43,9 @@ def rational(value):
         number=float(value)
         if not math.isfinite(number):
             state['special_seen']=True
-            return BoundarySpecial(0 if math.isnan(number) else 1 if number>0 else -1)
+            import struct
+            word=(struct.unpack('<I',struct.pack('<f',number))[0] | (1<<22)) if math.isnan(number) else None
+            return BoundarySpecial(0 if math.isnan(number) else 1 if number>0 else -1,word)
     return _finite_rational(value)
 
 def exact_array(value):
@@ -51,6 +53,26 @@ def exact_array(value):
     if isinstance(value,ExactTensor):return value.values
     if hasattr(value,'detach'):value=value.detach().cpu().tolist()
     return np.vectorize(rational,otypes=[object])(np.asarray(value,dtype=object))
+
+
+def materialize(value):
+    if isinstance(value,tuple):return tuple(materialize(x) for x in value)
+    if isinstance(value,list):return [materialize(x) for x in value]
+    if isinstance(value,dict):return {k:materialize(x) for k,x in value.items()}
+    if isinstance(value,ExactTensor) and any(isinstance(x,BoundarySpecial) for x in value.values.flat):
+        import struct
+        import torch
+        state=_boundary_state.get()
+        if not state or state.get('floating_specials')!='single_residual_quiet_word_f32' or value.dtype!=torch.float32:
+            raise ValueError('special rational arithmetic requires a final byte quantizer')
+        words=[]
+        for x in value.values.flat:
+            if isinstance(x,BoundarySpecial):
+                if not x.sign and x.word is None:raise ValueError('competing or invalid NaNs lack a deterministic input word')
+                words.append(x.word if not x.sign else 0x7f800000 | (0x80000000 if x.sign<0 else 0))
+            else:words.append(struct.unpack('<I',struct.pack('<f',round_binary(x,32)))[0])
+        return torch.tensor(words,dtype=torch.uint32).view(torch.float32).reshape(value.values.shape)
+    return _finite_materialize(value)
 
 
 def _clamp_array(values,bound,*,lower):
@@ -663,11 +685,11 @@ def run(model, inputs):
 
     saved = copy.deepcopy(tuple(inputs))
     reference = Reference(model, garbage_collect_values=False)
-    state={'special_seen':False} if boundary_policy=='byte_storage_zero_nan_saturating_infinity' else None
+    state={'special_seen':False,'floating_specials':getattr(model, '_recipe_quantization_stats', {}).get('framework_capture_policy', {}).get('readout_specials')} if boundary_policy=='byte_storage_zero_nan_saturating_infinity' else None
     token=_boundary_state.set(state)
     try:
         exact = reference.run(*inputs)
-        if state is not None and state['special_seen']:
+        if state is not None and state['special_seen'] and state['floating_specials']!='single_residual_quiet_word_f32':
             leaves=torch.utils._pytree.tree_leaves(exact)
             if any(isinstance(x,ExactTensor) and x.codes is None for x in leaves):
                 raise ValueError('special rational arithmetic requires a final byte quantizer')

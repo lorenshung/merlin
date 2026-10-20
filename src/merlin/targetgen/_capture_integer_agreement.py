@@ -39,6 +39,8 @@ def integerized_agreement(before, after, *, atol: float, rtol: float, output_abi
                 rewritten.detach().cpu().contiguous().reshape(-1).view(torch.uint8),
             )
         )
+        if atol == 0 and rtol == 0:
+            within = byte_equal  # Complete words include any proved IEEE special payload.
         zero_signs = (
             int(((lhs == 0) & (rhs == 0) & (torch.signbit(lhs) != torch.signbit(rhs))).sum()) if same_shape else 0
         )

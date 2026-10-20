@@ -9,7 +9,8 @@ from fractions import Fraction
 
 @dataclass(frozen=True)
 class BoundarySpecial:
-    sign: int  # -1/+1 infinity; 0 NaN (payload cannot survive a byte quantizer).
+    sign: int  # -1/+1 infinity; 0 NaN.
+    word: int | None = None  # Quieted single-input f32 NaN; None means ambiguous.
 
     def __eq__(self,other):
         return isinstance(other,BoundarySpecial) and bool(self.sign) and self.sign==other.sign
@@ -17,17 +18,21 @@ class BoundarySpecial:
     def __float__(self):
         return float('nan') if not self.sign else float('inf')*self.sign
 
-    def __neg__(self):return BoundarySpecial(-self.sign)
+    def __neg__(self):return BoundarySpecial(-self.sign,self.word^0x80000000 if self.word is not None else None)
     def __abs__(self):return BoundarySpecial(abs(self.sign))
     def __add__(self,other):
         if isinstance(other,BoundarySpecial):
-            return self if self.sign and self.sign==other.sign else BoundarySpecial(0)
+            if not self.sign and not other.sign:return self if self.word==other.word else BoundarySpecial(0)
+            if not self.sign:return self
+            if not other.sign:return other
+            return self if self.sign==other.sign else BoundarySpecial(0)
         return self
     __radd__=__add__
     def __sub__(self,other):return self+(-other)
     def __rsub__(self,other):return -self+other
     def __mul__(self,other):
         if isinstance(other,BoundarySpecial):return BoundarySpecial(self.sign*other.sign)
+        if not self.sign:return self if other>=0 else BoundarySpecial(0)
         return BoundarySpecial(0 if not other else self.sign*(1 if other>0 else -1))
     __rmul__=__mul__
     def __truediv__(self,other):
