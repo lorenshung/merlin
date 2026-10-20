@@ -68,6 +68,7 @@ def fold_boolean_unit_image(module):
         name = getattr(getattr(op, "op_name", None), "data", op.name)
         replacement = None
         zero = False
+        integer_zero = False
         predicate_literal = None
         if name == "arith.cmpf":
             a, b = [literal(v) for v in op.operands]
@@ -125,6 +126,17 @@ def fold_boolean_unit_image(module):
                 changed += 1
                 memo.clear()
                 continue
+        if name == "arith.subf" and op.operands[0] is op.operands[1] and unit(op.operands[0]):
+            zero = True  # Both Boolean floating words are finite and nonnegative.
+        if name == "arith.andi":
+            for slot in (0, 1):
+                cast = op.operands[slot].owner
+                mask = literal(op.operands[1 - slot])
+                if getattr(cast, "name", None) == "arith.bitcast" and isinstance(mask, int) and unit(cast.operands[0]):
+                    typ = cast.operands[0].type
+                    one = int.from_bytes(typ.pack([1.0]), "little")
+                    if not mask & one:
+                        integer_zero = True
         if name in {"math.sqrt", "math.floor", "math.ceil", "math.trunc", "math.round", "math.roundeven"}:
             if len(op.operands) == 1 and unit(op.operands[0]):
                 replacement = op.operands[0]
@@ -168,7 +180,11 @@ def fold_boolean_unit_image(module):
                         ):
                             replacement = data
                             break
-        if predicate_literal is not None:
+        if integer_zero:
+            constant = arith.ConstantOp(IntegerAttr(0, op.results[0].type))
+            Rewriter.replace_op(op, [constant], [constant.result])
+            changed += 1
+        elif predicate_literal is not None:
             constant = arith.ConstantOp(IntegerAttr(int(predicate_literal), i1))
             Rewriter.replace_op(op, [constant], [constant.result])
             changed += 1

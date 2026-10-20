@@ -42,15 +42,17 @@ def construction_evidence(module, *, excluded=None, result_abi=None):
         canonical = module.clone()
         from merlin.llvmlower.empty_reductions import fold_empty_reductions
         from merlin.llvmlower.ieee_identity_selectors import fold_ieee_identity_selectors
-        from merlin.llvmlower.integral_float_rounding import fold_integral_float_rounding
+        from merlin.llvmlower.integral_float_rounding import fold_integral_image_identities
+        from merlin.llvmlower.nan_guarded_neutral import fold_nan_guarded_neutral
         from merlin.llvmlower.singleton_reduction_boundaries import expose_singleton_reduction_boundaries
 
         image_folds = (
             fold_static_unit_indices(canonical)
             + fold_integer_image_predicates(canonical)
-            + fold_integral_float_rounding(canonical)
+            + fold_integral_image_identities(canonical)
             + fold_ieee_identity_selectors(canonical)
             + expose_singleton_reduction_boundaries(canonical)
+            + fold_nan_guarded_neutral(canonical)
         )
         boolean_folds = (
             fold_boolean_unit_image(canonical)

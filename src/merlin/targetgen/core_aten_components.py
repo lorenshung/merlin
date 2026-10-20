@@ -311,7 +311,14 @@ def prepare_integer_components(
             source = operation.inputs[0]
             if str(source.type.element_type) not in {"f16", "bf16"}:
                 continue
-            if any(child.name in {"arith.negf", "arith.cmpf"} for child in operation.body.block.ops):
+            if any(
+                child.name == "arith.negf"
+                or (
+                    child.name == "arith.cmpf"
+                    and not (child.operands[0] is child.operands[1] and child.predicate.value.data in {7, 14})
+                )
+                for child in operation.body.block.ops
+            ):
                 if profiles.get(source) is None or not one_tensor_storage_context:
                     (directory / "exact-dtype-refusal.json").write_text(
                         json.dumps(

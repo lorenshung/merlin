@@ -253,6 +253,12 @@ def _prepare_spec_int8(
     from merlin.llvmlower.singleton_reduction_boundaries import expose_singleton_reduction_boundaries
 
     folds += expose_singleton_reduction_boundaries(module)
+    from merlin.llvmlower.nan_guarded_neutral import fold_nan_guarded_neutral
+
+    folds += fold_nan_guarded_neutral(module)
+    from merlin.llvmlower.integral_float_rounding import fold_integral_image_identities
+
+    folds += fold_integral_image_identities(module)
     folds += fold_singleton_reductions(module)
     folds += fold_singleton_selectors(module)
     folds += expose_static_masked_sums(module)

@@ -68,6 +68,20 @@ def test_a_rounded_reciprocal_is_not_an_exact_remainder_proof():
     assert str(module) == original
 
 
+@pytest.mark.parametrize(
+    "integer,mask,folds", [("i1", -2147483648, True), ("i1", 1065353216, False), ("i8", -2147483648, False)]
+)
+def test_a_storage_mask_is_zero_only_over_the_proved_boolean_image(integer, mask, folds):
+    module = parse_mlir_text(f"""module {{func.func @forward(%a:{integer}) -> i32 {{
+      %f=arith.uitofp %a : {integer} to f32
+      %raw=arith.bitcast %f : f32 to i32
+      %mask=arith.constant {mask} : i32
+      %v=arith.andi %raw,%mask : i32
+      return %v : i32
+    }} }}""")
+    assert (fold_boolean_unit_image(module) > 0) is folds
+
+
 @pytest.mark.parametrize("zero,identity", [("0.0", True), ("-0.0", False)])
 def test_unit_selector_does_not_erase_a_negative_zero_word(zero, identity):
     module = parse_mlir_text(f"""module {{func.func @forward(%x:tensor<4xi1>) -> tensor<4xf32> {{
