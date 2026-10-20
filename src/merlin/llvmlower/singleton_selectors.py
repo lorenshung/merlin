@@ -1,4 +1,4 @@
-"""Prove singleton compare/select reductions to be storage selectors or fills.
+"""Prove closed compare/select regions to be storage selectors or fills.
 
 One runtime scalar is partitioned into complete typed comparison cells. Each
 predicate is constant throughout a cell; the cells cover every storage word,
@@ -126,8 +126,11 @@ def _prove(op, ranges):
     for arg, value in zip(list(block.args)[1:], op.outputs, strict=True):
         literal = _constant_of(value)
         if literal is None:
-            return None
-        initial[arg] = Literal(literal, arg.type)
+            if arg.uses:
+                return None
+            initial[arg] = IGNORED
+        else:
+            initial[arg] = Literal(literal, arg.type)
     for child in block.ops:
         for flag in ("fastmath", "overflowFlags"):
             value = child.properties.get(flag)
@@ -177,10 +180,18 @@ def _prove(op, ranges):
         if not result.uses:
             proved.append(IGNORED)
             continue
-        first = column[0]
+        first = next((value for value in column if isinstance(value, Literal)), None)
+
+        def equals_literal(value, cell):
+            if isinstance(value, Literal):
+                return value.key() == first.key()
+            return integer and value is RUNTIME and cell[0] == cell[1] == int(first.value) % (1 << element.width.data)
+
         if all(value is RUNTIME for value in column):
             proved.append(RUNTIME)
-        elif isinstance(first, Literal) and all(isinstance(v, Literal) and v.key() == first.key() for v in column):
+        elif isinstance(first, Literal) and all(
+            equals_literal(value, cell) for value, cell in zip(column, cells, strict=True)
+        ):
             proved.append(first)
         else:
             return None
@@ -204,7 +215,7 @@ def fold_singleton_selectors(module):
         if payloads.classify(op.inputs[0]) & UNKNOWN:
             continue
         reductions = [i for i, it in enumerate(op.get_iterator_types()) if it.data.value == "reduction"]
-        if not reductions:
+        if not reductions and not any(child.name in {"arith.cmpi", "arith.cmpf"} for child in op.body.block.ops):
             continue
         try:
             ranges = op.get_static_loop_ranges()

@@ -111,3 +111,43 @@ def test_unknown_data_arithmetic_cannot_be_licensed_by_singleton_shape():
     original = str(module)
     assert fold_singleton_selectors(module) == 0
     assert str(module) == original
+
+
+@pytest.mark.parametrize("element", ["i8", "i32", "i64"])
+def test_parallel_integer_comparison_cells_prove_a_uniform_clamp(element):
+    module = parse_mlir_text(f"""module {{func.func @forward(%x:tensor<4x{element}>) -> tensor<4x{element}> {{
+      %e=tensor.empty() : tensor<4x{element}>
+      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
+        ins(%x:tensor<4x{element}>) outs(%e:tensor<4x{element}>) {{
+        ^bb0(%v:{element},%unused:{element}):
+        %z=arith.constant 0 : {element}
+        %neg=arith.cmpi slt,%v,%z : {element}
+        %lo=arith.select %neg,%z,%v : {element}
+        %pos=arith.cmpi sgt,%lo,%z : {element}
+        %out=arith.select %pos,%z,%lo : {element}
+        linalg.yield %out : {element}
+      }} -> tensor<4x{element}>
+      return %r : tensor<4x{element}>
+    }} }}""")
+    assert fold_singleton_selectors(module) == 1
+    returned = next(op for op in module.walk() if op.name == "func.return").operands[0]
+    assert returned.owner.name == "tensor.splat"
+    assert returned.owner.operands[0].owner.value.value.data == 0
+
+
+def test_a_real_parallel_clamp_is_not_a_storage_selector():
+    module = parse_mlir_text("""module {func.func @forward(%x:tensor<4xi8>) -> tensor<4xi8> {
+      %e=tensor.empty() : tensor<4xi8>
+      %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+        ins(%x:tensor<4xi8>) outs(%e:tensor<4xi8>) {
+        ^bb0(%v:i8,%unused:i8):
+        %z=arith.constant 0 : i8
+        %neg=arith.cmpi slt,%v,%z : i8
+        %out=arith.select %neg,%z,%v : i8
+        linalg.yield %out : i8
+      } -> tensor<4xi8>
+      return %r : tensor<4xi8>
+    }}""")
+    original = str(module)
+    assert fold_singleton_selectors(module) == 0
+    assert str(module) == original

@@ -21,6 +21,7 @@ def construction_evidence(module, *, excluded=None):
     # implementation. The emitted movement path repeats this exact proof.
     candidates = any(
         (op.name == "arith.cmpf" and op.predicate.value.data in {1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13})
+        or op.name == "arith.cmpi"
         or op.name == "linalg.reduce"
         or (op.name == "linalg.generic" and any(str(v.type.element_type) == "i1" for v in op.inputs))
         or (
