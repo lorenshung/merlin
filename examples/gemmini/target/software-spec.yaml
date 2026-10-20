@@ -1,7 +1,7 @@
 # Authored software semantics. RTL geometry/protocol and qualification are generated evidence.
 schema: merlin.software_spec.v1
 target: gemmini
-execution_provider_revision: ec084f03516125e03eac239a508b246ccdb3dd61
+execution_provider_revision: 9aac379566653a087330dfe9e512b0c0a16868a6
 status: reviewed
 placement_cost_model:
   status: authored_pending_operator_review

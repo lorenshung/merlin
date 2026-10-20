@@ -46,7 +46,6 @@ pins:
       - m2m/ir/torch_cpu_rng.py
       - tests/test_integer_shift_floordiv.py
       - m2m/ir/embedding_bag_cpu.py
-      - m2m/ir/cpu_sum.py
       - m2m/ir/cpu_gemm.py
       - m2m/ir/cpu_batch_norm.py
       - m2m/ir/cpu_reductions.py
@@ -55,7 +54,6 @@ pins:
       - m2m/ir/cpu_moments.py
       - m2m/ir/cpu_group_norm.py
       - m2m/ir/cpu_layer_norm_backward.py
-      - m2m/ir/half_layer_norm.py
       - m2m/ir/grid_sample.py
       - m2m/ir/torchmlir_decomps.py
       - m2m/ir/storage_resize.py
