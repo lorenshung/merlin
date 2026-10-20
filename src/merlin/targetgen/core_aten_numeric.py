@@ -149,34 +149,7 @@ def prepare_spec_int8(
     **kwargs,
 ):
     from merlin.targetgen.core_aten_admission import prepare
-    from merlin.targetgen.functional_truth import expectation
 
-    records = [r for r in report.get("cases", []) if r.get("status") in {None, "bundled"}]
-    commitments = [
-        expectation(r["case"]) for r in records if {"schema", "arguments", "expected"} <= r.get("case", {}).keys()
-    ]
-    if commitments and len(commitments) == len(records) and any(c["lane"] != "device" for c in commitments):
-        from merlin.targetgen.core_aten_spec_int8 import select_spec
-
-        selection = select_spec(kwargs["target"], kwargs["facts"], kwargs["software_spec"], kwargs["host_capabilities"])
-        guard = next(c for c in commitments if c["lane"] != "device")
-        result = dict(
-            selection=selection,
-            status="host",
-            sites=[],
-            exact_dtype_sites=0,
-            native_contractions=0,
-            quantized_contractions=0,
-            quantized_non_contraction_sites=0,
-            refusal_code=guard["truth"],
-            host_reason=guard["reason"],
-            functional_truth=commitments,
-            native_admission=dict(status="host", reason_code=guard["truth"]),
-        )
-        for r, c in zip(records, commitments):
-            r.update(numeric_admission=result, functional_truth=c)
-        (directory / "spec-int8-admission.json").write_text(json.dumps(result, indent=2) + "\n")
-        return result
     from merlin.targetgen.source_power_specialization import specialize
 
     specialize(directory, report)
