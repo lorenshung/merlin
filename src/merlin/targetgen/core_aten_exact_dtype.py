@@ -157,6 +157,9 @@ def prepare_bitwise(directory, report, selection, provider, package, module):
     from merlin.llvmlower.uniform_literal_carriers import expose_uniform_literal_carriers
 
     expose_uniform_literal_carriers(module)
+    from merlin.llvmlower.static_reshape_movement import expose_static_reshape_movement
+
+    expose_static_reshape_movement(module)
     # These operations cannot be byte selectors even when a later copy matches.
     if any(
         op.name in {"linalg.matmul", "linalg.batch_matmul", "linalg.reduce"}
