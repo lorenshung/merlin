@@ -8,17 +8,26 @@ express them with contractions. Index arithmetic remains address selection.
 
 
 def construction_evidence(module, *, excluded=None):
+    from merlin.llvmlower.boolean_domain import fold_boolean_domain
+    from merlin.llvmlower.integer_image_predicates import fold_integer_image_predicates
+    from merlin.llvmlower.singleton_carriers import fold_singleton_carriers
     from merlin.llvmlower.singleton_reductions import fold_singleton_reductions
+    from merlin.llvmlower.singleton_selectors import fold_singleton_selectors
     from merlin.targetgen.native_construction_patterns import Payloads, dataflow
 
     # Classify the canonical arithmetic role, without mutating source bytes.
     # A one-contribution monoid identity is storage movement, not a predicate
     # implementation. The emitted movement path repeats this exact proof.
     candidates = any(
-        op.name == "linalg.reduce"
+        (op.name == "arith.cmpf" and op.predicate.value.data in {1, 2, 3, 4, 5, 6, 8, 9, 10, 11, 12, 13})
+        or op.name == "linalg.reduce"
+        or (op.name == "linalg.generic" and any(str(v.type.element_type) == "i1" for v in op.inputs))
         or (
             op.name == "linalg.generic"
-            and any(hasattr(v.type, "get_shape") and 0 in v.type.get_shape() for v in op.operands)
+            and (
+                any(hasattr(v.type, "get_shape") and 0 in v.type.get_shape() for v in op.operands)
+                or any(it.data.value == "reduction" for it in op.get_iterator_types())
+            )
         )
         for op in module.walk()
     )
@@ -26,11 +35,15 @@ def construction_evidence(module, *, excluded=None):
         canonical = module.clone()
         from merlin.llvmlower.empty_reductions import fold_empty_reductions
 
+        image_folds = fold_integer_image_predicates(canonical)
+        boolean_folds = fold_boolean_domain(canonical)
         empty_folds = fold_empty_reductions(canonical)
         singleton_folds = (
             fold_singleton_reductions(canonical) if any(op.name == "linalg.reduce" for op in canonical.walk()) else 0
         )
-        if empty_folds or singleton_folds:
+        selector_folds = fold_singleton_selectors(canonical)
+        carrier_folds = fold_singleton_carriers(canonical)
+        if empty_folds or singleton_folds or selector_folds or boolean_folds or carrier_folds or image_folds:
             from merlin.llvmlower.entry_weight_projection import _pure_dce
 
             for function in canonical.walk():

@@ -217,9 +217,20 @@ def _prepare_spec_int8(
     if empty is not None:
         return empty
     module = parse_mlir_file(directory / "model.mlir")
+    from merlin.llvmlower.boolean_domain import fold_boolean_domain
     from merlin.llvmlower.empty_reductions import fold_empty_reductions
+    from merlin.llvmlower.integer_image_predicates import fold_integer_image_predicates
+    from merlin.llvmlower.singleton_carriers import fold_singleton_carriers
+    from merlin.llvmlower.singleton_reductions import fold_singleton_reductions
+    from merlin.llvmlower.singleton_selectors import fold_singleton_selectors
 
-    if fold_empty_reductions(module):
+    folds = fold_integer_image_predicates(module)
+    folds += fold_empty_reductions(module)
+    folds += fold_boolean_domain(module)
+    folds += fold_singleton_reductions(module)
+    folds += fold_singleton_selectors(module)
+    folds += fold_singleton_carriers(module)
+    if folds:
         from merlin.llvmlower.entry_weight_projection import _pure_dce
 
         for function in module.walk():
