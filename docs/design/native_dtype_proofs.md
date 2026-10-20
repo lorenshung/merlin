@@ -199,3 +199,69 @@ rewrites this closed form to byte-preserving reshape before construction and
 movement admission. Multi-contribution Boolean unions still refuse. Captured
 scalar extraction/reassembly is storage structure and cannot impose an IEEE
 arithmetic obligation on integer reductions.
+
+## Exhaustive exceptional operand priority
+
+The version-2 CPU certificate enumerates every binary16 NaN storage word against
+all 65,536 words, in both operand orders, separately for addition and subtraction
+and for the scalar and AVX2 vector functors. Each form checks 268,173,312 ordered
+pairs, including both NaN signs, signaling and quiet payloads. The selected CPU
+returns the first operand's quieted NaN in the scalar functor and the second
+operand's quieted NaN in the vector functor when both are NaNs. A single NaN is
+quieted and propagated. The nonunit-stride checker forces the scalar functor;
+the existing single-element checks also cover its contiguous tail. The CPU
+library and loop/header content hashes bind these observations to this build.
+The checker compares every resulting word and refuses on the first difference.
+
+This certificate does not license arbitrary unguarded floating expressions.
+Captured typed programs retain their explicit invalid-result, operand-priority
+and index-path selects. Before the structural guard proof, a clone closes
+compile-time conversions and constant predicates to a fixed point. A constant
+predicate select aliases its chosen operand even when that operand is runtime
+data. This preserves the guard chain after a literal operand's `isnan` test has
+folded to false. The emitted program retains its original typed boundaries and
+selectors. Live runtime guards, unknown carriers and competing unprotected NaNs
+still refuse. No tensor payload, example result or input identity enters this
+proof.
+
+## Static strided CPU readout
+
+For a static nonnegative shape and stride below the certified parallel grain,
+TensorIterator visits dimensions in increasing physical stride order, with
+broadcast strides leaving ordering to other operands. It coalesces adjacent
+dimensions only when the outer stride equals inner extent times inner stride
+for every operand. A gap or broadcast boundary ends that row. Storage offsets
+change the base address, never the row or vector/tail choice. Unit or broadcast
+inner steps permit the certified vector loop; other steps use the scalar
+functor. The vector prefix is the largest multiple of its certified block width
+not exceeding the row. Singleton dimensions contribute no ordering constraint.
+Functional output allocation is compact in that permutation.
+
+The joint layout proof uses the stable TensorIterator dimension comparison,
+right-aligned broadcasting and the coalescing equation for all input strides.
+Unknown overlapping non-broadcast layouts, negative strides, dynamic metadata
+and unproved parallel chunk boundaries refuse. Pure copies retain their
+separate scalar/vector conversion contract. The certificate executes complete
+storage-domain unary checks for dense, sliced, padded, partially broadcast and
+channels-last classes, including vector/tail seams and nonzero storage offsets.
+Joint-row checks cover every bfloat16 NaN payload at every output position for
+broadcast, sliced and mixed physical-order operands. Finite arithmetic is still
+covered by the typed IEEE theorem; these checks establish the special readout
+path, never a tolerance or a sampled placement decision.
+
+## Exact widening and non-finite grading
+
+Every finite binary32 word has at most 24 significand bits and exponents within
+binary64's normal range. Its embedding into 53-bit binary64 is exact, including
+binary32 subnormals. Signed zero retains its sign. Infinity retains its sign.
+NaN conversion retains the sign and left-aligns all 23 payload bits, setting the
+binary64 quiet bit. The executable integer conversion checker and the selected
+CPU scalar/vector conversion paths agree on every subnormal and special word,
+both signs, plus every normal binade's endpoints. Normal interiors follow the
+exact embedding argument. Each path checks 33,556,972 words. No binary64 input
+arithmetic or narrowing theorem is inferred from this widening certificate.
+
+An eager non-finite result has no rational error radius. A reduction-floor
+grader must require the same signed infinity or the contract's exact NaN word;
+only a finite eager expectation can authorize an exact rational error bound.
+This qualification rule grants no additional placement or reduction theorem.

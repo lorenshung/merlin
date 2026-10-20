@@ -12,13 +12,13 @@ from pathlib import Path
 
 
 def conversion_function(source, target, policy):
-    from xdsl.dialects.builtin import bf16, f16, f32
+    from xdsl.dialects.builtin import bf16, f16, f32, f64
     from xdsl.ir import Block
 
     from merlin.llvmlower.ieee_dyadic_ir import decode, encode
     from merlin.llvmlower.ieee_pointwise import special_conversion
 
-    types = {"f16": f16, "bf16": bf16, "f32": f32}
+    types = {"f16": f16, "bf16": bf16, "f32": f32, "f64": f64}
     block = Block(arg_types=[types[source]])
 
     def emit(op):
@@ -28,7 +28,11 @@ def conversion_function(source, target, policy):
     integer, exponent, negative = decode(block.args[0], emit)
     finite = encode(integer, exponent, types[target], emit, zero_negative=negative)
     result = special_conversion(
-        "arith.extf" if source != "f32" else "arith.truncf", block.args[0], types[target], emit, finite_fallback=finite
+        "arith.extf" if types[source].bitwidth < types[target].bitwidth else "arith.truncf",
+        block.args[0],
+        types[target],
+        emit,
+        finite_fallback=finite,
     )
     values = {block.args[0]: "input[i]"}
     lines = [

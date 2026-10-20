@@ -16,6 +16,12 @@ def prove(module):
         proof = certificate()
     except (OSError, KeyError, ValueError) as exc:
         return dict(status="refused", code="native_cpu_certificate_unavailable", reason=str(exc))
+    # Literal-domain simplification is a proof step. Preserve the emitted
+    # source and its original IEEE boundaries; no input observations are used.
+    from merlin.llvmlower.uniform_numeric_literals import fold_uniform_numeric_literals
+
+    module = module.clone()
+    fold_uniform_numeric_literals(module, close_guards=True)
     arithmetic = {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "arith.negf", "math.fma"}
     conversions = {"arith.extf", "arith.truncf", "arith.sitofp", "arith.uitofp"}
     scalar = (
@@ -220,6 +226,12 @@ def prove(module):
         return bool(states) and protected(value)
 
     for op in module.walk():
+        if op.name in arithmetic and any(str(v.type) == "f64" for v in (*op.operands, *op.results)):
+            return dict(
+                status="refused",
+                code="native_binary64_arithmetic_form_unproved",
+                reason="exact binary32 widening does not certify binary64 arithmetic",
+            )
         if op.name == "arith.cmpf":
             from merlin.targetgen.native_dtype_domain import _word_generic
 
@@ -330,7 +342,9 @@ def prove(module):
                 if "bf16" in storage:
                     reduced_profile = True
         if op.name in {"arith.extf", "arith.truncf"}:
-            if any(str(v.type) not in {"f16", "bf16", "f32"} for v in (*op.operands, *op.results)):
+            if not (
+                op.name == "arith.extf" and str(op.operands[0].type) == "f32" and str(op.results[0].type) == "f64"
+            ) and any(str(v.type) not in {"f16", "bf16", "f32"} for v in (*op.operands, *op.results)):
                 return dict(
                     status="refused",
                     code="native_conversion_form_unproved",

@@ -265,20 +265,33 @@ def prepare_integer_components(
                     for p in profiles.values()
                 )
             ):
-                (directory / "exact-dtype-refusal.json").write_text(
-                    json.dumps(
-                        dict(
-                            family="F2",
-                            code="native_reduced_binary_layout_unproved",
-                            reason=(
-                                "reduced-storage scalar/vector readout needs "
-                                "equal dense/rank-one input profiles or one scalar"
-                            ),
-                        )
-                    )
-                    + "\n"
+                from merlin.llvmlower.native_cpu_layout import joint_profile
+
+            selected_profile = (
+                joint_profile(
+                    list(input_layouts(report, functions[0].body.block.args).values()),
+                    output_shape,
+                    block=loop["reduced_vector_elements"],
+                    grain=loop["parallel_grain"],
                 )
-                return None
+                if complete_context
+                else None
+            )
+            if selected_profile is None:
+                (directory / "exact-dtype-refusal.json").write_text(
+                        json.dumps(
+                            dict(
+                                family="F2",
+                                code="native_reduced_binary_layout_unproved",
+                                reason=(
+                                    "reduced-storage scalar/vector readout needs "
+                                    "equal dense/rank-one input profiles or one scalar"
+                                ),
+                            )
+                        )
+                        + "\n"
+                    )
+                    return None
             scalars = sum(
                 prod(p["shape"]) == 1 or all(s == 0 for s, n in zip(p["stride"], p["shape"]) if n > 1)
                 for p in profiles.values()

@@ -1,0 +1,159 @@
+"""Static storage/layout qualification and independent conversion negatives."""
+
+import pytest
+
+from merlin.llvmlower.native_cpu_layout import joint_profile, profile
+from merlin.targetgen.native_ieee_arithmetic_check import arithmetic_word
+from merlin.targetgen.native_ieee_certificate import convert_word, verify_outputs
+from merlin.targetgen.native_ieee_ir_check import conversion_function
+
+
+@pytest.mark.parametrize(
+    "shape,stride,row,prefix",
+    [
+        ([2, 3, 65], [234, 78, 1], 65, 64),
+        ([2, 3, 65], [0, 65, 1], 195, 192),
+        ([2, 3, 65], [390, 130, 2], 390, 0),
+        ([1, 2, 3, 65], [390, 1, 130, 2], 390, 384),
+    ],
+)
+def test_static_rows_keep_padding_broadcast_and_permuted_order(shape, stride, row, prefix):
+    actual = profile(dict(shape=shape, stride=stride), block=32, grain=32768)
+    assert actual["row"] == row
+    assert actual["vector_prefix"] == prefix
+
+
+@pytest.mark.parametrize(
+    "layout", [dict(shape=[2, 3], stride=[1, 1]), dict(shape=[2, 3], stride=[3, -1]), dict(shape=[65536], stride=[1])]
+)
+def test_unknown_overlap_negative_stride_or_parallel_chunks_refuse(layout):
+    assert profile(layout, block=32, grain=32768) is None
+
+
+def test_joint_broadcast_scalar_loop():
+    p = joint_profile(
+        [dict(shape=[2, 1, 5], stride=[10, 10, 2]), dict(shape=[1, 3, 1], stride=[6, 2, 2])],
+        [2, 3, 5],
+        block=32,
+        grain=32768,
+    )
+    assert p["row"] == 5
+    assert p["vector_prefix"] == 0
+
+
+@pytest.mark.parametrize("operation", ["add", "subtract"])
+def test_wrong_nan_operand_priority_is_distinct(operation):
+    a, b = 0x7E12, 0xFE34
+    assert arithmetic_word(a, b, "f16", operation, "scalar") == a
+    assert arithmetic_word(a, b, "f16", operation, "vector") == b
+
+
+def test_binary32_widening_is_exact_and_quiets_nan_payloads():
+    words = [
+        0,
+        0x80000000,
+        1,
+        0x007FFFFF,
+        0x00800000,
+        0x7F7FFFFF,
+        0xFF7FFFFF,
+        0x7F800000,
+        0xFF800000,
+        0x7F800001,
+        0xFFBABCDE,
+    ]
+    actual = conversion_function("f32", "f64", "payload_quiet")(words)
+    verify_outputs(words, actual, "f32", "f64", "payload_quiet")
+    assert convert_word(1, "f32", "f64") == 0x36A0000000000000
+    assert convert_word(0x80000000, "f32", "f64") == 1 << 63
+    wrong = list(actual)
+    wrong[-1] ^= 1 << 29
+    with pytest.raises(ValueError, match="conversion proof refused"):
+        verify_outputs(words, wrong, "f32", "f64", "payload_quiet")
+
+
+@pytest.mark.parametrize("kind", ["nan_priority", "layout"])
+def test_executable_checker_refuses_wrong_readout(kind):
+    import os
+    import subprocess
+
+    python = os.environ.get("M2M_PY")
+    if not python:
+        pytest.skip("explicit CPU proof interpreter unavailable")
+    if kind == "nan_priority":
+        script = """import torch
+original = torch.add
+torch.add = lambda a,b: original(b,a)
+from merlin.targetgen.native_nan_priority_check import generate
+try:
+    generate()
+except ValueError as e:
+    assert 'NaN priority refused' in str(e)
+else:
+    raise AssertionError('wrong NaN priority was certified')
+"""
+    else:
+        script = """import merlin.llvmlower.native_cpu_layout as layout
+original = layout.profile
+def wrong(*args, **kwargs):
+    return dict(original(*args, **kwargs), vector_prefix=0)
+layout.profile = wrong
+from merlin.targetgen.native_layout_check import generate
+try:
+    generate()
+except ValueError as e:
+    assert 'CPU layout certificate refused' in str(e)
+else:
+    raise AssertionError('wrong vector/tail readout was certified')
+"""
+    result = subprocess.run([python, "-c", script], capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stderr
+
+
+def test_proof_closes_a_folded_literal_nan_guard_without_mutating_source():
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+    from merlin.targetgen.native_typed_semantics import prove
+
+    module = parse_mlir_text("""module {
+      func.func @forward(%x:tensor<4xf16>) -> tensor<4xf16> {
+        %e=tensor.empty():tensor<4xf16>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x:tensor<4xf16>) outs(%e:tensor<4xf16>) {
+        ^bb0(%a:f16,%unused:f16):
+          %v=arith.extf %a:f16 to f32
+          %c=arith.constant 2.0:f32
+          %p=arith.mulf %v,%c:f32
+          %d=arith.constant -4194304:i32
+          %default=arith.bitcast %d:i32 to f32
+          %invalid=arith.cmpf uno,%p,%p:f32
+          %base=arith.select %invalid,%default,%p:f32
+          %bits=arith.bitcast %v:f32 to i32
+          %mask=arith.constant 4194304:i32
+          %qb=arith.ori %bits,%mask:i32
+          %quiet=arith.bitcast %qb:i32 to f32
+          %nan=arith.cmpf uno,%v,%v:f32
+          %out=arith.select %nan,%quiet,%base:f32
+          %false=arith.constant false
+          %guard=arith.select %false,%c,%out:f32
+          %result=arith.truncf %guard:f32 to f16
+          linalg.yield %result:f16
+        } -> tensor<4xf16>
+        return %r:tensor<4xf16>
+      }}""")
+    original = str(module)
+    result = prove(module)
+    assert result["status"] == "proven", result
+    assert str(module) == original
+
+
+def test_runtime_guard_is_not_folded_by_literal_closure():
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+    from merlin.llvmlower.uniform_numeric_literals import fold_uniform_numeric_literals
+
+    module = parse_mlir_text("""module {
+      func.func @f(%condition:i1,%x:f32,%y:f32) -> f32 {
+        %v=arith.select %condition,%x,%y:f32
+        return %v:f32
+      }}""")
+    assert fold_uniform_numeric_literals(module, close_guards=True) == 0
+    assert any(op.name == "arith.select" for op in module.walk())

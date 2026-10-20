@@ -29,7 +29,17 @@ def compile_time_operand(value):
     return dataflow(value, {}, dependencies, all)
 
 
-def fold_uniform_numeric_literals(module):
+def fold_uniform_numeric_literals(module, *, close_guards=False):
+    """Close literal conversion/guard chains to a fixed point, without data."""
+    if not close_guards:
+        return _fold_uniform_numeric_literals_once(module, close_guards=False)
+    total = 0
+    while count := _fold_uniform_numeric_literals_once(module, close_guards=True):
+        total += count
+    return total
+
+
+def _fold_uniform_numeric_literals_once(module, *, close_guards):
     import math
     from fractions import Fraction
 
@@ -110,6 +120,11 @@ def fold_uniform_numeric_literals(module):
         if len(op.results) != 1 or not op.operands or str(op.results[0].type) not in {*FORMAT, "i1"}:
             continue
         values = [_constant_of(v) for v in op.operands]
+        if close_guards and op.name == "arith.select" and values[0] is not None:
+            chosen = op.operands[1 if values[0] else 2]
+            Rewriter.replace_op(op, [], [chosen])
+            count += 1
+            continue
         value = evaluate(op, values)
         if value is None or not math.isfinite(value):
             continue

@@ -24,7 +24,7 @@ def rewrite_ieee_conversions(module, *, copy_profiles=None):
             or body[0].operands[0] is not op.body.block.args[0]
             or any(it.data.value != "parallel" for it in op.get_iterator_types())
             or str(source.type.element_type) not in {"f16", "bf16", "f32"}
-            or str(target) not in {"f16", "bf16", "f32"}
+            or str(target) not in {"f16", "bf16", "f32", "f64"}
         ):
             continue
         storage = IntegerType(source.type.element_type.bitwidth)

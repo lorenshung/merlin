@@ -9,8 +9,8 @@ import json
 import struct
 from pathlib import Path
 
-FORMATS = {"f16": (10, 5, 15), "bf16": (7, 8, 127), "f32": (23, 8, 127)}
-VERSION = "native-ieee-storage-rne-v1"
+FORMATS = {"f16": (10, 5, 15), "bf16": (7, 8, 127), "f32": (23, 8, 127), "f64": (52, 11, 1023)}
+VERSION = "native-ieee-storage-rne-v2"
 
 
 def digest(value):
@@ -126,6 +126,9 @@ def proof_sources():
         "src/merlin/llvmlower/native_cpu_layout.py",
         "src/merlin/llvmlower/integer_division_components.py",
         "src/merlin/targetgen/native_ieee_arithmetic_check.py",
+        "src/merlin/targetgen/native_nan_priority_check.py",
+        "src/merlin/targetgen/native_layout_check.py",
+        "src/merlin/targetgen/native_widening_check.py",
         "src/merlin/targetgen/native_integer_check.py",
         "src/merlin/targetgen/native_cpu_loop_check.py",
         "src/merlin/targetgen/native_typed_semantics.py",
@@ -289,6 +292,10 @@ def generate():
     from merlin.targetgen.native_cpu_loop_check import observe as observe_loop
     from merlin.targetgen.native_ieee_arithmetic_check import generate as arithmetic_checks
     from merlin.targetgen.native_integer_check import generate as integer_checks
+    from merlin.targetgen.native_layout_check import generate as layout_checks
+    from merlin.targetgen.native_layout_check import generate_joint
+    from merlin.targetgen.native_nan_priority_check import generate as nan_checks
+    from merlin.targetgen.native_widening_check import generate as widening_checks
 
     result = dict(
         version=VERSION,
@@ -302,6 +309,9 @@ def generate():
         conversions=rows,
         unary=unary,
         arithmetic_checks=arithmetic_checks(),
+        nan_priority_checks=nan_checks(),
+        layout_checks=layout_checks() + generate_joint(),
+        widening_checks=widening_checks(),
         integer_checks=integer_checks(),
         loop_profile=observe_loop(torch),
         double_rounding=theorem,
@@ -334,6 +344,19 @@ def certificate():
         or len(value.get("arithmetic_checks", [])) != 12
     ):
         raise ValueError("missing CPU scalar/vector form certificate")
+    if (
+        len(value.get("nan_priority_checks", [])) != 4
+        or len(value.get("widening_checks", [])) != 2
+        or len(value.get("layout_checks", [])) != 13
+    ):
+        raise ValueError("missing exhaustive NaN priority or widening certificate")
+    for row in value["nan_priority_checks"] + value["widening_checks"] + value["layout_checks"]:
+        if row["key"] != digest(row["form"]) or row["status"] != "proven":
+            raise ValueError("changed CPU special-form certificate")
+    if any(row["count"] != 2 * 2046 * 65536 for row in value["nan_priority_checks"]):
+        raise ValueError("incomplete reduced NaN operand domain")
+    if any(row["count"] != 33556972 for row in value["widening_checks"]):
+        raise ValueError("incomplete binary32 widening special/subnormal domain")
     for token, row in value["double_rounding"].items():
         precision = FORMATS[token][0] + 1
         if (
