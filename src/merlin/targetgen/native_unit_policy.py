@@ -45,6 +45,7 @@ def construction_evidence(module, *, excluded=None, result_abi=None):
         from merlin.llvmlower.integral_float_rounding import fold_integral_image_identities
         from merlin.llvmlower.nan_guarded_neutral import fold_nan_guarded_neutral
         from merlin.llvmlower.singleton_reduction_boundaries import expose_singleton_reduction_boundaries
+        from merlin.llvmlower.singleton_tuple_regions import expose_singleton_tuple_regions
 
         image_folds = (
             fold_static_unit_indices(canonical)
@@ -52,6 +53,7 @@ def construction_evidence(module, *, excluded=None, result_abi=None):
             + fold_integral_image_identities(canonical)
             + fold_ieee_identity_selectors(canonical)
             + expose_singleton_reduction_boundaries(canonical)
+            + expose_singleton_tuple_regions(canonical)
             + fold_nan_guarded_neutral(canonical)
         )
         boolean_folds = (

@@ -256,6 +256,9 @@ def _prepare_spec_int8(
     from merlin.llvmlower.singleton_reduction_boundaries import expose_singleton_reduction_boundaries
 
     folds += expose_singleton_reduction_boundaries(module)
+    from merlin.llvmlower.singleton_tuple_regions import expose_singleton_tuple_regions
+
+    folds += expose_singleton_tuple_regions(module)
     from merlin.llvmlower.nan_guarded_neutral import fold_nan_guarded_neutral
 
     folds += fold_nan_guarded_neutral(module)
