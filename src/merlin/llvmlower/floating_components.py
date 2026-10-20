@@ -19,6 +19,7 @@ def rewrite_floating_components(
     input_values=None,
     zero_limbs=None,
     ieee_pointwise=False,
+    quantized_contract=None,
 ):
     """Return new integer bounds and closed finite representation proofs.
 
@@ -305,6 +306,29 @@ def rewrite_floating_components(
         source_grid=grid,
         ieee_pointwise=ieee_pointwise,
     )
+    if quantized_contract is not None:
+
+        def publish(op, integer, exponent, integer_bound, operations, compute_type=None, denominator=1):
+            from xdsl.rewriter import Rewriter
+
+            from merlin.llvmlower.quantized_native import output_boundary
+
+            result = output_boundary(
+                integer, exponent, integer_bound, denominator, op.results[0].type, operations, quantized_contract
+            )
+            raw_forms[result] = (integer, exponent, integer_bound, denominator)
+            grids[result] = (quantized_contract["exponent"], 128)
+            proofs.append(
+                dict(
+                    source_operation=op.name,
+                    rounding="output_quantize_rne",
+                    integer_absolute_bound=integer_bound,
+                    exponent=exponent,
+                    denominator=denominator,
+                )
+            )
+            Rewriter.replace_op(op, operations, [result])
+
     for op in list(function.body.block.ops):
         if op.name == "linalg.generic" and len(op.results) == 1 and floating(op.results[0]):
             from xdsl.dialects.builtin import StringAttr

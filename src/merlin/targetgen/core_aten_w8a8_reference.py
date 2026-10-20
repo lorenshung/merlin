@@ -588,6 +588,13 @@ def write_pt2e_reference(path, reference, leaves, source):
 
 
 def main():
+    import sys
+
+    if "--quantized-native" in sys.argv:
+        from merlin.targetgen.quantized_native_reference import main as quantized_main
+
+        return quantized_main()
+
     import json
     import sys
     from pathlib import Path

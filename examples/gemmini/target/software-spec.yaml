@@ -30,10 +30,20 @@ numerical_semantics:
     runtime_input_specialization: forbidden
     zero_limb_omission: source_literals_only
     native_admission: structural_per_dtype_semantic_proof
-    unproved_ieee_arithmetic: retain_original_host
+    unproved_ieee_arithmetic: declared_quantized_fallback
     # Calibration qparams define the quantized program. Runtime examples never
     # narrow its code ranges or choose component kernels.
     quantized_domain: complete_declared_code_range
+    evidence: {review_status: "authored, pending operator review"}
+  quantized_native_fallback:
+    status: authored_pending_operator_review
+    admission: after_native_exact_failure
+    operand_storage: [f16, bf16, f32, complex_components_f32]
+    calibration: declared_observer_domain_only
+    arithmetic: exact_rational_native_family
+    readout: full_int32_then_exact_host_rne
+    output: declared_byte_quantize_then_single_dtype_dequantize
+    runtime_complex_products: composition_requires_host
     evidence: {review_status: "authored, pending operator review"}
   native_unit_contract:
     status: authored_pending_operator_review

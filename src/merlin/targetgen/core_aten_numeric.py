@@ -150,7 +150,19 @@ def prepare_spec_int8(
 ):
     from merlin.targetgen.core_aten_admission import prepare
 
-    return prepare(directory, report, _prepare_spec_int8, **kwargs)
+    result = prepare(directory, report, _prepare_spec_int8, **kwargs)
+    if result.get("native_admission", {}).get("status") != "device" and result.get("refusal_code") not in {
+        "empty_tensor_no_device_work",
+        "native_output_alias_contract_unproved",
+        "input_metadata_mutation_requires_host",
+        "constant_metadata_fold_no_tensor_data",
+    }:
+        from merlin.targetgen.quantized_native import prepare as quantized_fallback
+
+        fallback = quantized_fallback(directory, report, **kwargs)
+        if fallback is not None:
+            return fallback
+    return result
 
 
 def _prepare_spec_int8(
@@ -534,7 +546,9 @@ def _prepare_spec_int8(
             residuals = artifact.meta.get("integerization_receipt", {}).get("ieee_quantizer_residuals", [])
             active_residuals = [row for row in residuals if row.get("beta") != 0]
             if active_residuals:
-                captured_plan["ieee_special_family"] = dict(family="F3", proof="declared_single_residual_boundary", readouts=active_residuals)
+                captured_plan["ieee_special_family"] = dict(
+                    family="F3", proof="declared_single_residual_boundary", readouts=active_residuals
+                )
             captured_plan["scalar_tensor_carriers_folded"] = scalar_carriers
             captured_plan["quantized_affine_domain_proofs"] = domain_proofs
             if capture_proof_error:
