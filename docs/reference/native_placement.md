@@ -4,7 +4,7 @@ kind: reference
 status: current
 owner: core
 last_verified: 2026-10-19
-code_refs: [src/merlin/targetgen/core_aten_admission.py, build_tools/scripts/make_bounded_phase0.py]
+code_refs: [src/merlin/targetgen/core_aten_admission.py, src/merlin/targetgen/native_payload_carriers.py, src/merlin/targetgen/native_quant_boundary.py, build_tools/scripts/make_bounded_phase0.py]
 ---
 
 # Functional native placement
@@ -35,3 +35,17 @@ The optional uniform-fill-copy and contiguous-suffix-copy performance rewrites
 are removed. Literal-zero and uniform numeric folding needed by component
 representation proofs remain, along with ordinary upstream bufferization and
 functional copy expansion. Their retention grants no performance qualification.
+
+Carrier provenance follows every initial/backedge value of structured loops,
+all branch yields and all CFG predecessor arguments. Unknown carriers refuse,
+including when known arithmetic consumes their result. Source result tables
+retain storage-bit identity across movement. Known quantization boundaries
+are authenticated by their ordinary generic lowering and preserve table
+provenance from data while excluding parameter tables from that data role.
+Unsupported boundary names, metadata, arity and incoming carriers remain unknown.
+
+The readout-offset detector accepts scalar, splat and dense tensor literals
+and follows their numeric dependencies to rounding/narrowing observations.
+Zero offsets and affine offsets without rounding remain distinct. Declared
+`exact_rational_host` readout requires `requant_rounding: half_even` (RNE);
+non-RNE or missing declarations refuse before numeric admission.

@@ -101,7 +101,57 @@ class Payloads:
         attr = op.properties.get("value", op.attributes.get("value"))
         if hasattr(attr, "value"):
             return attr.value.data
+        from xdsl.dialects.builtin import DenseIntOrFPElementsAttr
+
+        if isinstance(attr, DenseIntOrFPElementsAttr):
+            values = iter(attr.get_values())
+            first = next(values, None)
+            if first is not None and all(v == first for v in values):
+                return first
         return None
+
+    def nonzero_literal(self, root):
+        from merlin.targetgen.native_payload_carriers import carrier_sources, op_name
+        from xdsl.dialects.builtin import DenseIntOrFPElementsAttr
+
+        pending, seen = [root], set()
+        while pending:
+            value = pending.pop()
+            if value in seen:
+                continue
+            seen.add(value)
+            op = value.owner
+            if op_name(op) == "arith.constant":
+                attr = op.properties.get("value", op.attributes.get("value"))
+                if isinstance(attr, DenseIntOrFPElementsAttr):
+                    if any(v != 0 for v in attr.get_values()):
+                        return True
+                elif hasattr(attr, "value") and attr.value.data != 0:
+                    return True
+            else:
+                pending.extend(carrier_sources(value) or ())
+        return False
+
+    def offset_before(self, root):
+        """Find a literal addend through casts, arithmetic and all known carriers."""
+        from merlin.targetgen.native_payload_carriers import carrier_sources, op_name
+
+        pending, seen = [root], set()
+        while pending:
+            value = pending.pop()
+            if value in seen:
+                continue
+            seen.add(value)
+            op = value.owner
+            name = op_name(op)
+            if name in ADDITIONS and any(self.nonzero_literal(v) for v in op.operands):
+                return True
+            edges = carrier_sources(value)
+            if edges is not None:
+                pending.extend(edges)
+            elif name is not None and name.startswith(("arith.", "math.")):
+                pending.extend(op.operands)
+        return False
 
     def clamp(self, value):
         op = self.operation(value)
@@ -247,18 +297,15 @@ class Payloads:
         if name in ROUNDING | {
             "arith.fptosi",
             "arith.fptoui",
+            "arith.truncf",
             "arith.shrsi",
             "arith.shrui",
             "arith.divsi",
             "arith.divui",
         }:
-            producer = self.operation(op.operands[0])
-            if getattr(producer, "name", None) in ADDITIONS:
-                offsets = [self.constant(v) for v in producer.operands]
-                if any(v is not None and v != 0 for v in offsets):
-                    floating = name in ROUNDING | {"arith.fptosi", "arith.fptoui"}
-                    if floating or self.readout(op.results[0]):
-                        reasons.append("readout_offset_rounding")
+            floating = name in ROUNDING | {"arith.fptosi", "arith.fptoui", "arith.truncf"}
+            if (floating or self.readout(op.results[0])) and self.offset_before(op.operands[0]):
+                reasons.append("readout_offset_rounding")
         # Floating magic-bias rounding: (x + C) - C, C nonzero.
         if name == "arith.subf":
             addition = self.operation(op.operands[0])

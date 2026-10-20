@@ -127,6 +127,10 @@ def validate_numerical_semantics(document: dict) -> dict:
             or domain["nonfinite"] not in {"allow", "forbid"}
         ):
             raise ValueError(f"numerical_semantics.{field} requires an explicit allow/forbid nonfinite policy")
+    readout = document.get("readout")
+    if isinstance(readout, dict) and readout.get("strategy") == "exact_rational_host":
+        if readout.get("requant_rounding") != "half_even":
+            raise ValueError("exact_rational_host requires readout.requant_rounding: half_even (RNE)")
     if model["engine"] == "specir_fp_reduce":
         if document.get("rounding") not in _IEEE_ROUNDING:
             raise ValueError("numerical_semantics.rounding must select a supported IEEE mode")

@@ -72,69 +72,20 @@ def construction_evidence(module, *, excluded=None):
         operands = owner.operands[1:] if name == "arith.select" else owner.operands
         return tuple(operands)
 
-    table_memo = {}
+    from merlin.targetgen.native_payload_carriers import LiteralPayloads, TABLE, UNKNOWN
 
-    def literal_table_payload(value):
-        return dataflow(value, table_memo, table_dependencies)
-
-    def table_dependencies(value):
-        """Follow result data, excluding address tables and uniform fills.
-
-        Copying a precomputed nonuniform result does not accelerate the
-        arithmetic that constructed it. Address tables describe a movement
-        layout, rather than supplying the moved payload.
-        """
-        from xdsl.dialects.builtin import DenseIntOrFPElementsAttr
-
-        owner = value.owner
-        name = getattr(owner, "name", None)
-        if name == "arith.constant":
-            data = owner.properties.get("value", owner.attributes.get("value"))
-            if not isinstance(data, DenseIntOrFPElementsAttr):
-                return False
-            # Numeric equality conflates signed zeros and treats repeated NaNs
-            # as unequal. Literal movement is a storage-bit contract instead.
-            width = data.get_element_type().compile_time_size
-            raw = data.data.data
-            return any(raw[i : i + width] != raw[:width] for i in range(width, len(raw), width))
-        if name == "linalg.generic":
-            return (owner.body.block.last_op.operands[value.index],)
-        if name is None and hasattr(owner, "parent_op"):
-            parent = owner.parent_op()
-            if getattr(parent, "name", None) == "linalg.generic":
-                payloads = (*parent.inputs, *parent.outputs)
-                if value.index < len(payloads):
-                    return (payloads[value.index],)
-            return False
-        if name in {
-            "tensor.cast", "tensor.reshape", "tensor.extract", "tensor.extract_slice",
-            "tensor.expand_shape", "tensor.collapse_shape", "tensor.splat",
-            "tensor.parallel_insert_slice",
-            "arith.extsi", "arith.extui", "arith.trunci", "arith.bitcast",
-            "arith.extf", "arith.truncf", "arith.sitofp", "arith.uitofp",
-        }:
-            return (owner.operands[0],)
-        if name in {"tensor.insert_slice", "tensor.insert"}:
-            return tuple(owner.operands[:2])
-        if name in {"tensor.gather", "tensor.pack", "tensor.unpack"}:
-            return (owner.operands[0],)
-        if name == "tensor.generate":
-            return (owner.regions[0].block.last_op.operands[0],)
-        if name == "tensor.pad":
-            return (owner.operands[0], owner.regions[0].block.last_op.operands[0])
-        if name in {"linalg.broadcast", "linalg.transpose", "linalg.copy", "linalg.fill"}:
-            return tuple(owner.operands[:1])
-        if name in {"tensor.concat", "tensor.from_elements"}:
-            return tuple(owner.operands)
-        if name == "scf.if":
-            return tuple(region.block.last_op.operands[value.index] for region in owner.regions)
-        if name == "arith.select":
-            return tuple(owner.operands[1:])
-        return False
+    literal_payloads = LiteralPayloads()
 
     for ordinal, op in enumerate(module.walk()):
-        if op.name == "func.return" and any(literal_table_payload(v) for v in op.operands):
-            evidence.append(dict(ordinal=ordinal, operation=op.name, reason="nonuniform_literal_result_construction"))
+        if op.name == "func.return":
+            masks = [literal_payloads.classify(v) for v in op.operands]
+            for mask, reason in ((TABLE, "nonuniform_literal_result_construction"),
+                                 (UNKNOWN, "unproved_payload_carrier")):
+                if any(value & mask for value in masks):
+                    evidence.append(dict(
+                        ordinal=ordinal, operation=op.name, reason=reason,
+                        **({"carriers": sorted(literal_payloads.unknown_operators)} if mask == UNKNOWN else {}),
+                    ))
         for reason in payloads.patterns(op):
             evidence.append(dict(ordinal=ordinal, operation=op.name, reason=reason))
         if op.name == "linalg.generic":
@@ -168,7 +119,7 @@ def construction_evidence(module, *, excluded=None):
         # An unrelated reduction elsewhere in the module grants no exemption.
         if not any(payloads.contraction_dependent(v) for v in op.operands):
             evidence.append(dict(ordinal=ordinal, operation=op.name, reason="parallel_runtime_product_construction"))
-    selected = evidence if excluded is None else [entry for entry in evidence if entry["reason"] in excluded]
+    selected = evidence if excluded is None else [entry for entry in evidence if entry["reason"] in excluded or entry["reason"] == "unproved_payload_carrier"]
     return dict(
         schema="merlin.native_unit_policy.v1",
         status="host" if selected else "eligible",
