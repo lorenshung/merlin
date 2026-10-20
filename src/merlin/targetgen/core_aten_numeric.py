@@ -181,6 +181,17 @@ def prepare_spec_int8(
 
     specialize(directory, report)
     result = prepare(directory, report, _prepare_spec_int8, **kwargs)
+    if result.get("native_admission", {}).get("status") != "device":
+        from merlin.targetgen.source_integer_remainder import specialize as specialize_remainder
+
+        remainder = specialize_remainder(directory, report, kwargs.get("software_spec"))
+        if remainder is not None:
+            candidate = prepare(directory, report, _prepare_spec_int8, **kwargs)
+            if candidate.get("native_admission", {}).get("status") == "device":
+                from merlin.targetgen.quantized_literal_reference import qualify
+
+                return qualify(directory, report, candidate, remainder[0]["quantized_contract"])
+            (directory / "model.mlir").write_bytes(remainder[1])
     if result.get("native_admission", {}).get("status") != "device" and result.get("refusal_code") not in {
         "empty_tensor_no_device_work",
         "native_output_alias_contract_unproved",
@@ -229,8 +240,10 @@ def _prepare_spec_int8(
     from merlin.llvmlower.singleton_reductions import fold_singleton_reductions
     from merlin.llvmlower.singleton_selectors import fold_singleton_selectors
     from merlin.llvmlower.static_masked_sums import expose_static_masked_sums
+    from merlin.llvmlower.static_unit_indices import fold_static_unit_indices
 
-    folds = fold_boolean_unit_image(module)
+    folds = fold_static_unit_indices(module)
+    folds += fold_boolean_unit_image(module)
     folds += fold_integer_image_predicates(module)
     folds += fold_empty_reductions(module)
     folds += fold_boolean_image_predicates(module)

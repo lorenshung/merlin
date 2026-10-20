@@ -41,6 +41,8 @@ def source(operation, *, element="f32", integer="i1", literal=None, unknown=Fals
         ("arith.divf", 1.0),
         ("math.powf", 0.5),
         ("arith.remf", 0.5),
+        ("arith.remf", 1.25),
+        ("arith.remf", -2.0),
         ("arith.subf", 0.0),
     ],
 )
@@ -64,3 +66,25 @@ def test_a_rounded_reciprocal_is_not_an_exact_remainder_proof():
     original = str(module)
     assert fold_boolean_unit_image(module) == 0
     assert str(module) == original
+
+
+@pytest.mark.parametrize("zero,identity", [("0.0", True), ("-0.0", False)])
+def test_unit_selector_does_not_erase_a_negative_zero_word(zero, identity):
+    module = parse_mlir_text(f"""module {{func.func @forward(%x:tensor<4xi1>) -> tensor<4xf32> {{
+      %e=tensor.empty() : tensor<4xf32>
+      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
+        ins(%x:tensor<4xi1>) outs(%e:tensor<4xf32>) {{
+        ^bb0(%a:i1,%unused:f32):
+        %f=arith.uitofp %a : i1 to f32
+        %positive=arith.constant 0.0 : f32
+        %z=arith.constant {zero} : f32
+        %p=arith.cmpf oeq,%f,%positive : f32
+        %v=arith.select %p,%z,%f : f32
+        linalg.yield %v : f32
+      }} -> tensor<4xf32>
+      return %r : tensor<4xf32>
+    }} }}""")
+    original = str(module)
+    assert (fold_boolean_unit_image(module) > 0) == identity
+    if not identity:
+        assert str(module) == original

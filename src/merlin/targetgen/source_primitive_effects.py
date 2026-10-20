@@ -1,0 +1,92 @@
+"""Closed effect check for capture-bound source specialization proofs."""
+
+
+def pure_tensor_source(function):
+    from xdsl.dialects.builtin import IntegerType, TensorType
+    from xdsl.ir import BlockArgument
+    from xdsl.traits import Pure
+
+    from merlin.llvmlower.singleton_selectors import _relation
+    from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
+
+    def literal(value):
+        if isinstance(value, BlockArgument):
+            parent = value.owner.parent_op()
+            if getattr(parent, "name", None) == "linalg.generic" and value.index < len(parent.inputs):
+                value = parent.inputs[value.index]
+        return _constant_of(value)
+
+    def true_assert(value):
+        known = literal(value)
+        if known is not None:
+            return bool(known)
+        owner = value.owner
+        if getattr(owner, "name", None) not in {"arith.cmpi", "arith.cmpf"}:
+            return False
+        a, b = [literal(v) for v in owner.operands]
+        if a is None or b is None:
+            return False
+        floating = owner.name == "arith.cmpf"
+        if floating:
+            import math
+
+            if owner.fastmath.data:
+                return False
+            return _relation(
+                owner.predicate.value.data, (a > b) - (a < b), math.isnan(a) or math.isnan(b), floating=True
+            )
+        predicate = owner.predicate.value.data
+        typ = owner.operands[0].type
+        if isinstance(typ, IntegerType):
+            width = typ.width.data
+            a, b = int(a) % (1 << width), int(b) % (1 << width)
+            if predicate in {2, 3, 4, 5}:
+                a = a - (1 << width) if a >= 1 << (width - 1) else a
+                b = b - (1 << width) if b >= 1 << (width - 1) else b
+        elif not (0 <= a < 2**31 and 0 <= b < 2**31):
+            return False
+        return _relation(predicate, (a > b) - (a < b))
+
+    for op in function.body.block.walk():
+        name = getattr(getattr(op, "op_name", None), "data", op.name)
+        if name == "cf.assert":
+            if len(op.operands) == 1 and true_assert(op.operands[0]):
+                continue
+            return False
+        if name in {"func.return", "linalg.yield", "scf.yield"}:
+            continue
+        # Registered tensor operations are functional values, including their
+        # private allocations. Unknown names do not acquire this permission.
+        if type(op).__module__ == "xdsl.dialects.tensor":
+            if any("memref" in str(v.type) for v in (*op.operands, *op.results)):
+                return False
+            continue
+        if name == "linalg.index" and type(op).__module__ == "xdsl.dialects.linalg.ops":
+            continue
+        if name.startswith("linalg.") and op.regions:
+            if all(isinstance(v.type, TensorType) for v in (*op.operands, *op.results)):
+                continue
+            return False
+        if name in {"scf.if", "scf.for"}:
+            if any("memref" in str(v.type) for v in (*op.operands, *op.results)):
+                return False
+            continue  # Every nested operation is checked by the same walk.
+        implementation = type(op).__module__
+        if implementation.startswith(
+            ("xdsl.dialects.arith", "xdsl.dialects.math", "xdsl.dialects.tensor", "xdsl.dialects.linalg")
+        ) and op.has_trait(Pure):
+            continue
+        # This standard scalar primitive is not registered in this xDSL build.
+        # Its closed type/effect signature does not admit an arbitrary carrier.
+        if (
+            name == "arith.remf"
+            and len(op.operands) == 2
+            and len(op.results) == 1
+            and not op.regions
+            and not op.successors
+        ):
+            types = [str(v.type) for v in (*op.operands, *op.results)]
+            if types[0] in {"f16", "bf16", "f32", "f64"} and len(set(types)) == 1:
+                continue
+        return False
+    return True

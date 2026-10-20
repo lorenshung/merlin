@@ -87,6 +87,14 @@ def fold_boolean_unit_image(module):
             condition = literal(op.operands[0])
             if condition is not None:
                 replacement = op.operands[1 if condition else 2]
+        if name == "math.copysign" and len(op.operands) == 2:
+            magnitude = literal(op.operands[0])
+            if isinstance(magnitude, (int, float)) and math.isfinite(magnitude) and unit(op.operands[1]):
+                constant = arith.ConstantOp(FloatAttr(abs(magnitude), op.results[0].type))
+                Rewriter.replace_op(op, [constant], [constant.result])
+                changed += 1
+                memo.clear()
+                continue
         if name in {"math.sqrt", "math.floor", "math.ceil", "math.trunc", "math.round", "math.roundeven"}:
             if len(op.operands) == 1 and unit(op.operands[0]):
                 replacement = op.operands[0]
@@ -100,8 +108,36 @@ def fold_boolean_unit_image(module):
                     replacement = data
                 elif name in {"arith.addf", "arith.subf"} and bound == 0 and math.copysign(1.0, bound) > 0:
                     replacement = data
+                elif name == "arith.remf" and abs(bound) > 1:
+                    replacement = data
                 elif name == "arith.remf" and bound and (1 / abs(Fraction(bound))).denominator == 1:
                     zero = True
+        if name == "arith.select" and replacement is None:
+            predicate = op.operands[0].owner
+            if getattr(predicate, "name", None) == "arith.cmpf" and not predicate.fastmath.data:
+                for reverse in (False, True):
+                    data = predicate.operands[int(reverse)]
+                    threshold = literal(predicate.operands[int(not reverse)])
+                    if not unit(data) or not isinstance(threshold, (int, float)):
+                        continue
+                    answers = []
+                    for bit in (0.0, 1.0):
+                        a, b = (threshold, bit) if reverse else (bit, threshold)
+                        yes = _relation(
+                            predicate.predicate.value.data, (a > b) - (a < b), math.isnan(threshold), floating=True
+                        )
+                        chosen = op.operands[1 if yes else 2]
+                        value = bit if chosen is data else literal(chosen)
+                        if not isinstance(value, (int, float)):
+                            break
+                        answers.append(value)
+                    if len(answers) == 2 and data.type == op.results[0].type:
+                        if all(
+                            data.type.pack([value]) == data.type.pack([bit])
+                            for value, bit in zip(answers, (0.0, 1.0), strict=True)
+                        ):
+                            replacement = data
+                            break
         if predicate_literal is not None:
             constant = arith.ConstantOp(IntegerAttr(int(predicate_literal), i1))
             Rewriter.replace_op(op, [constant], [constant.result])

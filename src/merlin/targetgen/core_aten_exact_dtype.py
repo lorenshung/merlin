@@ -181,8 +181,10 @@ def prepare_bitwise(directory, report, selection, provider, package, module):
     ):
         return None
     _expose_literal_movement(module)
+    from merlin.targetgen.entry_output_movement import expose_argument_results
     from merlin.targetgen.materialized_movement import expose_alias_results
 
+    expose_argument_results(module, report)
     materialized_aliases = expose_alias_results(module, report)
     module.verify()
     source = str(module)

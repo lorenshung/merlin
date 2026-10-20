@@ -33,7 +33,7 @@ def specialize(directory, report):
     if len(records) != 1:
         return None
     record = records[0]
-    case = record["case"]
+    case = record.get("case") or {}
     if case.get("overload") != "aten.pow.Tensor_Scalar":
         return None
     args = case.get("arguments", {})
@@ -54,13 +54,10 @@ def specialize(directory, report):
     origin = {getattr(op.attributes.get("prov.aten"), "data", None) for op in function.walk()} - {None}
     if origin != {case["overload"]}:
         return None
-    for op in function.body.block.walk():
-        name = getattr(getattr(op, "op_name", None), "data", op.name)
-        if not (
-            name.startswith(("arith.", "math.", "tensor.", "linalg."))
-            or name in {"scf.for", "scf.if", "scf.yield", "func.return"}
-        ):
-            return None
+    from merlin.targetgen.source_primitive_effects import pure_tensor_source
+
+    if not pure_tensor_source(function):
+        return None
     source_type = function.body.block.args[0].type
     if not isinstance(source_type, TensorType):
         return None

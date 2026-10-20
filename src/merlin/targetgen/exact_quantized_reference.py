@@ -363,6 +363,16 @@ def evaluate_operation(target, args, kwargs):
                 out += a[2]
         else:
             out = np.matmul(a[0], a[1])
+    elif op in {"fmod", "remainder"}:
+        def remainder_value(x, y):
+            if not y:
+                raise ValueError("exact remainder refuses a literal zero divisor")
+            quotient = x / y
+            whole = math.trunc(quotient) if op == "fmod" else math.floor(quotient)
+            return x - whole * y
+        other = a[1] if len(a) > 1 else kwargs["other"]
+        divisor = exact_array(other) if isinstance(other, (ExactTensor, torch.Tensor)) else rational(other)
+        out = np.vectorize(remainder_value, otypes=[object])(a[0], divisor)
     elif op == "cumsum":
         axis = args[1] if len(args) > 1 else kwargs["dim"]
         out = np.cumsum(a[0], axis=axis, dtype=object)

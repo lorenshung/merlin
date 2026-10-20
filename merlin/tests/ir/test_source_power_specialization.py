@@ -62,7 +62,9 @@ def test_boolean_positive_power_has_only_two_possible_values(tmp_path, exponent)
     assert any(op.name == "arith.uitofp" for op in module.walk())
 
 
-@pytest.mark.parametrize("failure", ["non_identity", "origin", "foreign_call", "runtime_exponent"])
+@pytest.mark.parametrize(
+    "failure", ["non_identity", "origin", "foreign_call", "unknown_arithmetic", "runtime_exponent"]
+)
 def test_incomplete_semantic_binding_is_not_a_source_specialization(tmp_path, failure):
     report = fixture(tmp_path, 2 if failure == "non_identity" else 1)
     p = tmp_path / "model.mlir"
@@ -71,6 +73,13 @@ def test_incomplete_semantic_binding_is_not_a_source_specialization(tmp_path, fa
         p.write_text(original.replace("aten.pow.Tensor_Scalar", "aten.mul.Tensor"))
     elif failure == "foreign_call":
         p.write_text(original.replace("%e=tensor.empty()", "func.call @unknown() : () -> ()\n%e=tensor.empty()"))
+    elif failure == "unknown_arithmetic":
+        p.write_text(
+            original.replace(
+                "%e=tensor.empty()",
+                '%opaque="arith.future_carrier"(%x) : (tensor<4xf32>) -> tensor<4xf32>\n%e=tensor.empty()',
+            )
+        )
     elif failure == "runtime_exponent":
         report["cases"][0]["case"]["arguments"]["args"]["items"][1] = dict(kind="tensor")
     before = p.read_bytes()
@@ -105,3 +114,23 @@ def test_source_dispatch_agrees_on_storage_words_including_signaling_nans(dtype,
     actual = torch.ops.aten.pow.Tensor_Scalar(values, exponent)
     expected = torch.ones_like(values) if exponent == 0 else values.clone()
     assert torch.equal(actual.contiguous().view(torch.uint8), expected.contiguous().view(torch.uint8))
+
+
+@pytest.mark.parametrize("predicate,allowed", [("ugt", True), ("ult", False)])
+def test_static_assert_guard_uses_unsigned_word_semantics(tmp_path, predicate, allowed):
+    report = fixture(tmp_path, 1)
+    p = tmp_path / "model.mlir"
+    p.write_text(
+        p.read_text().replace(
+            "%e=tensor.empty()",
+            f"""%minus=arith.constant -1 : i8
+      %zero=arith.constant 0 : i8
+      %guard=arith.cmpi {predicate},%minus,%zero : i8
+      cf.assert %guard,"static divisor guard"
+      %e=tensor.empty()""",
+        )
+    )
+    original = p.read_bytes()
+    assert bool(specialize(tmp_path, report)) == allowed
+    if not allowed:
+        assert p.read_bytes() == original

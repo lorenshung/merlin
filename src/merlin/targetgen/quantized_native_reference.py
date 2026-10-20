@@ -79,6 +79,8 @@ def main():
                 real = quantize(value.real, scale, nonfinite=p["nonfinite"]) * scale
                 imag = quantize(value.imag, scale, nonfinite=p["nonfinite"]) * scale
                 values = np.vectorize(Gaussian, otypes=[object])(real, imag)
+            elif not value.is_floating_point():
+                values = np.asarray(value.detach().cpu().tolist(), dtype=object)
             else:
                 values = quantize(value, scale, nonfinite=p["nonfinite"]) * scale
             exact.append(ExactTensor(np.asarray(values, dtype=object), torch.float32))

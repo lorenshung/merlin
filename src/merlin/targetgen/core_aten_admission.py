@@ -19,7 +19,15 @@ def prepare(directory, report, implementation, **kwargs):
     stages = []
 
     def observe(module, stage):
-        decision = construction_evidence(module, excluded=excluded)
+        result_abi = {}
+        for record in report.get("cases", ()):
+            if record.get("status") not in {None, "bundled"}:
+                continue
+            indices, abis = record.get("output_indices", ()), record.get("output_abi", ())
+            if len(indices) != len(abis):
+                continue  # No logical-word proof is available without a complete ABI.
+            result_abi.update(zip(indices, abis, strict=True))
+        decision = construction_evidence(module, excluded=excluded, result_abi=result_abi)
         stages.append(dict(stage=stage, **decision))
 
     # Preparation can change the whole exported ABI and its inputs. A rejected
