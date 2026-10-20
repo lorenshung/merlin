@@ -144,6 +144,12 @@ def _apply_result_layout(module, contract):
                     if need > capacity:
                         raise ValueError("returned view exceeds its input storage envelope")
                     source = block.arguments[base]
+                    # A qualified byte-selector result must be consumed before
+                    # its private allocation is released. Preserve the borrowed
+                    # descriptor and write the materialized bytes into its view.
+                    # Repeated destination addresses carry the same source byte
+                    # under the read-only frontend alias contract.
+                    copy = record.get("materialized_byte_selection") is True
                 elif record.get("role") == "user_input_mutation":
                     # Reuse caller storage only with a static capacity proof.
                     need, capacity = span(record), span(contract["inputs"][base])

@@ -280,12 +280,17 @@ def run_spike_bundle(
                     report["source_preparation"] = preparation
                     bundled[0]["source_preparation"] = preparation
                 region_offload = getattr(provider, "core_aten_offload", None)
-                # A result that ALIASES an input (a view: permute, a transpose) is host metadata: a device
-                # materialization is a fresh tensor and breaks the call's alias contract.
+                # Borrowed outputs need source-bound movement plus an exact
+                # result-layout copy-out, rather than a disjoint result alone.
                 views = [
                     case.get("overload") for case in bundled if (case.get("case") or {}).get("output_input_aliases")
                 ]
-                if views:
+                from merlin.targetgen.materialized_movement import alias_materialization_valid
+
+                materialized_views = numeric_policy == "spec_int8" and alias_materialization_valid(
+                    directory, report, report["numeric_preparation"]
+                )
+                if views and not materialized_views:
                     region_offload = None
                 if (
                     numeric_policy == "spec_int8"
@@ -305,6 +310,7 @@ def run_spike_bundle(
                 elif (
                     numeric_policy == "spec_int8"
                     and views
+                    and not materialized_views
                     and not (
                         report["numeric_preparation"]["quantized_contractions"]
                         or report["numeric_preparation"].get("native_contractions", 0)

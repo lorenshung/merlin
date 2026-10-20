@@ -160,6 +160,9 @@ def prepare_bitwise(directory, report, selection, provider, package, module):
     ):
         return None
     _expose_literal_movement(module)
+    from merlin.targetgen.materialized_movement import expose_alias_results
+
+    materialized_aliases = expose_alias_results(module, report)
     module.verify()
     source = str(module)
     stage = directory / "dtype-preflight"
@@ -213,6 +216,12 @@ def prepare_bitwise(directory, report, selection, provider, package, module):
         provider_catalog=manifest,
         host_floor=dict(status="required", comparison="native_eager_bits_every_boundary_result"),
     )
+    if materialized_aliases:
+        plan["materialized_output_aliases"] = dict(
+            method="complete_byte_selector_with_static_borrowed_copy_out",
+            source_sha256=manifest["source_sha256"],
+            output_indices=materialized_aliases,
+        )
     document = {"selection": selection, **plan}
     (directory / "model.mlir").write_text(source + "\n")
     (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")

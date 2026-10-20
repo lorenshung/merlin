@@ -502,3 +502,21 @@ def test_result_alias_cannot_bypass_borrowed_capacity_proof():
     result = apply_memref_layout(source, dict(inputs=[record, record], results=[dict(record, alias_inputs=[0]), view]))
     assert result.returncode != 0
     assert "cannot prove returned view fits" in result.stderr
+
+
+@pytest.mark.parametrize("stride", [[1, 3], [0, 1]])
+def test_materialized_borrowed_result_is_copied_before_return(stride):
+    source = """module {
+      func.func @forward(%arg: memref<2x3xi64>, %value: memref<3x2xi64>) -> memref<3x2xi64> {
+        return %value : memref<3x2xi64>
+      }
+    }"""
+    inputs = [dict(shape=[2, 3], stride=[3, 1], storage_offset=0), dict(shape=[3, 2], stride=[2, 1], storage_offset=0)]
+    record = dict(shape=[3, 2], stride=stride, storage_offset=0, alias_inputs=[0], materialized_byte_selection=True)
+    # A transpose needs a 3x2 descriptor with strides [1, 3]; zero stride tests
+    # repeated addresses without asserting disjointness or changing the alias.
+    result = apply_memref_layout(source, dict(inputs=inputs, results=[record]))
+    assert result.returncode == 0, result.stderr
+    assert "memref.copy" in result.stdout
+    assert result.stdout.index("memref.copy") < result.stdout.index("return ")
+    assert "memref.reinterpret_cast %arg0" in result.stdout
