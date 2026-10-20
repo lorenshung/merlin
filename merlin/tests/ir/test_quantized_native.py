@@ -125,6 +125,12 @@ def test_rational_transform_oracle_has_no_trigonometric_approximation():
     with pytest.raises(ValueError, match="non-rational root"):
         rational_real_transform([bad, [0], 0, True], lambda v: v.values, ExactTensor)
 
+    from merlin.targetgen.quantized_native_reference import Gaussian, rational_inverse_real_transform
+
+    half = ExactTensor(np.array([Gaussian(1), Gaussian(2, 3), Gaussian(4)], object), "f32")
+    inverse = rational_inverse_real_transform([half, [0], 0, 4], lambda v: v.values, ExactTensor)
+    assert list(inverse.values) == [9, -9, 1, 3]
+
 
 def test_runtime_parallel_products_do_not_gain_native_admission(tmp_path, monkeypatch):
     import merlin.targetgen.core_aten_spec_int8 as spec
@@ -177,6 +183,47 @@ def test_reduction_dependent_parallel_product_is_still_a_composition(tmp_path, m
     report = dict(cases=[dict(status="bundled", input_abi=[dict(dtype="f32")], output_abi=[dict(dtype="f32")])])
     assert prepare(tmp_path, report, target="test", facts={}, software_spec=None, host_capabilities=None) is None
     assert "parallel runtime product" in (tmp_path / "quantized-native-refusal.json").read_text()
+
+
+def test_complex_components_with_frozen_coefficients_reach_numeric_proof(tmp_path, monkeypatch):
+    import json
+    from types import SimpleNamespace
+
+    import merlin.targetgen.core_aten_components as components
+    import merlin.targetgen.core_aten_numeric as numeric
+    import merlin.targetgen.core_aten_spec_int8 as spec
+    from merlin.targetgen.quantized_native import prepare
+
+    software = load_yaml(ROOT / "examples/gemmini/target/software-spec.yaml")
+    monkeypatch.setattr(spec, "select_spec", lambda *a: dict(spec=software))
+    (tmp_path / "model.mlir").write_text("""module {
+      func.func @forward(%x:tensor<1x2xf32>) -> tensor<1x1xf32> {
+        %w=arith.constant dense<1.0> : tensor<2x1xf32>
+        %z=arith.constant 0.0 : f32
+        %seed=tensor.splat %z : tensor<1x1xf32>
+        %r=linalg.matmul ins(%x,%w:tensor<1x2xf32>,tensor<2x1xf32>) outs(%seed:tensor<1x1xf32>) -> tensor<1x1xf32>
+        return %r : tensor<1x1xf32>
+    }}""")
+    called = []
+
+    def prove(*args, **kw):
+        called.append(True)
+        return dict(status="admitted", exact_dtype_sites=1, quantized_contract=kw["quantized_contract"])
+
+    def reference(directory, mode):
+        (directory / "quantized-native-reference.json").write_text(
+            json.dumps(dict(expected_output_bytes={"0": "00000000"}))
+        )
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(components, "prepare_integer_components", prove)
+    monkeypatch.setattr(numeric, "_source_reference", reference)
+    report = dict(
+        output_count=1,
+        cases=[dict(status="bundled", input_abi=[dict(dtype="complex<f32>")], output_abi=[dict(dtype="f32")])],
+    )
+    plan = prepare(tmp_path, report, target="test", facts={}, software_spec=None, host_capabilities=None)
+    assert called and plan["native_admission"]["status"] == "device"
 
 
 def test_native_exact_success_does_not_try_quantization(tmp_path, monkeypatch):

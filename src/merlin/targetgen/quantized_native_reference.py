@@ -74,6 +74,8 @@ def main():
 
         if str(op) == "aten._fft_r2c.default":
             result = rational_real_transform(args, oracle.exact_array, ExactTensor)
+        elif str(op) == "aten._fft_c2r.default":
+            result = rational_inverse_real_transform(args, oracle.exact_array, ExactTensor)
         elif str(op) == "aten.convolution_backward.default":
             result = convolution_adjoint(args, oracle.exact_array, ExactTensor)
         elif str(op) == "aten.convolution.default" and args[6]:
@@ -199,6 +201,30 @@ def rational_real_transform(args, array, Tensor):
         selection[axes[-1]] = slice(0, values.shape[axes[-1]] // 2 + 1)
         values = values[tuple(selection)]
     return Tensor(values, args[0].dtype)
+
+
+def rational_inverse_real_transform(args, array, Tensor):
+    """Hermitian completion followed by an exact rational inverse DFT."""
+    import numpy as np
+
+    half = array(args[0])
+    axes, normalization, size = args[1:4]
+    shape = list(half.shape)
+    shape[axes[-1]] = size
+    complete = np.empty(shape, dtype=object)
+    for point in np.ndindex(tuple(shape)):
+        source = list(point)
+        mirrored = point[axes[-1]] > size // 2
+        if mirrored:
+            for axis in axes:
+                source[axis] = -source[axis] % shape[axis]
+        value = Gaussian.of(half[tuple(source)])
+        # conjugate(DFT(conjugate(x))) is the unnormalized inverse DFT.
+        complete[point] = Gaussian(value.real, value.imag if mirrored else -value.imag)
+    result = rational_real_transform(
+        [Tensor(complete, args[0].dtype), axes, normalization, False], lambda v: v.values, Tensor
+    ).values
+    return Tensor(np.vectorize(lambda v: v.real, otypes=[object])(result), args[0].dtype)
 
 
 def transposed_convolution(args, array, Tensor):

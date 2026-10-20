@@ -31,6 +31,7 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
     module = parse_mlir_file(directory / "model.mlir")
     function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
     from merlin.kernels.shapes import observe_contractions
+    from merlin.llvmlower.uniform_numeric_literals import compile_time_operand
 
     complex_inputs = any(
         a["dtype"].startswith("complex")
@@ -38,7 +39,9 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
         if r.get("status") == "bundled"
         for a in r.get("input_abi", [])
     )
-    if complex_inputs and list(observe_contractions(module)):
+    if complex_inputs and any(
+        all(not compile_time_operand(v) for v in op.operands[:2]) for op, _ in observe_contractions(module)
+    ):
         (directory / "quantized-native-refusal.json").write_text(
             json.dumps(dict(reason="runtime complex products require a composition")) + "\n"
         )
@@ -47,7 +50,6 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
         str(v.type.element_type) not in {"f16", "bf16", "f32"} for v in function.body.block.args
     ):
         return None
-    from merlin.llvmlower.uniform_numeric_literals import compile_time_operand
     from merlin.targetgen.native_construction_patterns import Payloads
 
     policy = construction_evidence(
