@@ -58,3 +58,20 @@ def test_float_singleton_does_not_erase_nan_or_signed_zero_semantics(arithmetic,
 def test_overflow_promises_do_not_gain_a_modular_identity_proof():
     module = source("i8", "addi", 0, flags="overflow<nsw>")
     assert fold_singleton_reductions(module) == 0
+
+
+@pytest.mark.parametrize("element,bits", [("i1", 1), ("i8", 8), ("i32", 32), ("i64", 64)])
+def test_boundary_normalization_preserves_the_closed_integer_identity(element, bits):
+    from merlin.llvmlower.singleton_boundaries import normalize_singleton_boundaries
+
+    module = source(element, "maxui", 0)
+    assert normalize_singleton_boundaries(module) == 1
+    assert not any(op.name in {"linalg.reduce", "linalg.generic", "arith.maxui"} for op in module.walk())
+
+
+def test_boundary_normalization_retains_a_nonidentity_integer_computation():
+    from merlin.llvmlower.singleton_boundaries import normalize_singleton_boundaries
+
+    module = source("i8", "maxsi", 0)
+    assert normalize_singleton_boundaries(module) == 1
+    assert sum(op.name == "arith.maxsi" for op in module.walk()) == 1

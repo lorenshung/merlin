@@ -151,3 +151,24 @@ def test_a_real_parallel_clamp_is_not_a_storage_selector():
     original = str(module)
     assert fold_singleton_selectors(module) == 0
     assert str(module) == original
+
+
+@pytest.mark.parametrize("floating", [False, True])
+def test_boundary_exposure_proves_a_closed_index_fill_before_splitting_its_tuple(floating):
+    from merlin.llvmlower.singleton_boundaries import normalize_singleton_boundaries
+
+    module = source("f32", "0xFF800000", "cmpf ogt", "cmpf oeq", nan=True) if floating else source()
+    assert normalize_singleton_boundaries(module) == 1
+    returned = next(op for op in module.walk() if op.name == "func.return").operands[0]
+    assert returned.owner.name == "tensor.splat"
+    assert returned.owner.operands[0].owner.value.value.data == 0
+    assert not any(op.name == "linalg.generic" for op in module.walk())
+
+
+def test_boundary_exposure_does_not_erase_repeated_index_arithmetic():
+    from merlin.llvmlower.singleton_boundaries import normalize_singleton_boundaries
+
+    module = source(extent=2)
+    before = str(module)
+    assert normalize_singleton_boundaries(module) == 0
+    assert str(module) == before

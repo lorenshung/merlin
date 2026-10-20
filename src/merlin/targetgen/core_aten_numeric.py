@@ -253,12 +253,9 @@ def _prepare_spec_int8(
     folds += fold_empty_reductions(module)
     folds += fold_boolean_image_predicates(module)
     folds += fold_boolean_domain(module)
-    from merlin.llvmlower.singleton_reduction_boundaries import expose_singleton_reduction_boundaries
+    from merlin.llvmlower.singleton_boundaries import normalize_singleton_boundaries
 
-    folds += expose_singleton_reduction_boundaries(module)
-    from merlin.llvmlower.singleton_tuple_regions import expose_singleton_tuple_regions
-
-    folds += expose_singleton_tuple_regions(module)
+    folds += normalize_singleton_boundaries(module)
     from merlin.llvmlower.nan_guarded_neutral import fold_nan_guarded_neutral
 
     folds += fold_nan_guarded_neutral(module)

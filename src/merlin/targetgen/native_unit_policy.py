@@ -44,16 +44,14 @@ def construction_evidence(module, *, excluded=None, result_abi=None):
         from merlin.llvmlower.ieee_identity_selectors import fold_ieee_identity_selectors
         from merlin.llvmlower.integral_float_rounding import fold_integral_image_identities
         from merlin.llvmlower.nan_guarded_neutral import fold_nan_guarded_neutral
-        from merlin.llvmlower.singleton_reduction_boundaries import expose_singleton_reduction_boundaries
-        from merlin.llvmlower.singleton_tuple_regions import expose_singleton_tuple_regions
+        from merlin.llvmlower.singleton_boundaries import normalize_singleton_boundaries
 
         image_folds = (
             fold_static_unit_indices(canonical)
             + fold_integer_image_predicates(canonical)
             + fold_integral_image_identities(canonical)
             + fold_ieee_identity_selectors(canonical)
-            + expose_singleton_reduction_boundaries(canonical)
-            + expose_singleton_tuple_regions(canonical)
+            + normalize_singleton_boundaries(canonical)
             + fold_nan_guarded_neutral(canonical)
         )
         boolean_folds = (
