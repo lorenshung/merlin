@@ -49,7 +49,7 @@ def _per_tensor_scale(node: Any, operator: str) -> float | None:
 
 
 def _window_divisor(node: Any) -> int | None:
-    """The one element count a mean or unpadded average pool divides by, or None if it varies."""
+    """The additive reduction divisor, or None when source geometry must be retained."""
     argument = node.args[0] if node.args and hasattr(node.args[0], "meta") else None
     source = argument.meta.get("val") if argument is not None else None
     # Converted quantize/dequantize nodes often carry no value metadata; walk the Q/DQ chain to the
@@ -64,7 +64,11 @@ def _window_divisor(node: Any) -> int | None:
     if "backward" in name or name.startswith("aten.col2im"):
         return None  # a transpose spreads each window over many outputs: no single divisor per output
     shape = [int(extent) for extent in source.shape]
-    if name.startswith("aten.mean.dim"):
+    if name.startswith("aten.sum."):
+        return 1
+    if name.startswith("aten.mean."):
+        if not shape:
+            return 1  # a scalar reduction has one element, including explicit axis 0/-1
         dims = node.args[1] if len(node.args) > 1 else None
         dims = [dims] if isinstance(dims, int) else list(dims or range(len(shape)))
         return math.prod(shape[dim % len(shape)] for dim in dims) or None

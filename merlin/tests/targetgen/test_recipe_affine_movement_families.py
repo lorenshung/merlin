@@ -343,3 +343,40 @@ for target in [torch.ops.aten.add.Scalar,torch.ops.aten.sub.Scalar]:
    assert F(int(form['coefficients_numerator'][0]),int(form['coefficients_denominator'][0]))==F(scale)/F(.125)
    assert F(int(form['offset_numerator']),int(form['offset_denominator']))==sign*F(alpha)*F(.5)/F(.125)
 """)
+
+
+def test_closed_additive_reductions_retain_exact_divisors_and_readout():
+    from test_exact_quantized_reference import run_torch
+
+    run_torch(r"""
+import torch
+import torch.ao.quantization.fx._decomposed
+from fractions import Fraction
+from merlin.targetgen._recipe_integer import integer_recipes
+from merlin.targetgen.core_aten_w8a8_reference import selected_pt2e_reference
+Q=torch.ops.quantized_decomposed.quantize_per_tensor.default
+DQ=torch.ops.quantized_decomposed.dequantize_per_tensor.default
+x=torch.tensor([[1,2,3],[4,5,6]],dtype=torch.int8)
+for target,args,divisor,want in [
+ (torch.ops.aten.mean.default,(),6,[2]),
+ (torch.ops.aten.mean.dim,([-1],True),3,[[1],[2]]),
+ (torch.ops.aten.sum.default,(),1,[10]),
+ (torch.ops.aten.sum.dim_IntList,([-1],True),1,[[3],[8]])]:
+ graph=torch.fx.Graph(); raw=graph.placeholder('x');raw.meta['val']=x
+ d=graph.call_function(DQ,(raw,.125,0,-128,127,torch.int8))
+ y=graph.call_function(target,(d,*args));y.meta.update(val=target(x.float(),*args),merlin_recipe_family='window_mean')
+ q=graph.call_function(Q,(y,.25,0,-128,127,torch.int8));graph.output(q)
+ model=torch.fx.GraphModule({},graph)
+ row,=integer_recipes(model)
+ assert row['divisor']==divisor and row['requantization']=='exact_rational_host',row
+ assert Fraction(int(row['scale_numerator']),int(row['scale_denominator']))==Fraction(1,2*divisor)
+ result,_=selected_pt2e_reference(model,(x,),numerics='integer_readout')
+ actual=torch.utils._pytree.tree_leaves(result.output)[0]
+ assert actual.reshape(-1).tolist()==torch.tensor(want).reshape(-1).tolist(),(target,actual)
+# Explicit scalar axes must preserve the rank-zero one-element divisor.
+from merlin.targetgen._recipe_integer import _window_divisor
+from types import SimpleNamespace as N
+raw=N(meta={'val':torch.tensor(3.)})
+for dims in ([0],[-1],[]):
+ assert _window_divisor(N(args=(raw,dims),target=torch.ops.aten.mean.dim,meta={'val':torch.tensor(3.)}))==1
+""")

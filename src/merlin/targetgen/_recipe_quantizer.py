@@ -258,7 +258,12 @@ def _recipe_operators(torch: Any) -> dict[str, tuple[Any, ...]]:
         "window_mean": (
             torch.ops.aten.adaptive_avg_pool2d.default,
             torch.ops.aten.avg_pool2d.default,
+            # Closed additive reductions use the same ones-vector primitive;
+            # their mean/sum divisor is a retained exact readout coefficient.
             torch.ops.aten.mean.dim,
+            torch.ops.aten.mean.default,
+            torch.ops.aten.sum.dim_IntList,
+            torch.ops.aten.sum.default,
             torch.ops.aten.avg_pool1d.default,
             torch.ops.aten.avg_pool3d.default,
             torch.ops.aten.adaptive_avg_pool1d.default,
