@@ -60,6 +60,32 @@ def expose_alias_results(module, report):
         indices.append(index)
     for index in indices:
         layout["results"][index]["materialized_byte_selection"] = True
+        value = returns[0].operands[index]
+        if value in function.body.block.args:
+            # An observable identity may have no tensor operation left after
+            # frontend folding. Expose real movement at the return boundary;
+            # internal aliases and the post-input observations remain borrowed.
+            from xdsl.dialects import tensor
+            from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr
+            from xdsl.dialects.linalg import ops as linalg
+            from xdsl.ir import Block, Region
+            from xdsl.ir.affine import AffineMap
+
+            rank = len(value.type.get_shape())
+            identity = AffineMapAttr(AffineMap.identity(rank))
+            empty = tensor.EmptyOp([], value.type)
+            body = Block(arg_types=[value.type.element_type] * 2)
+            body.add_op(linalg.YieldOp(body.args[0]))
+            copied = linalg.GenericOp(
+                inputs=[value],
+                outputs=[empty.tensor],
+                body=Region(body),
+                indexing_maps=ArrayAttr([identity, identity]),
+                iterator_types=ArrayAttr([linalg.IteratorTypeAttr(linalg.IteratorType.PARALLEL)] * rank),
+                result_types=[value.type],
+            )
+            function.body.block.insert_ops_before([empty, copied], returns[0])
+            returns[0].operands = [copied.results[0] if i == index else v for i, v in enumerate(returns[0].operands)]
     if indices:
         module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
     return indices

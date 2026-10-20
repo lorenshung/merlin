@@ -117,3 +117,31 @@ def test_complete_selector_proof_reopens_the_exact_alias_source(tmp_path):
     manifest["bindings"][0]["numeric"]["exact_arithmetic"] = True
     path.write_text(str(module).replace("[1, 0]", "[0, 1]") + "\n")
     assert not alias_materialization_valid(tmp_path, report, plan)
+
+
+@pytest.mark.parametrize("dtype", ["i1", "bf16", "f64", "i64"])
+@pytest.mark.parametrize("shape", [[], [2, 3]])
+def test_folded_argument_result_gets_real_boundary_movement(dtype, shape):
+    prefix = "x".join(str(n) for n in shape)
+    typ = f"tensor<{prefix + 'x' if prefix else ''}{dtype}>"
+    strides = [] if not shape else [3, 1]
+    layout = dict(
+        inputs=[dict(shape=shape, stride=strides, storage_offset=0)],
+        results=[dict(shape=shape, stride=strides, storage_offset=0, alias_inputs=[0])] * 2,
+    )
+    module = parse_mlir_text(
+        "builtin.module"
+        + module_attribute(layout)
+        + f" {{ func.func @forward(%x: {typ}) -> ({typ}, {typ}) {{ func.return %x, %x : {typ}, {typ} }} }}"
+    )
+    report = dict(cases=[dict(status="bundled", output_indices=[0], case=dict(mutated_arguments=[]))])
+    assert expose_alias_results(module, report) == [0]
+    module.verify()
+    function = next(op for op in module.walk() if op.name == "func.func")
+    returned = function.body.block.last_op
+    assert returned.operands[0].owner.name == "linalg.generic"
+    assert returned.operands[1] is function.body.block.args[0]
+    assert len([op for op in module.walk() if op.name == "linalg.generic"]) == 1
+    before = str(module)
+    assert expose_alias_results(module, report) == [0]
+    assert str(module) == before
