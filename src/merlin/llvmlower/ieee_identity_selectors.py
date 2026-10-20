@@ -79,3 +79,55 @@ def fold_ieee_identity_selectors(module):
     if count:
         module.verify()
     return count
+
+
+def fold_zero_sign_selectors(module):
+    """select(x == 0, copysign(0,x), x) preserves every IEEE storage word."""
+    from xdsl.ir import BlockArgument
+    from xdsl.rewriter import Rewriter
+
+    from merlin.llvmlower.fixed_point_ir import FORMAT
+    from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
+
+    def literal(v):
+        if isinstance(v, BlockArgument):
+            parent = v.owner.parent_op()
+            if getattr(parent, "name", None) == "linalg.generic" and v.index < len(parent.inputs):
+                v = parent.inputs[v.index]
+        return _constant_of(v)
+
+    count = 0
+    for op in list(module.walk()):
+        if op.name != "arith.select" or str(op.results[0].type) not in FORMAT:
+            continue
+        predicate = op.operands[0].owner
+        if getattr(predicate, "name", None) != "arith.cmpf" or predicate.fastmath.data:
+            continue
+        if predicate.predicate.value.data not in {1, 13}:
+            continue
+        zero_slot = 1 if predicate.predicate.value.data == 1 else 2
+        data = op.operands[3 - zero_slot]
+        if not any(predicate.operands[i] is data and literal(predicate.operands[1 - i]) == 0 for i in (0, 1)):
+            continue
+        cast = op.operands[zero_slot].owner
+        if getattr(cast, "name", None) != "arith.bitcast":
+            continue
+        mask = cast.operands[0].owner
+        if getattr(mask, "name", None) != "arith.andi":
+            continue
+        width = sum(FORMAT[str(data.type)][:2]) + 1
+        for slot in (0, 1):
+            raw = mask.operands[slot].owner
+            bits = literal(mask.operands[1 - slot])
+            if (
+                getattr(raw, "name", None) == "arith.bitcast"
+                and raw.operands[0] is data
+                and raw.results[0].type == mask.results[0].type
+                and getattr(getattr(raw.results[0].type, "width", None), "data", None) == width
+                and isinstance(bits, int)
+                and bits % (1 << width) == 1 << (width - 1)
+            ):
+                Rewriter.replace_op(op, [], [data])
+                count += 1
+                break
+    return count

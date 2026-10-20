@@ -156,6 +156,7 @@ def fold_integral_image_identities(module):
     """Close nested guards after each preceding identity exposes their image."""
     from merlin.llvmlower.boolean_unit_image import fold_boolean_unit_image
     from merlin.llvmlower.integer_image_predicates import fold_integer_image_predicates
+    from merlin.llvmlower.ieee_identity_selectors import fold_zero_sign_selectors
 
     total = 0
     while True:
@@ -163,6 +164,7 @@ def fold_integral_image_identities(module):
             fold_integral_float_rounding(module)
             + fold_boolean_unit_image(module)
             + fold_integer_image_predicates(module)
+            + fold_zero_sign_selectors(module)
         )
         total += changed
         if not changed:

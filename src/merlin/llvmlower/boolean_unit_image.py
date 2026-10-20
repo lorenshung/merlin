@@ -22,6 +22,14 @@ def fold_boolean_unit_image(module):
             parent = value.owner.parent_op()
             if getattr(parent, "name", None) == "linalg.generic" and value.index < len(parent.inputs):
                 value = parent.inputs[value.index]
+        owner = value.owner
+        if getattr(owner, "name", None) == "arith.bitcast":
+            bits = _constant_of(owner.operands[0])
+            width = getattr(getattr(owner.operands[0].type, "width", None), "data", None)
+            if isinstance(bits, int) and width in {16, 32, 64} and str(value.type) in {"f16", "bf16", "f32", "f64"}:
+                raw = (bits % (1 << width)).to_bytes(width // 8, "little")
+                if len(value.type.pack([0.0])) == len(raw):
+                    return value.type.unpack(raw, 1)[0]
         return _constant_of(value)
 
     def unit(value):

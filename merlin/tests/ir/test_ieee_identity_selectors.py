@@ -2,6 +2,28 @@
 
 import pytest
 
+
+@pytest.mark.parametrize("dtype,bits", [("f16", 16), ("bf16", 16), ("f32", 32), ("f64", 64)])
+@pytest.mark.parametrize("correct", [False, True])
+def test_zero_sign_selector_is_identity_only_with_the_complete_sign_word(dtype, bits, correct):
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+    from merlin.llvmlower.ieee_identity_selectors import fold_zero_sign_selectors
+
+    mask = -(1 << (bits - 1)) if correct else (1 << (bits - 2))
+    module = parse_mlir_text(f"""module {{func.func @forward(%x:{dtype}) -> {dtype} {{
+      %zero=arith.constant 0.0 : {dtype}
+      %mask=arith.constant {mask} : i{bits}
+      %raw=arith.bitcast %x : {dtype} to i{bits}
+      %sign=arith.andi %raw,%mask : i{bits}
+      %signedzero=arith.bitcast %sign : i{bits} to {dtype}
+      %p=arith.cmpf oeq,%x,%zero : {dtype}
+      %out=arith.select %p,%signedzero,%x : {dtype}
+      return %out : {dtype}
+    }} }}""")
+    assert fold_zero_sign_selectors(module) == int(correct)
+    module.verify()
+
+
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.ieee_identity_selectors import fold_ieee_identity_selectors
 
