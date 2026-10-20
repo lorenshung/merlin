@@ -177,6 +177,9 @@ def prepare_spec_int8(
             r.update(numeric_admission=result, functional_truth=c)
         (directory / "spec-int8-admission.json").write_text(json.dumps(result, indent=2) + "\n")
         return result
+    from merlin.targetgen.source_power_specialization import specialize
+
+    specialize(directory, report)
     result = prepare(directory, report, _prepare_spec_int8, **kwargs)
     if result.get("native_admission", {}).get("status") != "device" and result.get("refusal_code") not in {
         "empty_tensor_no_device_work",
@@ -219,6 +222,7 @@ def _prepare_spec_int8(
     module = parse_mlir_file(directory / "model.mlir")
     from merlin.llvmlower.boolean_domain import fold_boolean_domain
     from merlin.llvmlower.boolean_image_predicates import fold_boolean_image_predicates
+    from merlin.llvmlower.boolean_unit_image import fold_boolean_unit_image
     from merlin.llvmlower.empty_reductions import fold_empty_reductions
     from merlin.llvmlower.integer_image_predicates import fold_integer_image_predicates
     from merlin.llvmlower.singleton_carriers import fold_singleton_carriers
@@ -226,7 +230,8 @@ def _prepare_spec_int8(
     from merlin.llvmlower.singleton_selectors import fold_singleton_selectors
     from merlin.llvmlower.static_masked_sums import expose_static_masked_sums
 
-    folds = fold_integer_image_predicates(module)
+    folds = fold_boolean_unit_image(module)
+    folds += fold_integer_image_predicates(module)
     folds += fold_empty_reductions(module)
     folds += fold_boolean_image_predicates(module)
     folds += fold_boolean_domain(module)
