@@ -363,7 +363,7 @@ def evaluate_operation(target, args, kwargs):
     op = name.split(".")[1] if name.startswith("aten.") else name
     if op in {"fill", "full", "full_like", "zeros", "zeros_like", "ones", "ones_like"}:
         value = 0 if op.startswith("zeros") else 1 if op.startswith("ones") else args[1]
-        shape = args[0] if op in {"full", "zeros", "ones"} else args[0].shape
+        shape = args[0] if op in {"full", "zeros", "ones"} else (args[0].values.shape if isinstance(args[0], ExactTensor) else args[0].shape)
         return ExactTensor(np.full(shape, rational(value), dtype=object), dtype)
     a = [exact_array(x) if isinstance(x, (ExactTensor, torch.Tensor)) else x for x in args]
     if op in {"add", "sub", "mul", "div", "true_divide"}:
