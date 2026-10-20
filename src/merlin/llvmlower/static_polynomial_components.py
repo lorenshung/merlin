@@ -30,6 +30,18 @@ def lift_static_polynomial(op, grid, pack, bounds, *, operand_type=None, result_
         ]
         denominator = lcm(*(coefficient.denominator for row in rows for coefficient in row.values()))
         rows = [{key: coefficient * denominator for key, coefficient in row.items()} for row in rows]
+    # A literal scaling parameter is represented by a normalized signed-byte
+    # significand, rather than an identity producer followed by host scaling.
+    # The extra binary exponent is an exact storage representation, and the
+    # parameter's numerator multiplication is actual device work. Unit copies,
+    # signs, sums and contractions retain their own existing representations.
+    normalized_scale = (
+        rational_denominators is not None
+        and all(it.data.value == "parallel" for it in op.get_iterator_types())
+        and bool(rows)
+        and all(len(row) == 1 and len(next(iter(row))) == 1 for row in rows)
+        and denominator != 1
+    )
     sources = list(dict.fromkeys(source for source, _ in atoms))
     grids = {source: grid(source) for source in sources}
     if any(value is None for value in grids.values()):
@@ -43,6 +55,9 @@ def lift_static_polynomial(op, grid, pack, bounds, *, operand_type=None, result_
             if coefficient.denominator != 1 << -e:
                 raise PolynomialRefusal("non-dyadic coefficient")
             numerator = coefficient.numerator
+            if normalized_scale and abs(numerator) == 1:
+                numerator <<= 6  # Seven usable magnitude bits in a signed byte.
+                e -= 6
             e += sum(grids[atoms[index][0]][0] for index in key)
             result.append((key, numerator, e))
             exponent = min(exponent, e)

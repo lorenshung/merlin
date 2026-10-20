@@ -576,6 +576,15 @@ def rewrite_floating_components(
         packing_exponents = (
             [e for e, b in input_grids_here] if arithmetic.name == "arith.mulf" else [exponent] * len(args)
         )
+        if arithmetic.name == "arith.mulf":
+            from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
+
+            for i, value in enumerate(input_values):
+                coefficient = _constant_of(value)
+                e, b = input_grids_here[i]
+                if coefficient is not None and coefficient not in (-1, 0, 1) and 0 < b < 64:
+                    packing_exponents[i] = e - (7 - b.bit_length())
+            exponent = sum(packing_exponents)
         if arithmetic.name == "math.fma":
             product_exponent = sum(e for e, _ in input_grids_here[:2])
             exponent = min(product_exponent, input_grids_here[2][0])
@@ -583,6 +592,13 @@ def rewrite_floating_components(
         if arithmetic.name == "arith.divf":
             packing_exponents = [input_grids_here[0][0]]
             exponent = packing_exponents[0] - divisor_exponent
+        division_weight = 1
+        if arithmetic.name == "arith.divf" and (denominator != 1 or divisor_exponent != 0):
+            # Normalize the exact reciprocal's numerator as a signed-byte
+            # significand. Its odd denominator and binary exponent belong to
+            # the one exact readout, and never to a host tensor divide.
+            division_weight = 64
+            exponent -= 6
         operations = []
         try:
             packed = [pack(value, e, operations) for value, e in zip(input_values, packing_exponents, strict=True)]
@@ -592,6 +608,7 @@ def rewrite_floating_components(
         integer_bound = (
             prod(b for value, b in packed) if arithmetic.name == "arith.mulf" else sum(b for value, b in packed)
         )
+        integer_bound *= division_weight
         if arithmetic.name == "math.fma":
             integer_bound = ((packed[0][1] * packed[1][1]) << (product_exponent - exponent)) + packed[2][1]
         if integer_bound.bit_length() >= reconstruction_limit:
@@ -682,7 +699,11 @@ def rewrite_floating_components(
             extended = arith.ExtSIOp(value, i128)
             body.add_op(extended)
             values.append(extended.result)
-        if arithmetic.name == "arith.negf" or (arithmetic.name == "arith.divf" and divisor_negative):
+        if arithmetic.name == "arith.divf" and division_weight != 1:
+            weight = arith.ConstantOp(IntegerAttr(-division_weight if divisor_negative else division_weight, i128))
+            body.add_op(weight)
+            computed = arith.MuliOp(values[0], weight.result)
+        elif arithmetic.name == "arith.negf" or (arithmetic.name == "arith.divf" and divisor_negative):
             constant = arith.ConstantOp(IntegerAttr(0, i128))
             body.add_op(constant)
             computed = arith.SubiOp(constant.result, values[0])

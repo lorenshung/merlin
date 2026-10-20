@@ -368,6 +368,21 @@ def test_rational_divisors_survive_layouts_until_exported_quantize(tmp_path):
     )
     module.verify()
     assert any(row["denominator"] == 3 for row in proofs)
+    # A rational parameter is an actual native weight significand. A device
+    # identity followed by a host division would not discharge this contract.
+    producer = next(
+        op
+        for op in module.walk()
+        if op.name == "linalg.generic" and any(it.data.value == "reduction" for it in op.get_iterator_types())
+    )
+    weights = []
+    value = producer.inputs[1]
+    while value.owner.name == "tensor.insert":
+        product = value.owner.operands[0].owner
+        assert product.name == "arith.muli"
+        weights.append(product.operands[1].owner.value.value.data)
+        value = value.owner.operands[1]
+    assert weights and set(weights) == {64}
     from merlin.xdsl_dialects._common import text
 
     llvm = lower_to_llvm_ir(text(module, generic=True), workdir=tmp_path / "lower", vectorize=False)

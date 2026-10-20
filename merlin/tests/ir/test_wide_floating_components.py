@@ -11,6 +11,35 @@ from merlin.llvmlower.floating_components import rewrite_floating_components
 from merlin.llvmlower.integer_components import rewrite_integer_components
 
 
+@pytest.mark.parametrize("divisor", [0.5, 2.0, 3.0, -0.5])
+def test_literal_division_has_a_nonidentity_native_numerator(divisor):
+    module = parse_mlir_text(f"""module {{func.func @forward(%x:tensor<3xf32>) -> tensor<3xf32> {{
+      %c=arith.constant {divisor} : f32
+      %weight=tensor.splat %c : tensor<3xf32>
+      %e=tensor.empty() : tensor<3xf32>
+      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
+        ins(%x,%weight:tensor<3xf32>,tensor<3xf32>) outs(%e:tensor<3xf32>) {{
+        ^bb0(%xv:f32,%cvalue:f32,%unused:f32):
+        %q=arith.divf %xv,%cvalue : f32
+        linalg.yield %q : f32
+      }} -> tensor<3xf32>
+      return %r : tensor<3xf32>
+    }} }}""")
+    bounds, proofs = rewrite_floating_components(module, [(-6, 128)])
+    products = [
+        op
+        for op in module.walk()
+        if op.name == "arith.muli"
+        and any(
+            getattr(v.owner, "name", None) == "arith.constant" and abs(v.owner.value.value.data) == 64
+            for v in op.operands
+        )
+    ]
+    assert products and proofs
+    assert rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
+    module.verify()
+
+
 def test_extreme_bfloat_payload_has_full_integer_producers():
     values = [2.0**-133, -(2.0**127), 0.0]
     exponent, bound = finite_grid(values)
@@ -182,7 +211,9 @@ def test_bilinear_numerator_survives_reshape_and_following_scalar_arithmetic(val
     function = next(op for op in module.walk() if op.name == "func.func")
     _pure_dce(function)
     assert not unlowered_data_reductions(module, "test.limb")
-    assert any(op.name == "tensor.reshape" and str(op.results[0].type.element_type).startswith("i") for op in module.walk())
+    assert any(
+        op.name == "tensor.reshape" and str(op.results[0].type.element_type).startswith("i") for op in module.walk()
+    )
     module.verify()
 
 
