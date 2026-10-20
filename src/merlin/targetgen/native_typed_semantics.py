@@ -20,8 +20,15 @@ def prove(module):
     # source and its original IEEE boundaries; no input observations are used.
     from merlin.llvmlower.uniform_numeric_literals import fold_uniform_numeric_literals
 
-    module = module.clone()
-    fold_uniform_numeric_literals(module, close_guards=True)
+    storage_inputs = {
+        str(arg.type.element_type)
+        for function in module.walk()
+        if function.name == "func.func" and function.sym_name.data == "forward"
+        for arg in function.body.block.args
+    }
+    if storage_inputs & {"f16", "bf16"}:
+        module = module.clone()
+        fold_uniform_numeric_literals(module, close_guards=True)
     arithmetic = {"arith.addf", "arith.subf", "arith.mulf", "arith.divf", "arith.negf", "math.fma"}
     conversions = {"arith.extf", "arith.truncf", "arith.sitofp", "arith.uitofp"}
     scalar = (

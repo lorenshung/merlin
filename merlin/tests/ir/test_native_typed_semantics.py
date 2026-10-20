@@ -78,7 +78,9 @@ def test_layout_metadata_does_not_read_payloads():
 def test_vector_tail_and_unknown_layout_domain():
     assert profile({"shape": [33], "stride": [1]}, block=32, grain=32768)["vector_prefix"] == 32
     assert profile({"shape": [33], "stride": [2]}, block=32, grain=32768)["vector_prefix"] == 0
-    assert profile({"shape": [2, 3], "stride": [10, 2]}, block=32, grain=32768) is None
+    padded = profile({"shape": [2, 3], "stride": [10, 2]}, block=32, grain=32768)
+    assert padded["row"] == 3 and padded["vector_prefix"] == 0
+    assert profile({"shape": [2, 3], "stride": [1, 1]}, block=32, grain=32768) is None
     assert profile({"shape": [32769], "stride": [1]}, block=32, grain=32768) is None
 
 

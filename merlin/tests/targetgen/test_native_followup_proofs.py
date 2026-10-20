@@ -177,3 +177,51 @@ def test_widening_does_not_license_binary64_arithmetic():
         return %r:tensor<4xf64>
       }}""")
     assert prove(module)["code"] == "native_binary64_arithmetic_form_unproved"
+
+
+@pytest.mark.parametrize("storage,expected", [("f16", "proven"), ("f32", "refused")])
+def test_new_guard_closure_stays_in_reduced_storage_family(storage, expected):
+    from merlin.frontends.linalg_mlir import parse_mlir_text
+    from merlin.targetgen.native_typed_semantics import prove
+
+    widen = "%a=arith.extf %lhs:f16 to f32\n%b=arith.extf %rhs:f16 to f32" if storage == "f16" else ""
+    arguments = "%lhs:STORAGE,%rhs:STORAGE" if widen else "%a:STORAGE,%b:STORAGE"
+    text = (
+        """module {
+      func.func @forward(%x:tensor<4xSTORAGE>,%y:tensor<4xSTORAGE>) -> tensor<4xf32> {
+        %e=tensor.empty():tensor<4xf32>
+        %r=linalg.generic {
+          indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
+          iterator_types=["parallel"]}
+          ins(%x,%y:tensor<4xSTORAGE>,tensor<4xSTORAGE>) outs(%e:tensor<4xf32>) {
+        ^bb0(ARGUMENTS,%unused:f32):
+          WIDEN
+          %p=arith.addf %a,%b:f32
+          %d=arith.constant -4194304:i32
+          %default=arith.bitcast %d:i32 to f32
+          %invalid=arith.cmpf uno,%p,%p:f32
+          %base=arith.select %invalid,%default,%p:f32
+          %mask=arith.constant 4194304:i32
+          %br=arith.bitcast %b:f32 to i32
+          %bq=arith.ori %br,%mask:i32
+          %bquiet=arith.bitcast %bq:i32 to f32
+          %bnan=arith.cmpf uno,%b,%b:f32
+          %right=arith.select %bnan,%bquiet,%base:f32
+          %false=arith.constant false
+          %alias=arith.select %false,%a,%right:f32
+          %ar=arith.bitcast %a:f32 to i32
+          %aq=arith.ori %ar,%mask:i32
+          %aquiet=arith.bitcast %aq:i32 to f32
+          %anan=arith.cmpf uno,%a,%a:f32
+          %out=arith.select %anan,%aquiet,%alias:f32
+          linalg.yield %out:f32
+        } -> tensor<4xf32>
+        return %r:tensor<4xf32>
+      }}""".replace("ARGUMENTS", arguments)
+        .replace("WIDEN", widen)
+        .replace("STORAGE", storage)
+    )
+    result = prove(parse_mlir_text(text))
+    assert result["status"] == expected, result
+    if expected == "refused":
+        assert result["code"] == "native_competing_nan_priority_unproved"

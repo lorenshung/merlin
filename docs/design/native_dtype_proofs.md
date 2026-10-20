@@ -215,13 +215,14 @@ The checker compares every resulting word and refuses on the first difference.
 
 This certificate does not license arbitrary unguarded floating expressions.
 Captured typed programs retain their explicit invalid-result, operand-priority
-and index-path selects. Before the structural guard proof, a clone closes
+and index-path selects. For reduced-storage inputs, before the structural guard proof, a clone closes
 compile-time conversions and constant predicates to a fixed point. A constant
 predicate select aliases its chosen operand even when that operand is runtime
 data. This preserves the guard chain after a literal operand's `isnan` test has
 folded to false. The emitted program retains its original typed boundaries and
 selectors. Live runtime guards, unknown carriers and competing unprotected NaNs
-still refuse. No tensor payload, example result or input identity enters this
+still refuse. Other storage paths retain their existing family screen; the
+float32 quantization policy remains separate. No tensor payload, example result or input identity enters this
 proof.
 
 ## Static strided CPU readout
