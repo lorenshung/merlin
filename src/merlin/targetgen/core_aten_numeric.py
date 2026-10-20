@@ -246,7 +246,8 @@ def _prepare_spec_int8(
     from merlin.llvmlower.static_masked_sums import expose_static_masked_sums
     from merlin.llvmlower.static_unit_indices import fold_static_unit_indices
 
-    folds = fold_static_unit_indices(module)
+    folds = expose_static_masked_sums(module)
+    folds += fold_static_unit_indices(module)
     folds += fold_integral_float_rounding(module)
     folds += fold_boolean_unit_image(module)
     folds += fold_integer_image_predicates(module)

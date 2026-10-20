@@ -53,3 +53,16 @@ def test_float_order_nonzero_seed_and_overflow_promises_remain_unchanged(dtype, 
     original = str(module)
     assert expose_static_masked_sums(module) == 0
     assert str(module) == original
+
+
+@pytest.mark.parametrize("dtype", ["i8", "i32", "i64"])
+def test_unit_index_masks_are_exposed_before_their_coordinates_are_folded(dtype):
+    from merlin.llvmlower.static_unit_indices import fold_static_unit_indices
+
+    module = parse_mlir_text(str(source(dtype)).replace("2x3", "1x3"))
+    assert expose_static_masked_sums(module) == 1
+    fold_static_unit_indices(module)
+    assert not any(op.name == "linalg.index" for op in module.walk())
+    plans = rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[1 << (int(dtype[1:]) - 1)])
+    assert plans
+    module.verify()
