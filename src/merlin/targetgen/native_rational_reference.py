@@ -177,12 +177,17 @@ def compare_reduction_floor(record, outputs):
         for i, (a, h, e) in enumerate(zip(actual, host, rational, strict=True)):
             if outputs[index][i * width : (i + 1) * width] == eager_raw[i * width : (i + 1) * width]:
                 continue
+            # A non-finite eager value has no rational error radius. Infinity
+            # must retain its sign; NaNs retain the native storage contract's
+            # sign, quiet bit and payload (the equal-byte case above).
+            if not math.isfinite(h):
+                if not (math.isinf(h) and a == h):
+                    failures.append(i)
+                continue
             if a == h and (a != 0 or math.copysign(1, a) == math.copysign(1, h)):
                 continue
-            if not math.isfinite(a) or math.isnan(h):
+            if not math.isfinite(a):
                 failures.append(i)
-            elif math.isinf(h):
-                continue
             elif a == h == 0 or abs(Fraction(a) - e) > abs(Fraction(h) - e):
                 failures.append(i)
         results.append(
