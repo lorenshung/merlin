@@ -3,7 +3,7 @@ title: General native dtype component proofs
 kind: design
 status: current
 owner: core
-last_verified: 2026-10-19
+last_verified: 2026-10-20
 related: [host_cpu_arithmetic, core_aten_bitwise_movement]
 code_refs: [src/merlin/targetgen/native_ieee_certificate.py, src/merlin/targetgen/native_typed_semantics.py, src/merlin/llvmlower/ieee_dyadic_ir.py, src/merlin/llvmlower/significand_products.py, src/merlin/llvmlower/integer_division_components.py]
 ---
@@ -156,3 +156,38 @@ pointwise component program, not an algebraic rewrite of arbitrary complex
 arithmetic. In particular, replacing multiple typed operations by one exact
 Gaussian expression would change rounding and is forbidden. Complex contractions
 retain the aggregate order/payload refusal until separately proved.
+
+## Integer aggregate and carrier closure
+
+A closed integer program uses the storage/modular theorem independently of any
+IEEE certificate. A positive literal signed divisor excludes both division by
+zero and signed minimum divided by minus one. Exact limb accumulation first
+reconstructs the original storage ring; its signed quotient then truncates toward
+zero. Moving that quotient before the storage wrap would change the program and
+is forbidden. Named additive reductions expose their dimension maps to the same
+limb sum producer as generic reductions. No floating proof is needed.
+
+A compile-time integer coefficient too wide for one bounded accumulator product
+is expanded into signed radix-256 literal planes. Each coefficient-plane/input-
+limb product fits the checked full signed-byte product domain, and the host
+recombines modulo the original result width. Terms whose exponent reaches that
+width vanish in the ring. Source constants, not runtime values, choose these planes.
+
+Literal-zero elimination is optional. If it would erase the complete device
+schedule, the compiler retains the original exact zero linear producers and
+unchanged typed/sign readout. In particular, multiplying a promoted signed integer
+by floating zero must preserve the input-dependent zero sign. It is neither an
+unsigned constant fill nor permission to drop the promotion boundary.
+
+Payload tracing recognizes a defined positive-literal quotient as arithmetic:
+it produces new values, propagates UNKNOWN from every input, and cannot certify
+an opaque carrier. This provenance rule grants no numerical or schedule proof;
+the separate modular/division gate remains mandatory. Boolean union stays a
+construction exclusion, including named reductions. Boolean storage carriers
+remain ordinary bitwise movement.
+
+IEEE float-to-float RNE narrowing is an explicit storage conversion. An affine
+addend before that boundary is not itself an offset-rounding implementation.
+The detector therefore does not treat typed narrowing as float-to-integer
+rounding. Integer rounding after a bias, magic-bias add/subtract constructions,
+and unknown storage forms retain their independent exclusions and proof gates.

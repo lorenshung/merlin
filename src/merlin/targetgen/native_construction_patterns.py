@@ -111,8 +111,9 @@ class Payloads:
         return None
 
     def nonzero_literal(self, root):
-        from merlin.targetgen.native_payload_carriers import carrier_sources, op_name
         from xdsl.dialects.builtin import DenseIntOrFPElementsAttr
+
+        from merlin.targetgen.native_payload_carriers import carrier_sources, op_name
 
         pending, seen = [root], set()
         while pending:
@@ -241,10 +242,12 @@ class Payloads:
                     children.append(parent.results[use.index])
             if consumer.name == "linalg.yield":
                 parent = consumer.parent_op()
-                if parent.name == "linalg.generic" and use.index < len(parent.results):
+                if parent.name in {"linalg.generic", "linalg.reduce"} and use.index < len(parent.results):
                     children.append(parent.results[use.index])
-            if consumer.name == "linalg.generic" and use.index < len(consumer.inputs):
-                children.append(consumer.body.block.args[use.index])
+            if consumer.name in {"linalg.generic", "linalg.reduce"}:
+                inputs = consumer.inputs if consumer.name == "linalg.generic" else (consumer.input,)
+                if use.index < len(inputs):
+                    children.append(consumer.body.block.args[use.index])
         return tuple(children)
 
     def patterns(self, op):
@@ -256,7 +259,7 @@ class Payloads:
             parent = op.parent_op()
             if (
                 parent is not None
-                and parent.name == "linalg.generic"
+                and parent.name in {"linalg.generic", "linalg.reduce"}
                 and any(str(v.type.element_type) == "i1" for v in parent.results)
             ):
                 reasons.append("multi_op_identity")
@@ -294,7 +297,17 @@ class Payloads:
         # Bias followed by a rounding/narrowing observation. The exact IEEE
         # encoder uses quotient/remainder and a conditional ties-even increment,
         # rather than an unconditional literal offset in a floating readout.
-        if name in ROUNDING | {
+        # IEEE float-to-float RNE is a storage boundary, not an integer
+        # offset-rounding implementation. Its input may be an ordinary affine
+        # expression. Magic-bias arithmetic and float-to-integer rounding are
+        # still checked independently below.
+        storage_rne = name == "arith.truncf" and (
+            str(op.operands[0].type), str(op.results[0].type)
+        ) in {("f64", "f32"), ("f64", "f16"), ("f64", "bf16"), ("f32", "f16"), ("f32", "bf16")}
+        storage_rne = storage_rne and not any(
+            key in op.properties or key in op.attributes for key in ("roundingmode", "roundingMode")
+        )
+        if not storage_rne and name in ROUNDING | {
             "arith.fptosi",
             "arith.fptoui",
             "arith.truncf",

@@ -37,8 +37,10 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
     bounds = dict(zip(functions[0].body.block.args, input_bounds))
     bounds.update(known_bounds or {})
     plans = []
+    from merlin.llvmlower.additive_regions import expose_reduce_domains
     from merlin.llvmlower.integer_width_boundaries import preserve_integer_width_boundaries
 
+    expose_reduce_domains(module)
     preserve_integer_width_boundaries(module, mathematical_sources=bounds)
 
     def indices(value, digits):
@@ -409,15 +411,29 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
             continue
         typ = op.results[0].type
         bits = width(op.results[0])
-        # Provider's full-domain i32 bound is authoritative; avoid unrepresentable literals.
-        if any(abs(c) * 128 >= (1 << 31) for c in terms.values()) or not -(1 << (bits - 1)) <= bias < (1 << (bits - 1)):
-            continue
+        # Constants are ring elements too. Large coefficients need their own
+        # signed-byte planes; no coefficient or product is truncated to a byte.
+        bias = (bias + (1 << (bits - 1))) % (1 << bits) - (1 << (bits - 1))
         operations, result = init(typ.get_shape(), typ.element_type, bias)
         for i, coefficient in terms.items():
             source = op.inputs[i]
             digits = count(source, mathematical=bits > width(source))
-            for index in indices(source, digits):
-                if 8 * index >= bits:
+            planes = [(0, coefficient)]
+            if abs(coefficient) * 128 >= (1 << 31):
+                remaining = (coefficient + (1 << (bits - 1))) % (1 << bits) - (1 << (bits - 1))
+                planes = []
+                position = 0
+                while remaining:
+                    digit_coefficient = (remaining + 128) % 256 - 128
+                    if digit_coefficient:
+                        planes.append((position, digit_coefficient))
+                    remaining = (remaining - digit_coefficient) // 256
+                    position += 1
+            for index, plane, factor in (
+                (index, plane, factor) for index in indices(source, digits) for plane, factor in planes
+            ):
+                exponent = 8 * (index + plane)
+                if exponent >= bits:
                     continue
                 split_ops, limb = digit(source, index)
                 operations.extend(split_ops)
@@ -425,7 +441,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
                 operations.extend(seed_ops)
                 body = Block(arg_types=[i8, i32])
                 extended = arith.ExtSIOp(body.args[0], i32)
-                multiplier = arith.ConstantOp(IntegerAttr(coefficient, i32))
+                multiplier = arith.ConstantOp(IntegerAttr(factor, i32))
                 product = arith.MuliOp(extended.result, multiplier.result)
                 body.add_ops([extended, multiplier, product, L.YieldOp(product.result)])
                 maps = list(op.get_indexing_maps())
@@ -443,7 +459,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
                     getattr(op.attributes.get("merlin.exact_component"), "data", None),
                 )
                 operations.append(producer)
-                result = weighted(result, producer.results[0], 8 * index, operations)
+                result = weighted(result, producer.results[0], exponent, operations)
         bound = abs(bias) + sum(abs(c) * absolute(op.inputs[i]) for i, c in terms.items())
         bounds[result] = min(bound, 1 << (bits - 1))
         Rewriter.replace_op(op, operations, [result])

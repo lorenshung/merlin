@@ -200,6 +200,13 @@ def _storage_component_semantics(module):
             "arith.floordivsi",
             "arith.ceildivsi",
         }:
+            from merlin.llvmlower.integer_division_components import literal_divisor
+
+            divisor = literal_divisor(op)
+            if op.name in {"arith.divsi", "arith.remsi"} and divisor is not None and divisor > 0:
+                # A positive source literal excludes both zero and MIN/-1.
+                # The modular accumulator boundary preceding this quotient stays explicit.
+                continue
             return dict(
                 status="refused",
                 code="native_integer_division_semantics_unproved",

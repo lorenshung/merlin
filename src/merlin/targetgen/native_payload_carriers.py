@@ -204,6 +204,14 @@ class LiteralPayloads:
                 # Representation boundaries retain table provenance from data,
                 # not from per-channel parameters; UNKNOWN still taints every operand.
                 return 0, tuple(op.operands), (TABLE | UNKNOWN, UNKNOWN, UNKNOWN)
+        if name in {"arith.divsi", "arith.remsi"}:
+            from merlin.llvmlower.integer_division_components import literal_divisor
+
+            divisor = literal_divisor(op)
+            if divisor is not None and divisor > 0:
+                # Defined scalar arithmetic: new values clear TABLE, while
+                # UNKNOWN propagates from every operand as for other arithmetic.
+                return 0, tuple(op.operands), True
         # Known scalar arithmetic produces new values rather than copying a
         # precomputed result. Unknown inputs remain unproved through arithmetic.
         if name is not None and name.startswith(("arith.", "math.")) and op.has_trait(Pure):

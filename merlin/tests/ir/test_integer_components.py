@@ -97,12 +97,29 @@ def evaluate(module, arrays):
         elif op.name == "tensor.splat":
             values[op.results[0]] = np.full(op.results[0].type.get_shape(), values[op.operands[0]], object)
         elif op.name == "linalg.generic":
-            output = np.zeros(op.results[0].type.get_shape(), object)
-            for index in np.ndindex(output.shape):
-                env = {arg: values[source][index] for arg, source in zip(op.body.block.args, op.operands)}
+            from xdsl.ir.affine import AffineDimExpr
+
+            output = values[op.outputs[0]].copy()
+            maps = [attr.data for attr in op.get_indexing_maps()]
+            extents = [None] * len(op.get_iterator_types())
+            for value, amap in zip(op.operands, maps):
+                for extent, expr in zip(value.type.get_shape(), amap.results):
+                    assert isinstance(expr, AffineDimExpr)
+                    previous = extents[expr.position]
+                    assert previous is None or previous == extent
+                    extents[expr.position] = extent
+            assert all(n is not None for n in extents)
+            for index in np.ndindex(tuple(extents)):
+                output_index = tuple(maps[-1].eval(index, ()))
+                env = {
+                    arg: (
+                        output[output_index] if i == len(op.inputs) else values[source][tuple(maps[i].eval(index, ()))]
+                    )
+                    for i, (arg, source) in enumerate(zip(op.body.block.args, op.operands))
+                }
                 for child in op.body.block.ops:
                     if child.name == "linalg.yield":
-                        output[index] = env[child.operands[0]]
+                        output[output_index] = env[child.operands[0]]
                     else:
                         scalar(child, env)
             values[op.results[0]] = output
@@ -329,57 +346,103 @@ def test_binary32_sign_words_preserve_nonfinite_payloads_without_quantization():
         assert [v & 0xFFFFFFFF for v in evaluate(source, [words])] == [v ^ 0x80000000 for v in words]
 
 
-@pytest.mark.parametrize('bits', [8, 16, 32])
-@pytest.mark.parametrize('cast', ['extui', 'extsi'])
-@pytest.mark.parametrize('wrap', [False, True])
+@pytest.mark.parametrize("bits", [8, 16, 32])
+@pytest.mark.parametrize("cast", ["extui", "extsi"])
+@pytest.mark.parametrize("wrap", [False, True])
 def test_width_changes_observe_the_source_ring(bits, cast, wrap):
     limit = 1 << (bits - 1)
-    body = (f'%s=arith.addi %a,%b : i{bits}\n' if wrap else '')
-    body += f'%v=arith.{cast} '+('%s' if wrap else '%a')+f' : i{bits} to i64'
-    source = parse_mlir_text('''module {
+    body = f"%s=arith.addi %a,%b : i{bits}\n" if wrap else ""
+    body += f"%v=arith.{cast} " + ("%s" if wrap else "%a") + f" : i{bits} to i64"
+    source = parse_mlir_text(
+        """module {
       func.func @forward(%x:tensor<4xI>,%y:tensor<4xI>) -> tensor<4xi64> {
         %e=tensor.empty() : tensor<4xi64>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,
+                      affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
         ins(%x,%y:tensor<4xI>,tensor<4xI>) outs(%e:tensor<4xi64>) {
           ^bb0(%a:I,%b:I,%unused:i64):
           BODY
           linalg.yield %v : i64
         } -> tensor<4xi64>
         func.return %r : tensor<4xi64>
-      }}'''.replace('BODY',body).replace('I',f'i{bits}'))
-    values=[-1,-limit,0,limit-1]; other=[1,-1,limit-1,1]
-    expected=evaluate(source,[values,other])
-    plans=rewrite_integer_components(source,limb_attribute='test.limb',input_bounds=[limit,limit])
+      }}""".replace("BODY", body).replace("I", f"i{bits}")
+    )
+    values = [-1, -limit, 0, limit - 1]
+    other = [1, -1, limit - 1, 1]
+    expected = evaluate(source, [values, other])
+    plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[limit, limit])
     assert plans
-    assert evaluate(source,[values,other])==expected
-    if not wrap and cast=='extui':assert expected==[(v % (1 << bits)) for v in values]
-    if wrap and cast=='extsi':assert expected[-1]==-limit
+    assert evaluate(source, [values, other]) == expected
+    if not wrap and cast == "extui":
+        assert expected == [(v % (1 << bits)) for v in values]
+    if wrap and cast == "extsi":
+        assert expected[-1] == -limit
 
 
-@pytest.mark.parametrize('bits', [8,16,32])
+@pytest.mark.parametrize("bits", [8, 16, 32])
 def test_truncation_before_signed_extension_keeps_its_modular_boundary(bits):
-    text=str(module('i64',f'%t=arith.trunci %a : i64 to i{bits}\n%v=arith.extsi %t : i{bits} to i64')).replace('iBITS',f'i{bits}')
-    source=parse_mlir_text(text)
-    values=[-(1 << 63), (1 << bits)-1, (1 << (bits-1)), (1 << (bits-1))-1]
-    expected=evaluate(source,[values,[0]*4])
-    assert rewrite_integer_components(source,limb_attribute='test.limb',input_bounds=[1<<63,0])
-    assert evaluate(source,[values,[0]*4])==expected
+    text = str(module("i64", f"%t=arith.trunci %a : i64 to i{bits}\n%v=arith.extsi %t : i{bits} to i64")).replace(
+        "iBITS", f"i{bits}"
+    )
+    source = parse_mlir_text(text)
+    values = [-(1 << 63), (1 << bits) - 1, (1 << (bits - 1)), (1 << (bits - 1)) - 1]
+    expected = evaluate(source, [values, [0] * 4])
+    assert rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[1 << 63, 0])
+    assert evaluate(source, [values, [0] * 4]) == expected
 
 
 def test_real_frontend_uint8_cast_review_repro():
-    torch=pytest.importorskip('torch')
-    m2m=pytest.importorskip('m2m')
+    torch = pytest.importorskip("torch")
+    m2m = pytest.importorskip("m2m")
+
     class Cast(torch.nn.Module):
-        def forward(self,x):return torch.ops.aten._to_copy.default(x,dtype=torch.int32)
-    values=torch.tensor([255,128,0,127],dtype=torch.uint8)
-    original=parse_mlir_text(str(m2m.convert(Cast(),(values,),backend='fx_importer',fully_standard=True).module))
-    assert rewrite_integer_components(original,limb_attribute='test.limb',input_bounds=[128])
-    assert evaluate(original,[[-1,-128,0,127]])==[255,128,0,127]
+        def forward(self, x):
+            return torch.ops.aten._to_copy.default(x, dtype=torch.int32)
+
+    values = torch.tensor([255, 128, 0, 127], dtype=torch.uint8)
+    original = parse_mlir_text(str(m2m.convert(Cast(), (values,), backend="fx_importer", fully_standard=True).module))
+    assert rewrite_integer_components(original, limb_attribute="test.limb", input_bounds=[128])
+    assert evaluate(original, [[-1, -128, 0, 127]]) == [255, 128, 0, 127]
 
 
 def test_late_width_pass_does_not_split_generated_quotient_plumbing():
     from merlin.llvmlower.integer_width_boundaries import preserve_integer_width_boundaries
-    source=module('i64','%q=arith.divsi %a,%b : i64\n%t=arith.trunci %q : i64 to i32\n%v=arith.extsi %t : i32 to i64')
-    before=str(source)
-    assert preserve_integer_width_boundaries(source)==0
-    assert str(source)==before
+
+    source = module(
+        "i64", "%q=arith.divsi %a,%b : i64\n%t=arith.trunci %q : i64 to i32\n%v=arith.extsi %t : i32 to i64"
+    )
+    before = str(source)
+    assert preserve_integer_width_boundaries(source) == 0
+    assert str(source) == before
+
+
+@pytest.mark.parametrize("coefficient", [(1 << 40) + 3, -(1 << 63) + 1, (1 << 63) - 1])
+def test_full_width_scalar_coefficients_use_exact_literal_planes(coefficient):
+    source = module("i64", f"%s=arith.constant {coefficient}:i64\n%v=arith.muli %a,%s:i64")
+    limit = 1 << 63
+    values = [-limit, limit - 1, -129, 128]
+    plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[limit, limit])
+    assert plans
+    expected = [((coefficient * a + limit) % (2 * limit)) - limit for a in values]
+    assert evaluate(source, [values, [0] * 4]) == expected
+
+
+@pytest.mark.parametrize("bits", [8, 32, 64])
+def test_named_sum_exposes_full_width_limb_reduction_and_modular_wrap(bits):
+    source = parse_mlir_text(
+        """module {
+      func.func @forward(%x:tensor<3x4xTYPE>) -> tensor<4xTYPE> {
+        %z=arith.constant 0:TYPE
+        %s=tensor.splat %z:tensor<4xTYPE>
+        %r=linalg.reduce ins(%x:tensor<3x4xTYPE>) outs(%s:tensor<4xTYPE>) dimensions=[0]
+          (%a:TYPE,%b:TYPE) { %v=arith.addi %a,%b:TYPE
+            linalg.yield %v:TYPE }
+        return %r:tensor<4xTYPE>
+      }}""".replace("TYPE", f"i{bits}")
+    )
+    limit = 1 << (bits - 1)
+    values = [[limit - 1, -limit, 127, -128]] * 3
+    plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[limit])
+    assert plans and not any(op.name == "linalg.reduce" for op in source.walk())
+    assert max(p["inputs"][0]["count"] for p in plans) == bits // 8
+    assert evaluate(source, [values]) == [((3 * a + limit) % (2 * limit)) - limit for a in values[0]]

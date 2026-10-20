@@ -399,6 +399,12 @@ def prepare_integer_components(
             # Sign/selection producers read raw storage words. They do not use a
             # numerical grid, even for signaling NaNs, infinities and signed zeros.
             bounds = [0 if b is None else b for b in bounds]
+    if semantics.get("method") == "typed_storage_and_modular_ring_v1":
+        from merlin.llvmlower.integer_division_components import rewrite_integer_divisions
+
+        added, divisions = rewrite_integer_divisions(module)
+        known_bounds.update(added)
+        typed_proofs.extend(divisions)
     plans = rewrite_integer_components(
         module,
         limb_attribute=limb_attribute,
@@ -408,14 +414,22 @@ def prepare_integer_components(
     observe("integer_components")
     if not plans:
         return None
+    from merlin.llvmlower.entry_weight_projection import _pure_dce
     from merlin.llvmlower.literal_zero_components import fold_literal_zero_components
 
+    unfolded = module.clone()
     folded_zero_producers = fold_literal_zero_components(module, limb_attribute)
-    observe("literal_zero_components")
-    from merlin.llvmlower.entry_weight_projection import _pure_dce
-
     for function in functions:
         _pure_dce(function)
+    if not any(limb_attribute in operation.attributes for operation in module.walk()):
+        # Keep the general exact producer if literal folding would erase every
+        # kernel while typed/IEEE readout still depends on runtime storage.
+        module = unfolded
+        functions = [op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward"]
+        for function in functions:
+            _pure_dce(function)
+        folded_zero_producers = 0
+    observe("literal_zero_components")
     remaining_products = unlowered_data_reductions(module, limb_attribute)
     if remaining_products:
         if quantized_contract is not None:
