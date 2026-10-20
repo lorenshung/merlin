@@ -619,8 +619,8 @@ def admission_plan(
         else "not_applicable",
         calibration=dict(
             mode="static_per_tensor",
-            source="calibration-on-evaluation-input",
-            disclosure="Scales are observed on this evaluation case's own inputs, not held-out calibration data.",
+            source="declared_observer_domain",
+            disclosure="Static observer ranges are declared by the numerical contract, independently of evaluation payloads.",
             performed=False,
         ),
         integer_reference=dict(status="not_run"),

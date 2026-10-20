@@ -440,6 +440,7 @@ def _prepare_spec_int8(
         loader.write_text(loader_source(source_case))
         recipe = dict(
             recipes[0],
+            calibration_domain=selection["spec"]["numerical_semantics"]["calibration_domain"],
             accumulator_dtype=selection["readout_facets"][0]["accumulator_dtype"],
             software_admission=selection["spec"],
             software_numerical_engine="integer_reference",

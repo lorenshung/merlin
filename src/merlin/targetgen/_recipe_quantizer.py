@@ -1358,17 +1358,24 @@ def apply_recipe(
         for observer in prepared.modules()
         if isinstance(observer, ObserverBase)
     ]
+    declared_domain = recipe.get("calibration_domain")
     samples = calibration_inputs if calibration_inputs is not None else (tuple(example_inputs),)
     calibrated = 0
     try:
         with torch.no_grad():
-            for sample in samples:
-                if calibrated >= calibration_samples:
-                    break
-                require_finite_calibration(sample)
-                prepared(*_as_tuple(sample))
-                calibrated += 1
-                require_finite_observer_state(prepared, ObserverBase, HistogramObserver, calibration_sample=calibrated)
+            if declared_domain is not None:
+                from merlin.targetgen.declared_calibration import initialize_observers
+
+                initialize_observers(prepared, declared_domain, ObserverBase)
+                calibrated = 1
+            else:
+                for sample in samples:
+                    if calibrated >= calibration_samples:
+                        break
+                    require_finite_calibration(sample)
+                    prepared(*_as_tuple(sample))
+                    calibrated += 1
+                    require_finite_observer_state(prepared, ObserverBase, HistogramObserver, calibration_sample=calibrated)
     finally:
         for check in observer_checks:
             check.remove()
@@ -1428,7 +1435,8 @@ def apply_recipe(
             "activation_observer": _observer_name(recipe["activation"], is_weight=False),
             "weight_observer": _observer_name(recipe["weight"], is_weight=True),
             "observer_epsilon": epsilon,
-            "calibration_source": "explicit_calibration_stream" if calibration_inputs is not None else "example_inputs",
+            "calibration_source": "declared_observer_domain" if declared_domain is not None else "explicit_calibration_stream" if calibration_inputs is not None else "example_inputs",
+            "calibration_domain": declared_domain,
             "calibration_count": calibrated,
         },
     }

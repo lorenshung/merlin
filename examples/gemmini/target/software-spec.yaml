@@ -209,6 +209,13 @@ placement_cost_model:
 # dequantization declaration is limited to its stated operand/result types and
 # ranks; it does not declare device execution or arbitrary shapes.
 numerical_semantics:
+  calibration_domain:
+    schema: merlin.declared_observer_domain.v1
+    status: authored_pending_operator_review
+    minimum: -1.0
+    maximum: 1.0
+    evaluation_inputs: never_read
+    provenance: authored fixed observer range for all static recipe tensors; values outside the range clamp at quantization
   component_domain:
     bounds: full_dtype_storage_domain
     runtime_input_specialization: forbidden
