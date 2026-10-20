@@ -223,12 +223,14 @@ def _prepare_spec_int8(
     from merlin.llvmlower.singleton_carriers import fold_singleton_carriers
     from merlin.llvmlower.singleton_reductions import fold_singleton_reductions
     from merlin.llvmlower.singleton_selectors import fold_singleton_selectors
+    from merlin.llvmlower.static_masked_sums import expose_static_masked_sums
 
     folds = fold_integer_image_predicates(module)
     folds += fold_empty_reductions(module)
     folds += fold_boolean_domain(module)
     folds += fold_singleton_reductions(module)
     folds += fold_singleton_selectors(module)
+    folds += expose_static_masked_sums(module)
     folds += fold_singleton_carriers(module)
     if folds:
         from merlin.llvmlower.entry_weight_projection import _pure_dce
