@@ -293,7 +293,7 @@ def precision_class(c, v):
     if v.truth != MUST:
         return "n/a_host"
     fp_in = any(dclass(t.dtype) in ("float", "complex") for t in c.ins)
-    if v.family in ("N1", "N2", "N3", "N3c"):
+    if v.family[:2] in ("N1", "N2", "N3"):
         return "quantized_exact" if fp_in else "bit_exact_vs_eager"
     # movement / identity: bit-exact unless a float-to-float conversion of the data is involved (then the
     # quantization rule applies: quantized_exact). Literal fills (N5) read no input data.

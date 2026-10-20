@@ -110,6 +110,11 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
                 json.dumps(dict(reason="parallel runtime product requires a composition")) + "\n"
             )
             return None
+    from merlin.llvmlower.exact_additive_recurrences import expose_exact_additive_recurrences
+
+    recurrence_source = str(module)
+    recurrence_sites = expose_exact_additive_recurrences(module, quantized_contract=contract)
+
     normalized = construction_evidence(
         module, excluded=selection["spec"]["numerical_semantics"]["native_unit_contract"]["excluded_constructions"]
     )
@@ -166,6 +171,15 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
         if process.returncode:
             raise ArithmeticError("independent quantized reference qualification failed: " + process.stderr[-3000:])
         reference = json.loads((directory / "quantized-native-reference.json").read_text())
+        if recurrence_sites:
+            import hashlib
+
+            plan["quantized_static_recurrence_proof"] = dict(
+                method="closed_index_reset_and_single_additive_backedge",
+                sites=recurrence_sites,
+                original_source_sha256=hashlib.sha256(recurrence_source.encode()).hexdigest(),
+                contract=contract["schema"],
+            )
         plan["precision_class"] = "b"
         plan["integer_reference"] = dict(
             status="prepared",

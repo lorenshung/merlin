@@ -363,6 +363,9 @@ def evaluate_operation(target, args, kwargs):
                 out += a[2]
         else:
             out = np.matmul(a[0], a[1])
+    elif op == "cumsum":
+        axis = args[1] if len(args) > 1 else kwargs["dim"]
+        out = np.cumsum(a[0], axis=axis, dtype=object)
     elif op in {"sum", "mean", "amax", "amin"}:
         axis = args[1] if len(args) > 1 else kwargs.get("dim")
         axis = None if axis is None or axis == [] else tuple(axis) if isinstance(axis, (list, tuple)) else axis
