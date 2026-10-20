@@ -317,7 +317,15 @@ def _layout_stages(ctx, module, pipeline, erase, mid=(), late=(), post_openmp=()
     passes = _fg_split(pipeline)
     if any(p.startswith("buffer-results-to-out-params") for p in passes):
         if has_inputs:
-            raise ValueError("cannot skip captured input-layout contract: pipeline uses buffer-results-to-out-params")
+            if not any(p.startswith("one-shot-bufferize") for p in passes):
+                raise ValueError("cannot apply captured input-layout contract: pipeline lacks one-shot-bufferize")
+            refuse_overlapping_input_aliases(contract)
+            with ctx:
+                _apply_input_layout(module, contract)
+        # This ABI copies logical results into caller-owned output parameters;
+        # it intentionally does not return frontend storage descriptors. Input
+        # layouts still govern every load and must reach bufferization intact.
+        del module.operation.attributes[key]
         return _layout_original_stages(ctx, module, pipeline, erase, mid, late, post_openmp, pre_generalize)
     buffers = [i for i, p in enumerate(passes) if p.startswith("one-shot-bufferize")]
     if not buffers:

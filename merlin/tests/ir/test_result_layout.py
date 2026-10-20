@@ -520,3 +520,51 @@ def test_materialized_borrowed_result_is_copied_before_return(stride):
     assert "memref.copy" in result.stdout
     assert result.stdout.index("memref.copy") < result.stdout.index("return ")
     assert "memref.reinterpret_cast %arg0" in result.stdout
+
+
+@pytest.mark.parametrize("strides,offset", [([5, 1], 0), ([1, 3], 2), ([0, 1], 1)])
+def test_captured_inputs_with_output_parameters(tmp_path, strides, offset):
+    """Out-params copy values while loads retain the captured physical layout."""
+    tmp_path = tmp_path / ("layout-" + "-".join(map(str, [*strides, offset])))
+    tmp_path.mkdir()
+    input_record = dict(shape=[3, 5], stride=strides, storage_offset=offset)
+    output_record = dict(shape=[3, 5], stride=[5, 1], storage_offset=0, alias_inputs=[])
+    source = (
+        "builtin.module"
+        + module_attribute(dict(inputs=[input_record], results=[output_record]))
+        + """ {
+      func.func @forward(%a: tensor<3x5xf32>) -> tensor<3x5xf32>
+          attributes {llvm.emit_c_interface} {
+        %empty = tensor.empty() : tensor<3x5xf32>
+        %result = linalg.generic {
+          indexing_maps = [affine_map<(d0,d1)->(d0,d1)>, affine_map<(d0,d1)->(d0,d1)>],
+          iterator_types = ["parallel", "parallel"]
+        } ins(%a : tensor<3x5xf32>) outs(%empty : tensor<3x5xf32>) {
+          ^bb0(%value: f32, %unused: f32):
+            %twice = arith.addf %value, %value : f32
+            linalg.yield %twice : f32
+        } -> tensor<3x5xf32>
+        func.return %result : tensor<3x5xf32>
+      }
+    }"""
+    )
+    path, library = tmp_path / "model.ll", tmp_path / "model.so"
+    path.write_text(lower_to_llvm_ir(source, workdir=tmp_path))
+    subprocess.run(
+        [str(clang()), "-shared", "-fPIC", "-O1", str(path), "-o", str(library)], check=True, capture_output=True
+    )
+    backing = np.arange(64, dtype=np.float32) - 7
+    saved = backing.copy()
+    output = np.full((3, 5), np.nan, np.float32)
+    arg = Descriptor(
+        backing.ctypes.data, backing.ctypes.data, offset, (ctypes.c_int64 * 2)(3, 5), (ctypes.c_int64 * 2)(*strides)
+    )
+    dest = Descriptor(output.ctypes.data, output.ctypes.data, 0, (ctypes.c_int64 * 2)(3, 5), (ctypes.c_int64 * 2)(5, 1))
+    entry = ctypes.CDLL(str(library))._mlir_ciface_forward
+    entry.argtypes = [ctypes.POINTER(Descriptor), ctypes.POINTER(Descriptor)]
+    entry(ctypes.byref(arg), ctypes.byref(dest))
+    expected = np.array(
+        [[2 * saved[offset + i * strides[0] + j * strides[1]] for j in range(5)] for i in range(3)], np.float32
+    )
+    assert output.tobytes() == expected.tobytes()
+    assert backing.tobytes() == saved.tobytes()
