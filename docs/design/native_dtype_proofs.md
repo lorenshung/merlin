@@ -191,3 +191,11 @@ addend before that boundary is not itself an offset-rounding implementation.
 The detector therefore does not treat typed narrowing as float-to-integer
 rounding. Integer rounding after a bias, magic-bias add/subtract constructions,
 and unknown storage forms retain their independent exclusions and proof gates.
+
+A reduction with no reduced axis, or only unit-extent reduced axes, has one
+contributing element per result. For an integer additive/Boolean-union monoid
+with a proved literal-zero seed, its complete body is the identity. The compiler
+rewrites this closed form to byte-preserving reshape before construction and
+movement admission. Multi-contribution Boolean unions still refuse. Captured
+scalar extraction/reassembly is storage structure and cannot impose an IEEE
+arithmetic obligation on integer reductions.

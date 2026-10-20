@@ -105,3 +105,46 @@ def test_boolean_storage_carriers_remain_pure_movement():
         return %r:tensor<4xi1>
       }}""")
     assert construction_evidence(module)["status"] == "eligible"
+
+
+@pytest.mark.parametrize("dtype,shape,dimensions", [("i1", "", ""), ("i1", "1x", "0"), ("i64", "", "")])
+def test_single_contribution_zero_seed_reduction_is_storage_movement(dtype, shape, dimensions):
+    from merlin.llvmlower.singleton_reductions import fold_singleton_reductions
+
+    operator = "ori" if dtype == "i1" else "addi"
+    literal = "false" if dtype == "i1" else "0:i64"
+    module = parse_mlir_text(
+        """module {
+      func.func @forward(%x:tensor<SHAPETYPE>) -> tensor<TYPE> {
+        %z=arith.constant ZERO
+        %s=tensor.splat %z:tensor<TYPE>
+        %r=linalg.reduce ins(%x:tensor<SHAPETYPE>) outs(%s:tensor<TYPE>) dimensions=[DIMS]
+          (%a:TYPE,%b:TYPE) { %v=arith.OP %a,%b:TYPE
+            linalg.yield %v:TYPE }
+        return %r:tensor<TYPE>
+      }}""".replace("SHAPE", shape)
+        .replace("TYPE", dtype)
+        .replace("ZERO", literal)
+        .replace("DIMS", dimensions)
+        .replace("OP", operator)
+    )
+    original = str(module)
+    assert construction_evidence(module, excluded=["multi_op_identity"])["status"] == "eligible"
+    assert str(module) == original
+    assert fold_singleton_reductions(module) == 1
+    assert not any(op.name in {"linalg.reduce", "arith.ori", "arith.addi"} for op in module.walk())
+    assert any(op.name == "tensor.reshape" for op in module.walk())
+
+
+def test_empty_shape_metadata_is_not_a_literal_element_splat():
+    from merlin.targetgen.core_aten_exact_dtype import _expose_literal_movement
+
+    module = parse_mlir_text("""module {
+      func.func @forward(%x:tensor<1xi1>) -> tensor<i1> {
+        %shape=arith.constant dense<>:tensor<0xi64>
+        %r=tensor.reshape %x(%shape):(tensor<1xi1>,tensor<0xi64>) -> tensor<i1>
+        return %r:tensor<i1>
+      }}""")
+    original = str(module)
+    _expose_literal_movement(module)
+    assert str(module) == original

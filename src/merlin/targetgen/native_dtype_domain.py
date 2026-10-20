@@ -99,6 +99,7 @@ def _storage_component_semantics(module):
         "tensor.reshape",
         "tensor.dim",
         "tensor.extract",
+        "tensor.from_elements",
         "tensor.extract_slice",
         "tensor.insert_slice",
         "tensor.concat",

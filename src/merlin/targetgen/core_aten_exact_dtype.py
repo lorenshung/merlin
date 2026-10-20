@@ -83,6 +83,8 @@ def _expose_literal_movement(module):
         if not isinstance(value, DenseIntOrFPElementsAttr):
             continue
         typ = op.results[0].type
+        if not prod(typ.get_shape()):
+            continue  # Empty shape metadata has no storage element to splat.
         widths = {"f16": 2, "bf16": 2, "f32": 4, "f64": 8}
         if str(typ.element_type) not in widths:
             if value.is_splat():
@@ -141,6 +143,9 @@ def prepare_bitwise(directory, report, selection, provider, package, module):
         return None
     if any(k.startswith("prov.quant.") for op in module.walk() for k in op.attributes):
         return None
+    from merlin.llvmlower.singleton_reductions import fold_singleton_reductions
+
+    fold_singleton_reductions(module)
     # These operations cannot be byte selectors even when a later copy matches.
     if any(
         op.name in {"linalg.matmul", "linalg.batch_matmul", "linalg.reduce"}

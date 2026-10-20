@@ -247,7 +247,7 @@ class Payloads:
             if consumer.name in {"linalg.generic", "linalg.reduce"}:
                 inputs = consumer.inputs if consumer.name == "linalg.generic" else (consumer.input,)
                 if use.index < len(inputs):
-                    children.append(consumer.body.block.args[use.index])
+                    children.append(consumer.regions[0].block.args[use.index])
         return tuple(children)
 
     def patterns(self, op):

@@ -182,6 +182,13 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
                 else None
             )
             expressions[arg] = ({}, attr.value.data) if isinstance(attr, IntegerAttr) else ({i: 1}, 0)
+        from merlin.llvmlower.additive_regions import positive_zero_seed
+
+        for arg, seed in zip(block.args[len(op.inputs) :], op.outputs):
+            if positive_zero_seed(seed):
+                # With no reduction dimensions this is one read of a literal
+                # seed per output, including the rank-zero additive identity.
+                expressions[arg] = ({}, 0)
         for child in block.ops:
             if child.name == "linalg.yield":
                 return expressions.get(child.operands[0])

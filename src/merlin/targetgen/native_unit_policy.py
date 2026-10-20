@@ -8,8 +8,16 @@ express them with contractions. Index arithmetic remains address selection.
 
 
 def construction_evidence(module, *, excluded=None):
+    from merlin.llvmlower.singleton_reductions import fold_singleton_reductions
     from merlin.targetgen.native_construction_patterns import Payloads, dataflow
 
+    # Classify the canonical arithmetic role, without mutating source bytes.
+    # A one-contribution monoid identity is storage movement, not a predicate
+    # implementation. The emitted movement path repeats this exact proof.
+    if any(operation.name == "linalg.reduce" for operation in module.walk()):
+        canonical = module.clone()
+        if fold_singleton_reductions(canonical):
+            module = canonical
     evidence = []
     payloads = Payloads(module)
 
@@ -72,7 +80,7 @@ def construction_evidence(module, *, excluded=None):
         operands = owner.operands[1:] if name == "arith.select" else owner.operands
         return tuple(operands)
 
-    from merlin.targetgen.native_payload_carriers import LiteralPayloads, TABLE, UNKNOWN
+    from merlin.targetgen.native_payload_carriers import TABLE, UNKNOWN, LiteralPayloads
 
     literal_payloads = LiteralPayloads()
 
@@ -119,7 +127,10 @@ def construction_evidence(module, *, excluded=None):
         # An unrelated reduction elsewhere in the module grants no exemption.
         if not any(payloads.contraction_dependent(v) for v in op.operands):
             evidence.append(dict(ordinal=ordinal, operation=op.name, reason="parallel_runtime_product_construction"))
-    selected = evidence if excluded is None else [entry for entry in evidence if entry["reason"] in excluded or entry["reason"] == "unproved_payload_carrier"]
+    selected = evidence if excluded is None else [
+        entry for entry in evidence
+        if entry["reason"] in excluded or entry["reason"] == "unproved_payload_carrier"
+    ]
     return dict(
         schema="merlin.native_unit_policy.v1",
         status="host" if selected else "eligible",
