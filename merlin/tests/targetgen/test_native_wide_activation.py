@@ -66,11 +66,12 @@ def test_generated_host_codecs_and_native_byte_relu_prove_full_word_domain(tmp_p
 
     captured = []
 
-    def compile(*args):
+    def compile(*args, **kwargs):
         module, root, data, binding = args[5:]
         module.verify()
         assert construction_evidence(module)["status"] == "eligible"
         assert data.owner.name == "tensor.concat"
+        assert kwargs == dict(storage_movements=(data.owner,))
         assert root.inputs[0] is data
         assert binding == dict(op_ordinal=list(module.walk()).index(data.owner), result=0)
         captured.append(module)

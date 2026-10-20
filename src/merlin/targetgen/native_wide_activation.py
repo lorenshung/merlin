@@ -131,6 +131,7 @@ def prepare(directory, report, selection, provider, package, module):
         activation,
         data,
         dict(op_ordinal=operations.index(data.owner), result=0),
+        storage_movements=(data.owner,),
     )
     if plan is None:
         return None

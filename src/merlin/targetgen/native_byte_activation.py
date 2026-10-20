@@ -134,7 +134,9 @@ def prepare(directory, report, selection, provider, package, module):
     return compile_activation(directory, report, selection, provider, package, module, root, argument, {"func_arg": 0})
 
 
-def compile_activation(directory, report, selection, provider, package, module, root, argument, operand_binding):
+def compile_activation(
+    directory, report, selection, provider, package, module, root, argument, operand_binding, *, storage_movements=()
+):
     """Authenticate one unit in a caller-proved representation program."""
     from pathlib import Path
 
@@ -184,9 +186,39 @@ def compile_activation(directory, report, selection, provider, package, module, 
             raise ValueError("activation lacks a compiled source-bound catalog")
         operations = list(module.walk())
         ordinal = operations.index(root)
-        if len(manifest["bindings"]) != 1 or len(manifest["kernels"]) != 1:
-            raise ValueError("activation requires exactly one complete provider unit")
-        binding, kernel = manifest["bindings"][0], manifest["kernels"][0]
+        bindings = {b["root_ordinal"]: b for b in manifest["bindings"]}
+        kernels = {k["symbol"]: k for k in manifest["kernels"]}
+        if len(bindings) != len(manifest["bindings"]) or set(bindings) != {
+            ordinal,
+            *(operations.index(op) for op in storage_movements),
+        }:
+            raise ValueError("activation requires exactly its proved native unit and storage movements")
+        if set(kernels) != {b["symbol"] for b in bindings.values()}:
+            raise ValueError("activation catalog has missing or extra kernels")
+        for movement in storage_movements:
+            moved = bindings[operations.index(movement)]
+            numeric = moved.get("numeric", {})
+            meta = kernels[moved["symbol"]].get("meta", {})
+            if (
+                movement.name != "tensor.concat"
+                or numeric.get("family") != "F1"
+                or numeric.get("quantization") != "none"
+                or numeric.get("exact_arithmetic") is not True
+                or numeric.get("byte_order") != "little"
+                or meta.get("proof") != "closed_static_element_selectors"
+                or meta.get("readout") != "scratchpad_bytes"
+            ):
+                raise ValueError("activation packing has no exact byte-selector proof")
+            expected_inputs = {
+                f"x{i}": dict(op_ordinal=operations.index(v.owner), result=v.index)
+                for i, v in enumerate(movement.operands)
+            }
+            if moved.get("operands") != expected_inputs or moved.get("result") != {
+                "y": dict(op_ordinal=operations.index(movement), result=0)
+            }:
+                raise ValueError("activation packing is bound to different storage")
+        binding = bindings[ordinal]
+        kernel = kernels[binding["symbol"]]
         if binding["root_ordinal"] != ordinal or binding["symbol"] != kernel["symbol"]:
             raise ValueError("activation provider bound a different source result")
         if binding.get("operands") != {"x": operand_binding} or binding.get("result") != {
