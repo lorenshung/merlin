@@ -375,3 +375,11 @@ def test_real_frontend_uint8_cast_review_repro():
     original=parse_mlir_text(str(m2m.convert(Cast(),(values,),backend='fx_importer',fully_standard=True).module))
     assert rewrite_integer_components(original,limb_attribute='test.limb',input_bounds=[128])
     assert evaluate(original,[[-1,-128,0,127]])==[255,128,0,127]
+
+
+def test_late_width_pass_does_not_split_generated_quotient_plumbing():
+    from merlin.llvmlower.integer_width_boundaries import preserve_integer_width_boundaries
+    source=module('i64','%q=arith.divsi %a,%b : i64\n%t=arith.trunci %q : i64 to i32\n%v=arith.extsi %t : i32 to i64')
+    before=str(source)
+    assert preserve_integer_width_boundaries(source)==0
+    assert str(source)==before
