@@ -545,6 +545,9 @@ def run(model, inputs):
                 codes = quantize(value, scale, zp, low, high, axis=axis, nonfinite=boundary_policy)
                 return torch.tensor(codes.tolist(), dtype=dtype).reshape(codes.shape)
             leaves = torch.utils._pytree.tree_leaves((args, kwargs))
+            if name == "aten.isnan.default" and isinstance(args[0], ExactTensor):
+                values = np.vectorize(lambda x: not isinstance(x, Fraction) and math.isnan(float(x)), otypes=[bool])(args[0].values)
+                return torch.tensor(values, dtype=torch.bool)
             if name == "aten.where.self" and any(isinstance(x, ExactTensor) for x in leaves):
                 def storage(value):
                     return value.values if isinstance(value, ExactTensor) else value.detach().cpu().numpy() if isinstance(value, torch.Tensor) else value

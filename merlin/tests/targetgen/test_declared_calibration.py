@@ -9,7 +9,8 @@ def test_program_qparams_and_integer_kernel_are_payload_independent():
     from merlin.capture.integerization import integerize_static_pt2e
 
     class Model(torch.nn.Module):
-        def forward(self,x,y):return x @ y
+        def forward(self,x,y):
+            return x @ y
 
     recipe=dict(schema='quant_recipe_v1',status='derived',families=['contraction'],
         weight=dict(dtype='int8',granularity='tensor',symmetric=True,quant_min=-127,quant_max=127),
@@ -50,3 +51,26 @@ def test_declared_nonfinite_byte_boundary_matches_every_half_nan_word(token,low,
     assert got.tolist()==expected.tolist()
     with pytest.raises(ValueError,match='finite rational'):
         quantize(special,0.015625,0,low,high)
+
+
+def test_rational_aggregate_can_feed_a_declared_nan_selector():
+    torch=pytest.importorskip('torch')
+    import torch.ao.quantization.fx._decomposed
+    from merlin.targetgen.exact_quantized_reference import run
+    graph=torch.fx.Graph()
+    source=graph.placeholder('x')
+    quant=graph.call_function(torch.ops.quantized_decomposed.quantize_per_tensor.default,(source,.015625,0,-128,127,torch.int8))
+    real=graph.call_function(torch.ops.quantized_decomposed.dequantize_per_tensor.default,(quant,.015625,0,-128,127,torch.int8))
+    pooled=graph.call_function(torch.ops.aten.avg_pool2d.default,(real,[2,2]))
+    mask=graph.call_function(torch.ops.aten.isnan.default,(pooled,))
+    fill=graph.call_function(torch.ops.aten.full_like.default,(pooled,0.))
+    selected=graph.call_function(torch.ops.aten.where.self,(mask,fill,pooled))
+    quant=graph.call_function(torch.ops.quantized_decomposed.quantize_per_tensor.default,(selected,.015625,0,-128,127,torch.int8))
+    result=graph.call_function(torch.ops.quantized_decomposed.dequantize_per_tensor.default,(quant,.015625,0,-128,127,torch.int8))
+    graph.output(result)
+    model=torch.fx.GraphModule(torch.nn.Module(),graph)
+    model._recipe_quantization_stats={'framework_capture_policy':{'quantization_nonfinite':'byte_storage_zero_nan_saturating_infinity'}}
+    for value in (0.,1.e30,float('inf'),float('nan')):
+        inputs=(torch.full((1,1,2,2),value),)
+        expected=run(model,inputs).output
+        assert torch.equal(expected.view(torch.uint8),model(*inputs).view(torch.uint8))
