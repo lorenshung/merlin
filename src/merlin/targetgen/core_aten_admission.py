@@ -84,6 +84,12 @@ def prepare(directory, report, implementation, **kwargs):
         admission.update(status="host", reason_code="non_native_unit_construction")
     if not admission["native_unit_operator_review"]["operator_accepted"]:
         admission.update(status="host", reason_code="native_unit_operator_acceptance_required")
+    from merlin.targetgen.native_precision_contract import proves_quantized_model, requires_quantized_model
+
+    if requires_quantized_model(original_report):
+        admission["precision_class"] = "quantized_exact"
+        if not proves_quantized_model(plan, software):
+            admission.update(status="host", reason_code="declared_quantized_precision_requires_quantized_model")
     # Static descriptor queries are exported through a tensor wrapper, but
     # carry no tensor data. A capture-owned proof distinguishes them from real
     # literal fills and rank-zero tensor arithmetic without an overload roster.
