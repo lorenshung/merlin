@@ -22,7 +22,7 @@ def test_selected_board_facts_and_unknown_upload_fail_closed(monkeypatch):
     entries = boards.load_boards(repo_root() / CATALOG)
     experiment = load_target_experiment(repo_root() / "examples/gemmini/target/descriptor.yaml")
     assert experiment.host_board == "gemmini_rocket_verilator"
-    assert set(entries) == {"gemmini_rocket_verilator", "firesim_gemmini_rocket_u250_30mhz"}
+    assert set(entries) == {"gemmini_rocket_verilator", "firesim_gemmini_rocket_u250_default"}
     assert [entries[name].dram_bytes for name in sorted(entries)] == [16 << 30, 256 << 20]
     for selected in entries.values():
         assert selected.target == "gemmini"
@@ -62,7 +62,7 @@ def test_selected_board_facts_and_unknown_upload_fail_closed(monkeypatch):
             "chipyard.harness.TestHarness.GemminiRocketConfig.dts",
         ),
         (
-            "firesim_gemmini_rocket_u250_30mhz",
+            "firesim_gemmini_rocket_u250_default",
             "sims/firesim-staging/generated-src/"
             "firechip.chip.FireSim.FireSimGemminiRocketConfig/"
             "firechip.chip.FireSim.FireSimGemminiRocketConfig.dts",
