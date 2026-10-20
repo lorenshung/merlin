@@ -128,6 +128,11 @@ def fold_zero_sign_selectors(module):
                 and bits % (1 << width) == 1 << (width - 1)
             ):
                 Rewriter.replace_op(op, [], [data])
+                # Only remove the proved, now-dead scalar wiring. Unknown
+                # effects and other region operations retain their identity.
+                for dead in (cast, mask, raw, predicate):
+                    if all(not value.uses for value in dead.results):
+                        Rewriter.erase_op(dead)
                 count += 1
                 break
     return count

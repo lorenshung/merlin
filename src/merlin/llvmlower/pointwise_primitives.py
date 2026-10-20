@@ -101,7 +101,12 @@ def expose_pointwise_primitives(module, *, integer_boundaries=False):
         if any(child.name not in allowed for child in body.ops):
             continue
         arithmetic = [child for child in body.ops if child.name not in {"arith.constant", "linalg.yield"}]
-        if len(arithmetic) <= 1:
+        scalar_literal_operand = (
+            len(arithmetic) == 1
+            and arithmetic[0].name in {"arith.addf", "arith.subf", "arith.mulf", "arith.divf"}
+            and any(getattr(value.owner, "name", None) == "arith.constant" for value in arithmetic[0].operands)
+        )
+        if len(arithmetic) <= 1 and not scalar_literal_operand:
             continue
         # A closed word predicate has no floating arithmetic boundary to expose.
         # In particular, literal casts belong to that predicate, not its data path.

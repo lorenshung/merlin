@@ -53,6 +53,9 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
     ):
         return None
     module = parse_mlir_file(directory / "model.mlir")
+    from merlin.llvmlower.empty_reductions import fold_empty_reductions
+
+    fold_empty_reductions(module)
     from merlin.targetgen.entry_output_movement import expose_argument_results
 
     # User results carry the requested output quantization even when their
