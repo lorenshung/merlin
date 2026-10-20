@@ -319,6 +319,13 @@ def _prepare_spec_int8(
     )
     if components is not None:
         return components
+    from merlin.targetgen.native_quantized_activation import prepare as prepare_quantized_activation
+
+    activation = prepare_quantized_activation(
+        directory, report, selection, provider, package, parse_mlir_file(directory / "model.mlir")
+    )
+    if activation is not None:
+        return activation
     from merlin.targetgen.core_aten_exact_dtype import native_dtype_request, retain_native_host
 
     if native_dtype_request(report):

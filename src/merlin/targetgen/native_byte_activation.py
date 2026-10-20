@@ -94,12 +94,8 @@ def audit_program(text, symbol):
 
 
 def prepare(directory, report, selection, provider, package, module):
-    from pathlib import Path
-
     from xdsl.ir.affine import AffineMap
 
-    from merlin.targetgen.software_spec import admit_operation
-    from merlin.targetgen.transfer_contracts import screen_transfer_contract
     from merlin.xdsl_dialects.lowering.contraction_coverage import is_compare_select_relu
 
     if not callable(getattr(provider, "core_aten_catalog", None)):
@@ -134,6 +130,19 @@ def prepare(directory, report, selection, provider, package, module):
     if returned.name != "func.return" or root.results[0] not in returned.operands:
         return None
     if any(v is not argument and v is not root.results[0] for v in returned.operands):
+        return None
+    return compile_activation(directory, report, selection, provider, package, module, root, argument, {"func_arg": 0})
+
+
+def compile_activation(directory, report, selection, provider, package, module, root, argument, operand_binding):
+    """Authenticate one unit in a caller-proved representation program."""
+    from pathlib import Path
+
+    from merlin.targetgen.software_spec import admit_operation
+    from merlin.targetgen.transfer_contracts import screen_transfer_contract
+
+    mesh = selection["spec"].get("numerical_semantics", {}).get("native_unit_contract", {}).get("mesh_mac", {})
+    if mesh.get("signed_bits") != 20:
         return None
     signature = dict(
         family="elementwise_map",
@@ -180,7 +189,7 @@ def prepare(directory, report, selection, provider, package, module):
         binding, kernel = manifest["bindings"][0], manifest["kernels"][0]
         if binding["root_ordinal"] != ordinal or binding["symbol"] != kernel["symbol"]:
             raise ValueError("activation provider bound a different source result")
-        if binding.get("operands") != {"x": {"func_arg": 0}} or binding.get("result") != {
+        if binding.get("operands") != {"x": operand_binding} or binding.get("result") != {
             "y": {"op_ordinal": ordinal, "result": 0}
         }:
             raise ValueError("activation kernel arguments do not bind the complete source values")
