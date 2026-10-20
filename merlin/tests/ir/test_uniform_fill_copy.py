@@ -1,14 +1,11 @@
-"""Private uniform buffers may be replaced by exact destination stores only."""
+"""Default copy lowering preserves storage bits, strided tails and guards.
 
-import json
+The optional performance rewrite was removed; these exactness checks now
+exercise the ordinary upstream copy implementation.
+"""
 import subprocess
-from pathlib import Path
-
 import numpy as np
 import pytest
-
-from merlin.llvmlower.uniform_fill_copy import RUNNER_PRELUDE
-
 
 def fixture(kind="i8"):
     return f"""module {{
@@ -29,27 +26,6 @@ def fixture(kind="i8"):
   }}
 }}"""
 
-
-def transform(tmp_path, source):
-    from merlin.llvmlower.toolchain import m2m_python
-
-    src = tmp_path / "input.mlir"
-    dst = tmp_path / "output.mlir"
-    script = tmp_path / "rewrite.py"
-    src.write_text(source)
-    script.write_text(
-        "from torch_mlir import ir\nfrom pathlib import Path\n"
-        + RUNNER_PRELUDE
-        + "\nctx=ir.Context()\nwith ctx:\n m=ir.Module.parse(Path("
-        + repr(str(src))
-        + ").read_text())\n before=str(m)\n n=_fold_uniform_fill_copies(ctx,m)\n m.operation.verify()\n Path("
-        + repr(str(dst))
-        + ").write_text(str(m))\n print(n)\n"
-    )
-    p = subprocess.run([str(m2m_python()), str(script)], capture_output=True, text=True, check=True)
-    return int(p.stdout.strip()), dst.read_text()
-
-
 @pytest.mark.parametrize(
     "kind,bits", [("i8", [0, 127, 128, 255]), ("f32", [0, 0x80000000, 0x7FC12345, 0x7F800001, 0x3F812345])]
 )
@@ -60,8 +36,7 @@ def test_native_strided_fills_preserve_all_bits_and_untouched_regions(tmp_path, 
     from merlin.llvmlower.toolchain import clang
 
     source = fixture(kind)
-    count, folded = transform(tmp_path, source)
-    assert count == 2 and "memref.copy" not in folded and "memref.alloc" not in folded
+    folded = source
     unsigned = np.uint8 if kind == "i8" else np.uint32
     dtype = np.int8 if kind == "i8" else np.float32
     for label, ir in [("control", source), ("candidate", folded)]:
@@ -89,76 +64,3 @@ def test_native_strided_fills_preserve_all_bits_and_untouched_regions(tmp_path, 
             for _ in range(3):
                 invoke([(value.ctypes.data, value.shape), (out.ctypes.data, out.shape)])
                 np.testing.assert_array_equal(backing, expected)
-
-
-@pytest.mark.parametrize(
-    "change", ["alias", "external", "read_old", "nonidentity", "write_after", "nested_copy", "before_fill"]
-)
-def test_refuses_unproven_ownership_uniformity_or_order(tmp_path, change):
-    source = fixture()
-    if change == "alias":
-        source = source.replace(
-            "    %left =", "    %alias = memref.cast %tmp : memref<2x3xi8> to memref<?x?xi8>\n    %left ="
-        )
-    elif change == "external":
-        source = source.replace("module {", "module {\n func.func private @escape(memref<2x3xi8>)").replace(
-            "    %left =", "    func.call @escape(%tmp) : (memref<2x3xi8>) -> ()\n    %left ="
-        )
-    elif change == "read_old":
-        source = source.replace("linalg.yield %v : i8", "linalg.yield %old : i8")
-    elif change == "nonidentity":
-        source = source.replace("affine_map<(i,j)->(i,j)>", "affine_map<(i,j)->(j,i)>")
-    elif change == "write_after":
-        source = source.replace("    %left =", "    memref.store %v,%tmp[%c0,%c0] : memref<2x3xi8>\n    %left =")
-    elif change == "nested_copy":
-        source = source.replace(
-            "    memref.copy %tmp,%left",
-            "    %yes = arith.constant true\n    scf.if %yes {\n    memref.copy %tmp,%left",
-        ).replace("    %right =", "    }\n    %right =")
-    elif change == "before_fill":
-        begin = source.index("    linalg.generic")
-        end = source.index("    %left =")
-        writer = source[begin:end]
-        source = source[:begin] + source[end:]
-        source = source.replace("    %right =", writer + "    %right =")
-    count, out = transform(tmp_path, source)
-    assert count == 0 and "memref.copy" in out
-
-
-def test_optional_normal_pipeline_hook_and_default_identity(tmp_path):
-    from merlin.llvmlower.impr_features import normalize
-    from merlin.llvmlower.pipeline import lower_to_llvm_ir
-
-    source = fixture()
-    source = "\n".join(line for line in source.splitlines() if "memref.dealloc" not in line)
-    assert "fold_uniform_fill_copy" not in normalize(set())
-    baseline = lower_to_llvm_ir(source, workdir=tmp_path / "off", vectorize=False)
-    candidate = lower_to_llvm_ir(
-        source, workdir=tmp_path / "on", vectorize=False, features=frozenset({"fold_uniform_fill_copy"})
-    )
-    assert "call void @memrefCopy" in baseline
-    assert "call void @memrefCopy" not in candidate
-    assert baseline == lower_to_llvm_ir(source, workdir=tmp_path / "off_again", vectorize=False)
-
-
-@pytest.mark.parametrize(
-    "stdout",
-    [
-        "",
-        "OK fold_uniform_fill_copy -1",
-        "OK fold_uniform_fill_copy x",
-        "OK fold_uniform_fill_copy 2\nOK fold_uniform_fill_copy 3",
-    ],
-)
-def test_selected_feature_requires_a_complete_count_report(tmp_path, stdout):
-    from merlin.llvmlower.uniform_fill_copy import require_report
-
-    with pytest.raises(ValueError):
-        require_report(stdout, tmp_path)
-
-
-def test_zero_matches_is_an_explicit_valid_report(tmp_path):
-    from merlin.llvmlower.uniform_fill_copy import require_report
-
-    assert require_report("OK fold_uniform_fill_copy 0", tmp_path)["copies_folded"] == 0
-    assert json.loads((tmp_path / "uniform_fill_copy.json").read_text())["copies_folded"] == 0

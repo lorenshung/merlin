@@ -1,8 +1,7 @@
 """Structural specification of the frontend exact readout body.
 
-Adapted from model2mlir m2m/ir/exact_quant.py. This builds the unoptimized
-arithmetic solely to check source semantics before replacing a scalar body.
-Keep this independent of the installed frontend; a changed body falls back.
+Adapted from model2mlir m2m/ir/exact_quant.py. This independent test fixture builds the plain exact
+rational readout, exercising its emitted arithmetic without an optimization.
 """
 
 from fractions import Fraction
@@ -242,7 +241,7 @@ def build_readout(
     from xdsl.dialects.linalg.ops import IndexOp
     from xdsl.ir.affine import AffineMap
 
-    from merlin.llvmlower.exact_readout_source import _broadcast_map, _elementwise
+    from exact_readout_source import _broadcast_map, _elementwise
 
     if beta == 0:
         bias = None  # addmm beta=0 ignores self, including NaN/inf.

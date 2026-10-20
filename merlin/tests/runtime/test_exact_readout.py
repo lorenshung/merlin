@@ -137,3 +137,32 @@ def test_full_int32_readout_cannot_silently_ignore_a_zero_point():
                 output_dtype="i32",
             ),
         )
+
+
+def test_plain_rational_random_full_int32_and_adversarial_boundaries():
+    import random
+    from merlin.runtime.exact_readout import round_rational_codes
+
+    rng = random.Random(7234)
+    ratios = [Fraction(1, 1 << 149), Fraction(1 << 127), Fraction(1, 3), Fraction(17, 31), Fraction(0xFFFFFF, 1 << 24)]
+    ratios += [Fraction(rng.randrange(1, 1 << 24), rng.randrange(1, 1 << 24)) for _ in range(60)]
+    for scale in ratios:
+        bias = Fraction(rng.randrange(-500, 500), rng.randrange(1, 40))
+        zero = rng.randrange(255)
+        points = {-(1 << 31), (1 << 31) - 1, 0}
+        for code in range(-zero, 256-zero):
+            boundary = int((Fraction(2*code+1, 2)-bias) / scale)
+            points.update(v for v in (boundary-1, boundary, boundary+1) if -(1 << 31) <= v < 1 << 31)
+        points.update(rng.randrange(-(1 << 31), 1 << 31) for _ in range(50))
+        values = [x*scale+bias for x in points]
+        expected = [min(255,max(0,round(v)+zero)) for v in values]
+        assert round_rational_codes(values, zero, 0, 255).tolist() == expected
+
+
+def test_plain_rational_exhaustive_small_domain():
+    from merlin.runtime.exact_readout import round_rational_codes
+
+    for scale in [Fraction(1,2), Fraction(3,8), Fraction(5,7), Fraction(1), Fraction(2), Fraction(17,31)]:
+        for bias in [Fraction(0), Fraction(-1,2), Fraction(7,3)]:
+            values = [x*scale+bias for x in range(-1024,1025)]
+            assert round_rational_codes(values,123,1,255).tolist() == [min(255,max(1,round(v)+123)) for v in values]

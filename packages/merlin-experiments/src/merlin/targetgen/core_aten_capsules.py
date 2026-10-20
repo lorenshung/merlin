@@ -76,6 +76,7 @@ def write_capsules(
     tiers=("L2",),
     numeric_flow=None,
     workers=1,
+    admission_lanes=False,
 ):
     """Write one capsule per case, using precisely the round-2 result projection.
 
@@ -84,6 +85,8 @@ def write_capsules(
     """
     if type(workers) is not int or not 1 <= workers <= 8:
         raise ValueError("capsule workers must be an integer in 1..8")
+    if admission_lanes and numeric_flow is None:
+        raise ValueError("admission-derived lanes require numeric_flow")
     public, private, captures = public.resolve(), private.resolve(), captures.resolve()
     if private.is_relative_to(public) or public.is_relative_to(private):
         raise ValueError("public inputs and private answers require disjoint roots")
@@ -100,7 +103,7 @@ def write_capsules(
     # small window of single-case documents; a full-suite copy per task is quadratic.
     metadata = {key: value for key, value in corpus.items() if key not in {"cases", "selected_cases"}}
     tasks = (
-        ({**metadata, "cases": [case]}, captures, public, private, label, tiers, numeric_flow)
+        ({**metadata, "cases": [case]}, captures, public, private, label, tiers, numeric_flow, admission_lanes)
         for case in corpus["cases"]
     )
     if workers == 1:
@@ -145,7 +148,7 @@ def _try_write_case(task):
 
 
 def _write_case(task):
-    corpus, captures, public, private, label, tiers, numeric_flow = task
+    corpus, captures, public, private, label, tiers, numeric_flow, admission_lanes = task
     case = corpus["cases"][0]
     capture_name = case_capture_name(case)
     name = capture_name.replace("-", "_")
@@ -169,8 +172,15 @@ def _write_case(task):
             case, capture
         ):
             raise ValueError(f"full-call interface lacks exact overload provenance: {name}")
+        admission = None
         if numeric_flow is not None:
-            prepare_numeric_fixture(bundle, report, numeric_flow)
+            admission = prepare_numeric_fixture(bundle, report, numeric_flow, require_device=not admission_lanes)
+        device = admission is not None and _device_fixture(admission)
+        if admission_lanes and not device:
+            # Refused numeric preparations cannot alter the original host ABI.
+            # Rebuild the raw call, preserving the precise admission decision.
+            report = build_core_aten_batch({**corpus, "cases": [case]}, captures, bundle)
+            numeric_flow = None
         destination.mkdir(mode=0o700 if label == "hidden" else 0o755)
         answers.mkdir(mode=0o700)
         shutil.copyfile(bundle / "model.mlir", destination / "capsule.interface.mlir")
@@ -255,6 +265,10 @@ def _write_case(task):
             for path in destination.iterdir():
                 path.chmod(0o600)
         return {
+            **(
+                {"lane_expectation": "device" if device else "host-guard", "native_admission": admission}
+                if admission_lanes else {}
+            ),
             "id": name,
             "overload": case["overload"],
             "case_id": case.get("case_id", case["overload"]),
@@ -274,7 +288,8 @@ def _write_case(task):
 def _native_fixture(plan: dict) -> bool:
     """The same complete native proof required at preparation and readback."""
     return (
-        plan.get("numerical_family") in {"F1", "F2", "F4", "F5"}
+        plan.get("native_admission", {}).get("status") != "host"
+        and plan.get("numerical_family") in {"F1", "F2", "F4", "F5"}
         and plan.get("status") == "admitted"
         and plan.get("exact_dtype_sites", 0) > 0
         and (plan.get("host_floor") or {}).get("status") == "required"
@@ -284,7 +299,18 @@ def _native_fixture(plan: dict) -> bool:
     )
 
 
-def prepare_numeric_fixture(bundle: Path, report: dict, flow: dict) -> None:
+def _device_fixture(plan: dict) -> bool:
+    if plan.get("native_admission", {}).get("status") == "host":
+        return False
+    admitted = sum(
+        plan.get(key, 0) or 0
+        for key in ("quantized_contractions", "native_contractions", "quantized_non_contraction_sites")
+    )
+    return _native_fixture(plan) or (
+        admitted > 0 and (plan.get("integer_reference") or {}).get("status") == "prepared")
+
+
+def prepare_numeric_fixture(bundle: Path, report: dict, flow: dict, *, require_device=True) -> dict:
     """Freeze a selected declared chain and independent reference, never candidate answers."""
     from merlin.targetgen.core_aten_device import load_execution_provider, selected_facts
     from merlin.targetgen.core_aten_numeric import prepare_spec_int8
@@ -307,22 +333,7 @@ def prepare_numeric_fixture(bundle: Path, report: dict, flow: dict) -> None:
     # already i8 x i8 -> i32 is admitted as is (native_contractions); a contraction-free program's
     # int8 sites are admitted as quantized islands (quantized_non_contraction_sites). Each needs the
     # independent exact integer reference.
-    admitted = (
-        (plan.get("quantized_contractions") or 0)
-        + (plan.get("native_contractions") or 0)
-        + (plan.get("quantized_non_contraction_sites") or 0)
-    )
-    native = _native_fixture(plan)
-    if (
-        plan.get("placement_cost", {}).get("status") == "host"
-        and plan["placement_cost"].get("reason_code") != "no_admitted_device_candidate"
-    ):
-        raise NumericFixtureError(
-            "scored capsule requires device placement but the cost model retained host execution: "
-            + plan["placement_cost"]["reason_code"],
-            plan,
-        )
-    if not native and (not admitted or (plan.get("integer_reference") or {}).get("status") != "prepared"):
+    if require_device and not _device_fixture(plan):
         raise NumericFixtureError(
             "scored capsule has no admitted contraction with an exact integer reference: "
             + str(
@@ -343,6 +354,7 @@ def prepare_numeric_fixture(bundle: Path, report: dict, flow: dict) -> None:
     report["numeric_preparation"] = plan
     for record in report["cases"]:
         record["numeric_policy"] = flow["policy"]
+    return plan
 
 
 def load_private(capsule: dict, private_root: Path | None = None) -> dict:
@@ -405,7 +417,7 @@ def grade_readback(
         plan = report.get("numeric_preparation", {})
         reference_passed = row.get("integer_reference", {}).get("status") == "pass" or (
             _native_fixture(plan)
-            and plan.get("placement_cost", {}).get("status") != "host"
+            and plan.get("native_admission", {}).get("status") != "host"
             and row.get("host_floor", {}).get("status") == "pass"
         )
         if routing is None or not reference_passed:

@@ -1,13 +1,11 @@
-"""Exact strided copies preserve suffix byte tails and refuse uncertain aliasing."""
+"""Default copy lowering preserves storage bits, strided tails and guards.
 
+The optional performance rewrite was removed; these exactness checks now
+exercise the ordinary upstream copy implementation.
+"""
 import subprocess
-from pathlib import Path
-
 import numpy as np
 import pytest
-
-from merlin.llvmlower.contiguous_suffix_copy import RUNNER_PRELUDE
-
 
 def fixture(kind="i8", same_root=False, dynamic=False, skip=False):
     srcstride = 2 if skip else 1
@@ -27,27 +25,6 @@ def fixture(kind="i8", same_root=False, dynamic=False, skip=False):
  }}
 }}"""
 
-
-def transform(tmp_path, source):
-    from merlin.llvmlower.toolchain import m2m_python
-
-    src = tmp_path / "src.mlir"
-    dst = tmp_path / "dst.mlir"
-    script = tmp_path / "rewrite.py"
-    src.write_text(source)
-    script.write_text(
-        "from torch_mlir import ir\nfrom pathlib import Path\n"
-        + RUNNER_PRELUDE
-        + "\nctx=ir.Context()\nwith ctx:\n m=ir.Module.parse(Path("
-        + repr(str(src))
-        + ").read_text())\n n=_specialize_contiguous_copies(ctx,m)\n m.operation.verify()\n Path("
-        + repr(str(dst))
-        + ").write_text(str(m))\n print(n)\n"
-    )
-    p = subprocess.run([str(m2m_python()), str(script)], check=True, capture_output=True, text=True)
-    return int(p.stdout.strip()), dst.read_text()
-
-
 @pytest.mark.parametrize("kind", ["i8", "f32"])
 def test_native_odd_suffix_misalignment_nonuniform_bits_and_guards(tmp_path, kind):
     from merlin.llvmlower.abi import HostModel
@@ -56,8 +33,7 @@ def test_native_odd_suffix_misalignment_nonuniform_bits_and_guards(tmp_path, kin
     from merlin.llvmlower.toolchain import clang
 
     source = fixture(kind)
-    count, folded = transform(tmp_path, source)
-    assert count == 1 and "scf.for" in folded
+    folded = source
     words = np.uint8 if kind == "i8" else np.uint32
     dtype = np.int8 if kind == "i8" else np.float32
     inp = (np.arange(45, dtype=words) * 17 + 13).reshape(5, 9)
@@ -68,8 +44,6 @@ def test_native_odd_suffix_misalignment_nonuniform_bits_and_guards(tmp_path, kin
         ll = tmp_path / (label + ".ll")
         ir = lower_to_llvm_ir(code, workdir=tmp_path / label, vectorize=False)
         ll.write_text(ir)
-        if label == "candidate":
-            assert "call void @memrefCopy" not in ir
         lib = tmp_path / (label + "_" + kind + ".so")
         subprocess.run(
             [str(clang()), "-O2", "-shared", "-fPIC", str(ll), str(mlir_runtime_c()), "-o", str(lib)],
@@ -86,63 +60,6 @@ def test_native_odd_suffix_misalignment_nonuniform_bits_and_guards(tmp_path, kin
             invoke([(x.ctypes.data, x.shape), (out.ctypes.data, out.shape)])
             np.testing.assert_array_equal(backing, expected)
             np.testing.assert_array_equal(x.view(words), inp)
-
-
-@pytest.mark.parametrize(
-    "case", ["same_root", "no_suffix", "unknown_roots", "zero_extent", "dynamic_extent", "negative_stride"]
-)
-def test_refuses_unproved_disjoint_or_contiguous_storage(tmp_path, case):
-    if case == "same_root":
-        # Valid overlapping views in one allocation; no promotion to row memcpy.
-        source = (
-            fixture()
-            .replace("%b[1,3][3,5][2,1]", "%a[0,2][3,5][2,1]")
-            .replace(
-                "memref<7x11xi8> to memref<3x5xi8,strided<[22,1],offset:14>>",
-                "memref<5x9xi8> to memref<3x5xi8,strided<[18,1],offset:2>>",
-            )
-            .replace("to memref<3x5xi8,strided<[22,1],offset:14>>", "to memref<3x5xi8,strided<[18,1],offset:2>>")
-        )
-    elif case == "no_suffix":
-        source = fixture(skip=True)
-    elif case == "unknown_roots":
-        source = "module { func.func @f(%a: memref<3x5xi8,strided<[10,1]>>, %b: memref<3x5xi8>) { memref.copy %a,%b : memref<3x5xi8,strided<[10,1]>> to memref<3x5xi8> return } }"
-    else:
-        shape = "0x5" if case == "zero_extent" else "?x5" if case == "dynamic_extent" else "3x5"
-        stride = "-1" if case == "negative_stride" else "1"
-        # Distinct fresh roots exercise the shape/stride gate itself.
-        args = "%n:index" if case == "dynamic_extent" else ""
-        size = "%n" if case == "dynamic_extent" else ""
-        source = f"module {{ func.func @f({args}) {{ %a=memref.alloc({size}) : memref<{shape}xi8,strided<[10,{stride}]>> %b=memref.alloc({size}) : memref<{shape}xi8> memref.copy %a,%b : memref<{shape}xi8,strided<[10,{stride}]>> to memref<{shape}xi8> return }} }}"
-    count, result = transform(tmp_path, source)
-    assert count == 0 and "memref.copy" in result
-
-
-def test_normal_pipeline_reports_selected_copy_and_retains_memcpy(tmp_path):
-    import json
-
-    from merlin.llvmlower.impr_features import normalize
-    from merlin.llvmlower.pipeline import lower_to_llvm_ir
-
-    assert "specialize_contiguous_copy" not in normalize(set())
-    control = lower_to_llvm_ir(fixture(), workdir=tmp_path / "control", vectorize=False)
-    result = lower_to_llvm_ir(
-        fixture(), workdir=tmp_path / "candidate", vectorize=False, features=frozenset({"specialize_contiguous_copy"})
-    )
-    assert "call void @memrefCopy" in control
-    assert "call void @memrefCopy" not in result and "llvm.memcpy" in result
-    assert json.loads((tmp_path / "candidate/contiguous_suffix_copy.json").read_text())["copies_specialized"] == 1
-
-
-@pytest.mark.parametrize(
-    "text", ["", "OK specialize_contiguous_copy -1", "OK specialize_contiguous_copy 1\nOK specialize_contiguous_copy 1"]
-)
-def test_missing_or_ambiguous_report_refuses(tmp_path, text):
-    from merlin.llvmlower.contiguous_suffix_copy import require_report
-
-    with pytest.raises(ValueError):
-        require_report(text, tmp_path)
-
 
 def test_multiple_outer_dimensions_native(tmp_path):
     from merlin.llvmlower.abi import HostModel
@@ -163,8 +80,7 @@ def test_multiple_outer_dimensions_native(tmp_path):
   return
  }
 }"""
-    count, folded = transform(tmp_path, source)
-    assert count == 1 and folded.count("scf.for") == 2
+    folded = source
     ll = tmp_path / "multi.ll"
     ll.write_text(lower_to_llvm_ir(folded, workdir=tmp_path / "lower", vectorize=False))
     lib = tmp_path / "multi_suffix.so"

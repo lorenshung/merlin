@@ -8,7 +8,7 @@ from __future__ import annotations
 import math
 import operator
 from fractions import Fraction
-from itertools import chain, product
+from itertools import product
 from types import SimpleNamespace
 
 import numpy as np
@@ -107,7 +107,7 @@ def mac_observation(lhs, rhs, accumulator, scales):
     )
 
 
-def _convolution_fraction(x, w, bias, stride, padding, dilation, groups):
+def _convolution(x, w, bias, stride, padding, dilation, groups):
     dims = x.ndim - 2
 
     def expand(value):
@@ -133,103 +133,6 @@ def _convolution_fraction(x, w, bias, stride, padding, dilation, groups):
                     total += x[(n, co // per_group * w.shape[1] + ci, *source)] * w[(co, ci, *tap)]
         output[(n, co, *point)] = total
     return output
-
-
-def _integer_grid(values):
-    """Factor rational values into exact integer codes times one common scale.
-
-    Taking the gcd on a common denominator also recovers the small integer
-    codes from already-dequantized Fraction inputs, without trusting metadata.
-    """
-    values = np.asarray(values, dtype=object)
-    fractions = [rational(v) for v in values.flat]
-    denominator = math.lcm(*(v.denominator for v in fractions))
-    numerators = [v.numerator * (denominator // v.denominator) for v in fractions]
-    divisor = math.gcd(*numerators) or 1
-    codes = np.asarray([v // divisor for v in numerators], dtype=object).reshape(values.shape)
-    return codes, Fraction(divisor, denominator)
-
-
-def _convolution(x, w, bias, stride, padding, dilation, groups):
-    """Exact integer convolution followed by one rational scaling per output.
-
-    If K*max(abs(X))*max(abs(W)) <= INT64_MAX, every product and every
-    prefix sum fit int64, independent of summation order. Otherwise numpy's
-    object matmul uses Python integers. No floating arithmetic or rounding
-    participates in either path. Per-output weight grids preserve per-channel
-    scales; bias remains a separate exact rational addition.
-    """
-    x, w = np.asarray(x, dtype=object), np.asarray(w, dtype=object)
-    dims = x.ndim - 2
-    if dims < 1 or isinstance(padding, str):
-        return _convolution_fraction(x, w, bias, stride, padding, dilation, groups)
-
-    def expand(value):
-        return [value] * dims if isinstance(value, int) else list(value)
-
-    stride, padding, dilation = map(expand, (stride, padding, dilation))
-    kernel = w.shape[2:]
-    shape = tuple(
-        (x.shape[2 + i] + 2 * padding[i] - dilation[i] * (kernel[i] - 1) - 1) // stride[i] + 1 for i in range(dims)
-    )
-    if any(size < 0 for size in shape):
-        raise ValueError("invalid convolution geometry")
-    if (
-        not groups
-        or x.shape[1] != groups * w.shape[1]
-        or w.shape[0] % groups
-        or any(v <= 0 for v in (*stride, *dilation, *kernel))
-        or any(v < 0 for v in padding)
-    ):
-        raise ValueError("invalid convolution geometry")
-    result = np.empty((x.shape[0], w.shape[0], *shape), dtype=object)
-    if not result.size:
-        return result
-    source, source_scale = _integer_grid(x)
-    weight_codes, scales = [], []
-    for channel in w:
-        codes, scale = _integer_grid(channel)
-        weight_codes.append(codes)
-        scales.append(scale * source_scale)
-    weights = np.asarray(weight_codes, dtype=object)
-    bound = (
-        math.prod(w.shape[1:])
-        * max((abs(v) for v in source.flat), default=0)
-        * max((abs(v) for v in weights.flat), default=0)
-    )
-    dtype = np.int64 if bound <= (1 << 63) - 1 else object
-    # The product bound alone does not constrain a factor when the other is
-    # zero. Check storage bounds too, before converting either array.
-    if any(not -(1 << 63) <= v < 1 << 63 for v in chain(source.flat, weights.flat)):
-        dtype = object
-    source, weights = source.astype(dtype), weights.astype(dtype)
-    padded = np.pad(source, [(0, 0), (0, 0), *[(p, p) for p in padding]], mode="constant")
-    if dtype is object:
-        # np.pad inserts numpy.int64 zeros even into an object array. Such a
-        # scalar can coerce a large Python integer back to int64 during a MAC.
-        padded = np.vectorize(int, otypes=[object])(padded)
-    effective_kernel = tuple(d * (k - 1) + 1 for d, k in zip(dilation, kernel, strict=True))
-    windows = np.lib.stride_tricks.sliding_window_view(padded, effective_kernel, axis=tuple(range(2, x.ndim)))
-    windows = windows[
-        (slice(None), slice(None), *[slice(None, None, s) for s in stride], *[slice(None, None, d) for d in dilation])
-    ]
-    channels = w.shape[1]
-    per_group = w.shape[0] // groups
-    axes = (0, *range(2, 2 + dims), 1, *range(2 + dims, 2 + 2 * dims))
-    for group in range(groups):
-        columns = (
-            windows[:, group * channels : (group + 1) * channels].transpose(axes).reshape(-1, math.prod(w.shape[1:]))
-        )
-        first, last = group * per_group, (group + 1) * per_group
-        accumulators = np.matmul(columns, weights[first:last].reshape(per_group, -1).T)
-        accumulators = accumulators.reshape(x.shape[0], *shape, per_group)
-        accumulators = np.moveaxis(accumulators, -1, 1)
-        for offset, channel in enumerate(range(first, last)):
-            total = accumulators[:, offset].astype(object) * scales[channel]
-            if bias is not None:
-                total += rational(bias[channel])
-            result[:, channel] = total
-    return result
 
 
 def _pool(x, name, args, kwargs, *, gradient=None):

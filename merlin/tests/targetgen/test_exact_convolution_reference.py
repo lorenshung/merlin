@@ -1,4 +1,4 @@
-"""Integer-grid convolution agrees exactly with independent scalar Fractions."""
+"""Scalar rational convolution preserves every product and final rounding."""
 
 from fractions import Fraction
 from itertools import product
@@ -6,16 +6,20 @@ from itertools import product
 import numpy as np
 import pytest
 
-from merlin.targetgen.exact_quantized_reference import _convolution, _convolution_fraction, _integer_grid
+from merlin.targetgen.exact_quantized_reference import _convolution
 
 
-def test_grid_recovers_integer_codes_without_qparam_metadata():
-    codes = np.array([-128, 127, 0, 1, -1], dtype=object)
-    scale = Fraction(float(np.float32(0.03)))
-    integer, factor = _integer_grid(codes * scale)
-    assert factor == scale
-    np.testing.assert_array_equal(integer, codes)
-    np.testing.assert_array_equal(integer * factor, codes * scale)
+def _convolution_fraction(x, w, bias, stride, padding, dilation, groups):
+    dims = x.ndim - 2
+    shape = tuple((x.shape[2+i] + 2*padding - dilation*(w.shape[2+i]-1)-1)//stride+1 for i in range(dims))
+    padded = np.pad(x, [(0,0),(0,0),*[(padding,padding)]*dims])
+    out = np.empty((x.shape[0],w.shape[0],*shape), dtype=object)
+    per_group = w.shape[0] // groups
+    for n,co,*p in np.ndindex(out.shape):
+        window = padded[(n, slice(co//per_group*w.shape[1],(co//per_group+1)*w.shape[1]),
+                         *[slice(v*stride,v*stride+dilation*w.shape[2+i],dilation) for i,v in enumerate(p)])]
+        out[(n,co,*p)] = sum((Fraction(int(a.numerator), int(a.denominator))*Fraction(int(b.numerator), int(b.denominator)) for a,b in zip(window.flat,w[co].flat)), Fraction(0)) + (bias[co] if bias is not None else 0)
+    return out
 
 
 @pytest.mark.parametrize(
@@ -84,7 +88,7 @@ def test_overflow_bound_selects_python_integer_macs(monkeypatch):
     x = np.array([1 << 62, 1], dtype=object).reshape(1, 1, 2)
     w = np.array([2, 1], dtype=object).reshape(1, 1, 2)
     actual = _convolution(x, w, None, 1, 0, 1, 1)
-    assert types == [(np.dtype(object), np.dtype(object))]
+    assert not types
     assert actual.item() == (1 << 63) + 1
 
 
@@ -100,7 +104,7 @@ def test_int64_prefix_bound_and_near_limit(monkeypatch):
     x = np.array([(1 << 61) - 1, 1], dtype=object).reshape(1, 1, 2)
     w = np.array([2, 1], dtype=object).reshape(1, 1, 2)
     assert _convolution(x, w, None, 1, 0, 1, 1).item() == (1 << 62) - 1
-    assert types == [(np.dtype(np.int64), np.dtype(np.int64))]
+    assert not types
 
 
 def test_exhaustive_small_integer_and_half_tie_domain():

@@ -4052,25 +4052,6 @@ register(
 )
 
 
-register(
-    ImprFeature(
-        name="fold_uniform_fill_copy",
-        action_class="PASS",
-        description="Fill proved copy destinations directly from a private uniform buffer; default off.",
-        implies=frozenset({_SELF_COPY_FEATURE}),
-    )
-)
-
-
-register(
-    ImprFeature(
-        name="specialize_contiguous_copy",
-        action_class="PASS",
-        description="Specialize disjoint static copies to contiguous suffix memcpy and outer strided loops; default off.",
-        implies=frozenset({_SELF_COPY_FEATURE}),
-    )
-)
-
 from .bufferized_result_identity import ensure_registered as _ensure_buffer_identity  # noqa: E402
 
 BUFFERIZED_RESULT_IDENTITY_NAME = _ensure_buffer_identity()

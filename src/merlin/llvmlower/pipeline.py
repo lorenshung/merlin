@@ -891,25 +891,10 @@ from . import fusion_guard, result_buffers, result_layout
 from .alloca_scope_lower import RUNNER_PRELUDE as _ALLOCA_SCOPE_LOWER_PRELUDE
 from .broadcast_fold import RUNNER_PRELUDE as _BROADCAST_FOLD_PRELUDE
 from .concat_dps import RUNNER_PRELUDE as _CONCAT_DPS_PRELUDE
-from .contiguous_suffix_copy import MID_STAGE_SRC as _CONTIGUOUS_COPY_MID_SRC
-from .contiguous_suffix_copy import RUNNER_PRELUDE as _CONTIGUOUS_COPY_PRELUDE
 from .copy_expand import MID_STAGE_SRC as _MID_STAGE_SRC
 from .copy_expand import RUNNER_PRELUDE as _COPY_EXPAND_PRELUDE
 from .int_softmax_table import RUNNER_PRELUDE as _INT_SOFTMAX_TABLE_PRELUDE
-from .uniform_fill_copy import MID_STAGE_SRC as _UNIFORM_FILL_COPY_MID_SRC
-from .uniform_fill_copy import RUNNER_PRELUDE as _UNIFORM_FILL_COPY_PRELUDE
 
-# The normal runner already reserves argv[17] for the target data layout.
-# Compose the optional copy stages with their new trailing slots rather than
-# allowing their original standalone gate positions to reinterpret that layout.
-_UNIFORM_FILL_COPY_MID_SRC = _UNIFORM_FILL_COPY_MID_SRC.replace(
-    'if len(sys.argv) > 17 and sys.argv[17] == "1":',
-    'if len(sys.argv) > 18 and sys.argv[18] == "1":',
-)
-_CONTIGUOUS_COPY_MID_SRC = _CONTIGUOUS_COPY_MID_SRC.replace(
-    'if len(sys.argv) > 18 and sys.argv[18] == "1":',
-    'if len(sys.argv) > 19 and sys.argv[19] == "1":',
-)
 from .broadcast_math_hoist import RUNNER_PRELUDE as _BROADCAST_MATH_HOIST_PRELUDE
 from .fma_intrinsic import RUNNER_PRELUDE as _FMA_INTRINSIC_PRELUDE
 from .masked_contraction import RUNNER_PRELUDE as _MASKED_CONTRACTION_PRELUDE
@@ -1178,16 +1163,12 @@ from torch_mlir.dialects import llvm
     + _BROADCAST_FOLD_PRELUDE
     + _NAMED_BROADCAST_FOLD_PRELUDE
     + _COPY_EXPAND_PRELUDE
-    + _UNIFORM_FILL_COPY_PRELUDE
-    + _CONTIGUOUS_COPY_PRELUDE
     + _CONCAT_DPS_PRELUDE
     + _PARALLEL_GRAIN_PRELUDE
     + _PARALLEL_TEAM_PRELUDE
     + _PARALLEL_COARSEN_PRELUDE
     + _PANEL_PARALLEL_PRELUDE
     + _MID_STAGE_SRC
-    + _CONTIGUOUS_COPY_MID_SRC
-    + _UNIFORM_FILL_COPY_MID_SRC
     + _PANEL_PARALLEL_MID_SRC
     + _PARALLEL_GRAIN_LATE_SRC
     + _PARALLEL_TEAM_STAGE_SRC
@@ -1305,16 +1286,12 @@ _RUNNER_ACT_POLY_TAIL = (
     + _BROADCAST_FOLD_PRELUDE
     + _NAMED_BROADCAST_FOLD_PRELUDE
     + _COPY_EXPAND_PRELUDE
-    + _UNIFORM_FILL_COPY_PRELUDE
-    + _CONTIGUOUS_COPY_PRELUDE
     + _CONCAT_DPS_PRELUDE
     + _PARALLEL_GRAIN_PRELUDE
     + _PARALLEL_TEAM_PRELUDE
     + _PARALLEL_COARSEN_PRELUDE
     + _PANEL_PARALLEL_PRELUDE
     + _MID_STAGE_SRC
-    + _CONTIGUOUS_COPY_MID_SRC
-    + _UNIFORM_FILL_COPY_MID_SRC
     + _PANEL_PARALLEL_MID_SRC
     + _PARALLEL_GRAIN_LATE_SRC
     + _PARALLEL_TEAM_STAGE_SRC
@@ -1944,8 +1921,6 @@ def lower_to_llvm_ir(
         _named_broadcast_gate,
         _alloca_scope_gate,
         data_layout or "",
-        "1" if "fold_uniform_fill_copy" in feats else "0",
-        "1" if "specialize_contiguous_copy" in feats else "0",
         _int_softmax_gate,
     ]
     # The runner reads the gate at sys.argv[ARGV_INDEX] (command[0] is the interpreter).
@@ -2035,20 +2010,6 @@ def lower_to_llvm_ir(
 
         try:
             _require_masked_report(proc.stdout, work)
-        except ValueError as exc:
-            raise PipelineError(str(exc) + f"\n{proc.stdout}") from exc
-    if "specialize_contiguous_copy" in feats:
-        from .contiguous_suffix_copy import require_report as _require_contiguous_copy_report
-
-        try:
-            _require_contiguous_copy_report(proc.stdout, work)
-        except ValueError as exc:
-            raise PipelineError(str(exc) + f"\n{proc.stdout}") from exc
-    if "fold_uniform_fill_copy" in feats:
-        from .uniform_fill_copy import require_report as _require_uniform_fill_report
-
-        try:
-            _require_uniform_fill_report(proc.stdout, work)
         except ValueError as exc:
             raise PipelineError(str(exc) + f"\n{proc.stdout}") from exc
     if _fold_broadcast_gate == "1":

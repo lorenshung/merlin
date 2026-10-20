@@ -145,7 +145,6 @@ def test_empty_boundary_decision_precedes_provider_and_quantized_capture(tmp_pat
 
     specification = tmp_path / "software.yaml"
     specification.write_text(
-        "placement_cost_model: {}\n"
         "numerical_semantics: {native_unit_contract: {excluded_constructions: []}}\n"
     )
     (tmp_path / "model.mlir").write_text("module {}")

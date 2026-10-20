@@ -26,10 +26,8 @@ def definition_inputs(tmp_path):
     support.write_text("support\n")
     args = SimpleNamespace(
         suite=suite,
-        support=support,
         captures=tmp_path / "captures",
-        host_exceptions=None,
-        other_count=3,
+        limit=None,
         output=tmp_path / "definition",
         descriptor=target / "descriptor.yaml",
         software_spec=target / "software-spec.yaml",
@@ -45,41 +43,28 @@ def definition_inputs(tmp_path):
     return generate, args
 
 
-def test_strict_definition_retains_every_support_case_and_disjoint_hidden_call(definition_inputs):
+def test_strict_definition_retains_every_case_and_derives_both_lanes(definition_inputs):
     generate, args = definition_inputs
     generate(args)
     recipe = yaml.safe_load((args.output / "recipe.yaml").read_bytes())
     cohorts = recipe["core_aten"]["cohorts"]
-    assert cohorts["public"][0]["lane"] == "device"
-    assert set(cohorts["public"][0]["select"]) == {f"support::{n}" for n in range(4)}
+    assert cohorts["public"][0]["lane"] == "admission"
+    assert cohorts["hidden"][0]["lane"] == "admission"
+    assert cohorts["host_guard"] == []
     all_ids = [key for rows in cohorts.values() for row in rows for key in row["select"]]
-    assert len(all_ids) == len(set(all_ids)) == 7
+    assert len(all_ids) == len(set(all_ids)) == 10
     assert recipe["core_aten"]["workers"] == 2
     cases = json.loads((args.output / "cases.json").read_bytes())
     assert {case["overload"] for case in cases["cases"]} == {"support", "other0", "other1", "other2"}
     assert cases["denominator_sha256"] == "original"
-
-
-def test_exceptions_require_evidence_and_remain_in_denominator(definition_inputs):
-    generate, args = definition_inputs
-    args.host_exceptions = args.suite.parent / "exceptions.json"
-    row = dict(case_id="support::0", category="empty", reason="no device work", evidence="capture receipt")
-    args.host_exceptions.write_text(json.dumps([row]))
-    generate(args)
     definition = json.loads((args.output / "definition.json").read_bytes())
-    assert definition["support_count"] == 4 and definition["device_count"] == 3
-    assert definition["host_exceptions"] == [row]
-    assert definition["selected_count"] == 7
+    assert definition["lane_policy"] == "native_admission"
+    assert "host_exceptions" not in definition and "support_count" not in definition
 
 
-@pytest.mark.parametrize(
-    "rows",
-    [[{"case_id": "support::0"}], [dict(case_id="absent", category="empty", reason="empty", evidence="receipt")]],
-)
-def test_invalid_exception_is_refused_before_creating_output(definition_inputs, rows):
+def test_prefix_limit_retains_disjoint_visibility_without_placement_selection(definition_inputs):
     generate, args = definition_inputs
-    args.host_exceptions = args.suite.parent / "exceptions.json"
-    args.host_exceptions.write_text(json.dumps(rows))
-    with pytest.raises(ValueError, match="host exception"):
-        generate(args)
-    assert not args.output.exists()
+    args.limit = 3
+    generate(args)
+    cases = json.loads((args.output / "cases.json").read_bytes())["cases"]
+    assert [case["case_id"] for case in cases] == ["support::0", "support::1", "support::2"]

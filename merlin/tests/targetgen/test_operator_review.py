@@ -105,7 +105,7 @@ def test_authored_native_family_rows_are_honestly_labeled():
         "host_dequantize_per_tensor",
     ]:
         assert rows[name]["status"] == PENDING
-    for key in ["placement_cost_model", "quantization_contract"]:
+    for key in ["quantization_contract"]:
         assert software[key]["status"] == PENDING
     assert software["numerical_semantics"]["native_unit_contract"]["status"] == PENDING
     host = load_yaml(root / "host-capabilities.yaml")
@@ -113,22 +113,6 @@ def test_authored_native_family_rows_are_honestly_labeled():
         contract = row.get("numerical_contract", {})
         if "pending operator review" in contract.get("evidence", {}).get("review_status", ""):
             assert row["status"] == contract["status"] == PENDING
-
-
-@pytest.mark.parametrize("reference", [False, True])
-def test_pending_cost_facts_cannot_qualify_without_acceptance(monkeypatch, reference):
-    from merlin.targetgen.placement_cost import estimate
-    from merlin.targetgen.placement_reference import estimate_reference
-
-    monkeypatch.setenv(ACCEPT_ENV, "0")
-    declaration = load_yaml(repo_root() / "examples/gemmini/target/software-spec.yaml")["placement_cost_model"]
-    if reference:
-        result = estimate_reference(None, {}, declaration, {})
-    else:
-        result = estimate(None, None, {}, declaration, {})
-    assert result["status"] == "host"
-    assert "requires operator acceptance" in result["reason"]
-    assert result["operator_review"]["review_status"] == PENDING
 
 
 def test_pending_numerical_claim_does_not_review_a_host_placement(monkeypatch):

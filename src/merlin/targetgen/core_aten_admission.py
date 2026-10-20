@@ -1,21 +1,15 @@
-"""Transactional host fallback for unprofitable exact numeric preparations."""
+"""Transactional native admission from general proofs and construction policy."""
 
 import copy
 import json
-import os
 
 
 def prepare(directory, report, implementation, **kwargs):
     from merlin.common.yaml import load_yaml
     from merlin.frontends.linalg_mlir import parse_mlir_text
-    from merlin.targetgen.placement_cost import estimate
-    from merlin.targetgen.placement_reference import estimate_reference
 
     selected = kwargs.get("software_spec")
     software = load_yaml(selected) if selected is not None else {}
-    declaration = software.get("placement_cost_model")
-    if not isinstance(declaration, dict):
-        raise ValueError("native placement requires placement_cost_model")
     native_contract = software.get("numerical_semantics", {}).get("native_unit_contract", {})
     excluded = native_contract.get("excluded_constructions")
     if not isinstance(excluded, list) or not all(isinstance(item, str) for item in excluded):
@@ -33,9 +27,6 @@ def prepare(directory, report, implementation, **kwargs):
     original_files = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
     original_report = copy.deepcopy(report)
     original_cases = list(report["cases"])
-    policy = os.environ.get("MERLIN_PLACEMENT_POLICY", declaration.get("default_policy", "strict_per_shape"))
-    if policy not in {"reference_scale", "strict_per_shape"}:
-        raise ValueError(f"unknown placement profitability policy: {policy}")
     observe(parse_mlir_text((directory / "model.mlir").read_text()), "source")
     plan = implementation(directory, report, construction_observer=observe, **kwargs)
     observe(parse_mlir_text((directory / "model.mlir").read_text()), "prepared")
@@ -61,59 +52,30 @@ def prepare(directory, report, implementation, **kwargs):
             "quantized_non_contraction_sites",
         )
     ):
-        plan["placement_cost"] = dict(
-            policy=policy,
+        plan["native_admission"] = dict(
             status="host",
             reason_code="non_native_unit_construction"
             if native["status"] == "host"
-            else "no_admitted_device_candidate",
+            else plan.get("refusal_code", "no_admitted_device_candidate"),
             native_unit_policy=native,
-            strict_policy=dict(
-                policy="strict_per_shape",
-                status="not_applicable",
-                reason_code=plan.get("refusal_code", "no_admitted_device_candidate"),
-            ),
         )
         for record in report["cases"]:
             if record.get("status") in {None, "bundled"}:
                 record["numeric_admission"] = plan
         (directory / "spec-int8-admission.json").write_text(json.dumps(plan, indent=2) + "\n")
         return plan
-    strict = estimate(
-        parse_mlir_text(original_files["model.mlir"].decode()),
-        parse_mlir_text((directory / "model.mlir").read_text()),
-        plan,
-        declaration,
-        kwargs["facts"],
-    )
-    strict["policy"] = "strict_per_shape"
-    boundary_shapes = [
-        entry["shape"]
-        for record in original_report["cases"]
-        if record.get("status") in {None, "bundled"}
-        for key in ("input_abi", "output_abi")
-        for entry in record.get(key, [])
-        if "shape" in entry
-    ]
-    cost = (
-        estimate_reference(
-            parse_mlir_text(original_files["model.mlir"].decode()),
-            plan,
-            declaration,
-            kwargs["facts"],
-            logical_boundary_shapes=boundary_shapes,
-        )
-        if policy == "reference_scale"
-        else dict(strict)
-    )
     from merlin.targetgen.operator_review import review_record
 
-    cost["native_unit_operator_review"] = review_record(native_contract)
-    cost["native_unit_policy"] = native
+    admission = dict(
+        status="device",
+        reason_code="native_family_proved",
+        native_unit_operator_review=review_record(native_contract),
+        native_unit_policy=native,
+    )
     if native["status"] == "host":
-        cost.update(status="host", reason_code="non_native_unit_construction")
-    if not cost["native_unit_operator_review"]["operator_accepted"]:
-        cost.update(status="host", reason_code="native_unit_operator_acceptance_required")
+        admission.update(status="host", reason_code="non_native_unit_construction")
+    if not admission["native_unit_operator_review"]["operator_accepted"]:
+        admission.update(status="host", reason_code="native_unit_operator_acceptance_required")
     # Static descriptor queries are exported through a tensor wrapper, but
     # carry no tensor data. A capture-owned proof distinguishes them from real
     # literal fills and rank-zero tensor arithmetic without an overload roster.
@@ -131,12 +93,11 @@ def prepare(directory, report, implementation, **kwargs):
         if specialization and descriptor_specialization_matches(record["case"], receipt):
             folds.append(specialization)
     if folds:
-        cost.update(status="host", reason_code="constant_metadata_fold_no_tensor_data", descriptor_folds=folds)
-    cost["strict_policy"] = strict
-    plan["placement_cost"] = cost
-    if cost["status"] != "device":
-        (directory / "unprofitable-device-source.mlir").write_bytes((directory / "model.mlir").read_bytes())
-        (directory / "unprofitable-device-admission.json").write_text(json.dumps(plan, indent=2) + "\n")
+        admission.update(status="host", reason_code="constant_metadata_fold_no_tensor_data", descriptor_folds=folds)
+    plan["native_admission"] = admission
+    if admission["status"] != "device":
+        (directory / "refused-device-source.mlir").write_bytes((directory / "model.mlir").read_bytes())
+        (directory / "refused-device-admission.json").write_text(json.dumps(plan, indent=2) + "\n")
         for name, data in original_files.items():
             (directory / name).write_bytes(data)
         # The runner retains references to these records across preparation.
@@ -156,9 +117,9 @@ def prepare(directory, report, implementation, **kwargs):
             native_contractions=0,
             quantized_non_contraction_sites=0,
             exact_dtype_sites=0,
-            refusal_code=cost["reason_code"],
-            host_reason=cost["reason_code"],
-            placement_cost=cost,
+            refusal_code=admission["reason_code"],
+            host_reason=admission["reason_code"],
+            native_admission=admission,
         )
     for record in report["cases"]:
         if record.get("status") in {None, "bundled"}:

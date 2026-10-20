@@ -98,7 +98,9 @@ def test_native_fixture_cannot_skip_native_grading(prepared, tmp_path):
         C.prepare_numeric_fixture(tmp_path, {"cases": [{}]}, _flow(tmp_path))
 
 
-def test_strict_device_fixture_reports_a_cost_eviction(prepared, tmp_path):
-    prepared.append(dict(placement_cost=dict(status="host", reason_code="device_cost_not_profitable")))
-    with pytest.raises(ValueError, match="cost model retained host execution: device_cost_not_profitable"):
-        C.prepare_numeric_fixture(tmp_path, {"cases": [{}]}, _flow(tmp_path))
+def test_admission_lane_retains_precise_host_refusal(prepared, tmp_path):
+    plan = dict(status="host", refusal_code="non_native_unit_construction")
+    prepared.append(plan)
+    report = {"cases": [{}]}
+    assert C.prepare_numeric_fixture(tmp_path, report, _flow(tmp_path), require_device=False) == plan
+    assert not C._device_fixture(plan)

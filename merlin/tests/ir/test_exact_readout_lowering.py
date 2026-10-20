@@ -1,14 +1,12 @@
-"""Full-domain certificates, semantic refusals and executable readout arithmetic."""
+"""Plain exact rational readouts: extremes, ties, subnormals and executable arithmetic."""
 
-import json
 import random
 from fractions import Fraction
 
 import numpy as np
 import pytest
 
-from merlin.llvmlower.exact_readout import lower_exact_readouts
-from merlin.llvmlower.exact_readout_source import Scalar, build_readout
+from exact_readout_source import Scalar, build_readout
 
 
 def fixture(scales, *, size=513, floating=False, bias=False, **kwargs):
@@ -157,12 +155,6 @@ def scalar(block, arguments, external=None):
 @pytest.mark.parametrize("zp,lo,hi,relu", [(0, -128, 127, False), (7, -127, 127, True), (131, 0, 255, False)])
 def test_emitted_requantizer_exact_at_extremes_ties_and_random(scale, zp, lo, hi, relu):
     m, r = fixture([scale], zero_point=zp, quant_min=lo, quant_max=hi, relu=relu, unsigned=lo == 0)
-    changed = lower_exact_readouts(m)
-    p = json.loads(r.attributes["merlin.exact_readout_proof"].data)
-    if p["method"] == "source_exact":
-        assert scale in (Fraction(2) ** -100, Fraction(2) ** 60)
-        return
-    assert changed == 1
     m.verify()
     rng = random.Random(421)
     points = {-(1 << 31), (1 << 31) - 1, 0, -1, 1}
@@ -181,23 +173,10 @@ def test_emitted_requantizer_exact_at_extremes_ties_and_random(scale, zp, lo, hi
 
 def test_complete_small_numerator_domain():
     scale = Fraction(23, 98)
-    from merlin.llvmlower.requant_a import records
-
-    params = dict(zero_point=0, quant_min=-128, quant_max=127, relu=False)
-    p = records([scale], [Fraction(0)], params)
-    assert p[0]["schema"] == "requant-A-v1"
-    b = Scalar()
-    from xdsl.dialects.builtin import i8, i32
-    from xdsl.dialects.linalg.ops import YieldOp
-    from xdsl.ir import Block
-
-    from merlin.llvmlower.requant_a import emit
-
-    block = Block(arg_types=[i32, i8])
-    result = emit(b, block.args[0], p)
-    block.add_ops([*b.ops, YieldOp(result)])
+    m, r = fixture([scale])
+    m.verify()
     for v in range(-32768, 32769):
-        assert scalar(block, [v & 0xFFFFFFFF, 0]) == min(127, max(-128, round(v * scale))) & 255
+        assert scalar(r.body.block, [v & 0xFFFFFFFF, 0]) == min(127, max(-128, round(v * scale))) & 255
 
 
 @pytest.mark.parametrize("bias", [False, True])
@@ -217,7 +196,6 @@ def test_float_readout_bits(scale, bias):
     from merlin.tests.ir.test_fixed_point_ir import reference_bits
 
     m, r = fixture([scale], floating=True, bias=bias)
-    assert lower_exact_readouts(m) == 1
     m.verify()
     rng = random.Random(731)
     inputs = [-(1 << 31), (1 << 31) - 1, 0, -1, 1] + [rng.randrange(-(1 << 31), 1 << 31) for _ in range(100)]
@@ -232,18 +210,6 @@ def test_float_readout_bits(scale, bias):
         expected = reference_bits(exact.numerator, 0, exact.denominator, "f32")
         args = [v & 0xFFFFFFFF, *([bs] if bias else []), 0]
         assert scalar(r.body.block, args) == expected, (v, bs, scale)
-
-
-def test_source_mutation_keeps_original_exact_body():
-    from xdsl.dialects.builtin import IntegerAttr
-
-    m, r = fixture([Fraction(1, 2)])
-    first = next(o for o in r.body.block.ops if o.name == "arith.constant")
-    first.properties["value"] = IntegerAttr(3, first.result.type)
-    original = tuple(r.body.block.ops)
-    assert lower_exact_readouts(m) == 0
-    assert tuple(r.body.block.ops) == original
-    assert "differs" in json.loads(r.attributes["merlin.exact_readout_proof"].data)["reason"]
 
 
 @pytest.mark.parametrize("floating,bias", [(False, False), (True, False), (True, True)])
@@ -266,7 +232,6 @@ def test_native_readout_against_rational_reference(tmp_path, floating, bias):
     if not floating:
         scales = [s / Fraction(0.01) for s in scales]
     module, reader = fixture(scales, floating=floating, bias=bias)
-    assert lower_exact_readouts(module) == 1
     llvm = lower_to_llvm_ir(text(module, generic=True), workdir=tmp_path / "lower", vectorize=False)
     src = tmp_path / "readout.ll"
     src.write_text(llvm)
@@ -305,20 +270,4 @@ def test_captured_trace_annotations_do_not_change_scalar_semantics(floating):
                 "prov.trace_role": StringAttr("lowering"),
             }
         )
-    assert lower_exact_readouts(module) == 1
-    assert json.loads(reader.attributes["merlin.exact_readout_proof"].data)["method"] != "source_exact"
     module.verify()
-
-
-def test_unknown_scalar_attribute_is_not_ignored():
-    from xdsl.dialects.builtin import UnitAttr
-
-    module, reader = fixture([Fraction(1, 2)])
-    reader.body.block.first_op.attributes["unknown.arithmetic_contract"] = UnitAttr()
-    assert lower_exact_readouts(module) == 0
-
-
-def test_normal_dyadic_certificate_refuses_a_coefficient_above_uint64():
-    from merlin.llvmlower.exact_readout import normal_dyadic_plan
-
-    assert normal_dyadic_plan([Fraction((1 << 64) + 1, 1 << 64)]) is None

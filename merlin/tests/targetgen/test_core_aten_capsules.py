@@ -691,3 +691,33 @@ def test_decoded_float_comparison_cannot_claim_storage_bits():
 
     with pytest.raises(ValueError, match="storage-boundary"):
         compare({"x": [0.0]}, {"x": [-0.0]}, dict(compare="exact_bits", dtype="f32"))
+
+
+@pytest.mark.parametrize("device", [False, True])
+def test_admission_lanes_preserve_host_abi_and_publish_only_proved_numeric_flow(packaged, tmp_path, monkeypatch, device):
+    capsule, _, _, public, _ = packaged
+    golden = C.load_private(capsule)
+    case = golden["batch_map"]["cases"][0]["case"]
+    captures = tmp_path / "captures"
+    expected = dict(status="admitted", numerical_family="F1", exact_dtype_sites=1,
+                    sites=[dict(status="admitted")],
+                    host_floor=dict(status="required", comparison="native_eager_bits_every_boundary_result")) if device else dict(status="host", refusal_code="non_native_unit_construction")
+
+    def prepare(bundle, report, flow, *, require_device):
+        assert not require_device
+        if not device:
+            # A failed candidate must not leak its modified host input sidecars.
+            (bundle / "inputs.npz").write_bytes(b"refused candidate")
+        return expected
+
+    monkeypatch.setattr(C, "prepare_numeric_fixture", prepare)
+    manifest = C.write_capsules({"cases": [case]}, captures, tmp_path / "admission-public",
+                                tmp_path / "admission-private", numeric_flow={"policy": "spec_int8"},
+                                admission_lanes=True)
+    row = manifest["capsules"][0]
+    assert row["native_admission"] == expected
+    assert row["lane_expectation"] == ("device" if device else "host-guard")
+    member = tmp_path / "admission-public" / row["id"]
+    created = capsule_common.load_capsule(member)
+    assert bool(created["operation"]["attributes"].get("numeric_flow")) is device
+    assert (member / "inputs.npz").read_bytes() == (public / capsule["name"] / "inputs.npz").read_bytes()

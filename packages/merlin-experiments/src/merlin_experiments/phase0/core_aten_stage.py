@@ -114,8 +114,10 @@ def selection(recipe: Path) -> tuple[list[dict], dict[str, str]]:
                 batches.append(dict(cohort=cohort, retained=entries))
                 continue
             lane = row.get("lane", "host-guard" if cohort == "host_guard" else "device")
-            if lane not in {"device", "host-guard", "any"} or (cohort == "host_guard" and lane != "host-guard"):
+            if lane not in {"device", "host-guard", "any", "admission"} or (cohort == "host_guard" and lane != "host-guard"):
                 raise ValueError("invalid selected capsule lane")
+            if lane == "admission" and flow is None:
+                raise ValueError("admission-derived lanes require numeric_flow")
             prepare_numeric = row.get("prepare_numeric", False)
             if "prepare_numeric" in row and (lane != "any" or type(prepare_numeric) is not bool):
                 raise ValueError("prepare_numeric is an explicit boolean for optional-device rows only")
@@ -404,10 +406,11 @@ def generate(
                     stage / "_private" / cohort,
                     label="hidden" if cohort == "hidden" else "public",
                     tiers=("L2",),
+                    **({"admission_lanes": True} if lane == "admission" else {}),
                     **({"workers": block["workers"]} if block.get("workers", 1) != 1 else {}),
                     **(
                         {"numeric_flow": {**block["numeric_flow"], "target": target}}
-                        if (device or batch.get("prepare_numeric")) and block.get("numeric_flow")
+                        if (device or lane == "admission" or batch.get("prepare_numeric")) and block.get("numeric_flow")
                         else {}
                     ),
                 )
@@ -418,14 +421,16 @@ def generate(
                 continue
             manifests.append(manifest)
             for row in manifest["capsules"]:
+                member_lane = row["lane_expectation"] if lane == "admission" else lane
+                device, scored = member_lane == "device", member_lane != "host-guard"
                 member = category / row["id"]
                 declaration_path = member / "capsule.yaml"
                 capsule = yaml.safe_load(declaration_path.read_bytes())
                 capsule["cohort"] = cohort if scored else "guard"
                 capsule["scored"] = scored
-                capsule["lane_expectation"] = lane
+                capsule["lane_expectation"] = member_lane
                 capsule["semantic"] = {"must_accelerate": device}
-                if lane == "any":
+                if member_lane == "any":
                     capsule.pop("lanes", None)
                 else:
                     capsule["lanes"] = {"require" if device else "forbid": ["on_mesh"]}

@@ -148,7 +148,7 @@ def prepare_spec_int8(
     report: dict,
     **kwargs,
 ):
-    from merlin.targetgen.core_aten_profitability import prepare
+    from merlin.targetgen.core_aten_admission import prepare
 
     return prepare(directory, report, _prepare_spec_int8, **kwargs)
 

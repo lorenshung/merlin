@@ -1,4 +1,4 @@
-"""Native default A/table readouts, frozen biases and callable-ABI guards."""
+"""Plain exact readouts preserve literal biases and changing runtime parameters."""
 
 import hashlib
 import json
@@ -9,7 +9,6 @@ import numpy as np
 import pytest
 from test_exact_readout_lowering import fixture
 
-from merlin.llvmlower.exact_readout import lower_exact_readouts
 
 
 def freeze(module, reader, tmp_path, values, literal):
@@ -68,13 +67,7 @@ def test_frozen_per_channel_bias_native_and_changed_parameter(tmp_path, floating
     module, reader = fixture(scales, size=129, bias=True, floating=floating)
     biases = np.array([0.0, -0.25, 1.0], np.float32)
     freeze(module, reader, tmp_path, biases, literal)
-    assert lower_exact_readouts(module) == 1
     module.verify()
-    proof = json.loads(reader.attributes["merlin.exact_readout_proof"].data)
-    assert proof["frozen_bias"]["guarded"] is not literal
-    if not floating:
-        assert proof["schema"] == "requant-A-v1"
-        assert {r["algorithm"] for r in proof["channels"]} == {"threshold_table", "clamp_mul_add_shift"}
     rng = np.random.default_rng(443)
     x = rng.integers(-(1 << 31), 1 << 31, (129, 3), dtype=np.int32)
     x[:7] = np.asarray([-(1 << 31), (1 << 31) - 1, -1, 0, 1, 2, 3], np.int32)[:, None]
@@ -93,57 +86,3 @@ def test_frozen_per_channel_bias_native_and_changed_parameter(tmp_path, floating
         assert output.tobytes() == expected.tobytes()
 
 
-def test_frozen_bias_manifest_mismatch_is_refused(tmp_path):
-    module, reader = fixture([F(1, 2)], bias=True)
-    freeze(module, reader, tmp_path, [0.5], False)
-    path = tmp_path / "weights.safetensors"
-    header = json.dumps({"bias": {"dtype": "F32", "shape": [1], "data_offsets": [0, 5]}}).encode()
-    path.write_bytes(len(header).to_bytes(8, "little") + header + bytes(5))
-    with pytest.raises(ValueError, match="byte interval"):
-        lower_exact_readouts(module)
-
-
-@pytest.mark.parametrize("bias", [False, True])
-def test_imported_proof_and_body_are_revalidated(tmp_path, bias):
-    from xdsl.dialects.builtin import StringAttr
-
-    module, reader = fixture([F(17, 31)], bias=bias)
-    if bias:
-        freeze(module, reader, tmp_path, [0.25], False)
-    assert lower_exact_readouts(module) == 1
-    assert lower_exact_readouts(module) == 0
-    proof = json.loads(reader.attributes["merlin.exact_readout_proof"].data)
-    proof["channels"][0]["constants"]["B"] = str(int(proof["channels"][0]["constants"]["B"]) + 123)
-    reader.attributes["merlin.exact_readout_proof"] = StringAttr(json.dumps(proof))
-    with pytest.raises(ValueError, match="proof|boundary"):
-        lower_exact_readouts(module)
-
-
-def test_imported_valid_proof_does_not_authenticate_modified_body():
-    from xdsl.dialects import arith
-    from xdsl.dialects.builtin import IntegerAttr, i64
-
-    module, reader = fixture([F(17, 31)])
-    assert lower_exact_readouts(module) == 1
-    constants = [op for op in reader.body.walk() if isinstance(op, arith.ConstantOp) and op.result.type == i64]
-    constants[0].properties["value"] = IntegerAttr(123456, i64)
-    with pytest.raises(ValueError, match="emitted body"):
-        lower_exact_readouts(module)
-
-
-def test_zero_coefficient_is_an_exact_constant():
-    from test_exact_readout_lowering import scalar
-    from xdsl.dialects.builtin import i8, i32
-    from xdsl.dialects.linalg.ops import YieldOp
-    from xdsl.ir import Block
-
-    from merlin.llvmlower.exact_readout_source import Scalar
-    from merlin.llvmlower.requant_a import emit, records
-
-    proof = records([F(0)], [F(5, 2)], dict(zero_point=1, quant_min=-128, quant_max=127, relu=False))
-    block = Block(arg_types=[i32, i8])
-    builder = Scalar()
-    result = emit(builder, block.args[0], proof)
-    block.add_ops([*builder.ops, YieldOp(result)])
-    for x in [-(1 << 31), -1, 0, 1, (1 << 31) - 1]:
-        assert scalar(block, [x & 0xFFFFFFFF, 0]) == 3

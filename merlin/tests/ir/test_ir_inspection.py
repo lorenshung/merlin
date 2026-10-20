@@ -119,7 +119,6 @@ def test_whole_model_xdsl_preprocessing_records_each_rewrite_without_changing_ou
         "xdsl-parsed",
         "xdsl-pruned",
         "xdsl-quant-lowered",
-        "xdsl-exact-readouts",
         "xdsl-c-interface",
     ]
     final = audit.record["stages"][-1]
@@ -249,7 +248,7 @@ def test_real_dense_native_views_do_not_change_compiler_result(tmp_path, textual
         index_path = next((tmp_path / mode).glob("ir-audit-*/index.json"))
         index = json.loads(index_path.read_text())
         xdsl_stages = [stage for stage in index["stages"] if stage["name"].startswith("xdsl-")]
-        assert len(xdsl_stages) == (0 if textual else 5)
+        assert len(xdsl_stages) == (0 if textual else 4)
         if mode == "exact":
             assert not index.get("inspection_views")
             continue
