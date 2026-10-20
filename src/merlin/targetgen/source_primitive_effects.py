@@ -72,6 +72,10 @@ def pure_tensor_source(function):
                 return False
             continue  # Every nested operation is checked by the same walk.
         implementation = type(op).__module__
+        if name in {"arith.divui", "arith.remui"} and implementation == "xdsl.dialects.arith":
+            divisor = literal(op.operands[1])
+            if isinstance(divisor, int) and divisor > 0:
+                continue  # The only unsigned division effect is a zero divisor.
         if implementation.startswith(
             ("xdsl.dialects.arith", "xdsl.dialects.math", "xdsl.dialects.tensor", "xdsl.dialects.linalg")
         ) and op.has_trait(Pure):

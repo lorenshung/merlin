@@ -103,7 +103,11 @@ def prove(module):
         )
     for function in functions:
         for value in function.body.block.last_op.operands:
-            if str(getattr(value.type, "element_type", "")) == "i1" and value not in function.body.block.args:
+            if (
+                str(getattr(value.type, "element_type", "")) == "i1"
+                and value not in function.body.block.args
+                and _constant_of(value) is None
+            ):
                 return dict(
                     status="refused",
                     code="native_numeric_predicate_family_unproved",

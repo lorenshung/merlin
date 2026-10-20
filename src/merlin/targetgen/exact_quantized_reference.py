@@ -344,6 +344,12 @@ def evaluate_operation(target, args, kwargs):
         }[op](left, right)
     elif op in {"neg", "relu", "abs"}:
         out = -a[0] if op == "neg" else _clamp_array(a[0], 0, lower=True) if op == "relu" else abs(a[0])
+    elif op == "elu":
+        alpha = args[1] if len(args) > 1 else kwargs.get("alpha", 1)
+        if alpha != 0:
+            raise ValueError("exact rational reference refuses a nonzero exponential branch")
+        scale = args[2] if len(args) > 2 else kwargs.get("scale", 1)
+        out = _clamp_array(a[0], 0, lower=True) * rational(scale)
     elif op in {"clamp", "clamp_min", "clamp_max", "hardtanh"}:
         low = args[1] if len(args) > 1 else kwargs.get("min_val", -1) if op == "hardtanh" else kwargs.get("min")
         high = args[2] if len(args) > 2 else kwargs.get("max_val", 1) if op == "hardtanh" else kwargs.get("max")
@@ -376,11 +382,19 @@ def evaluate_operation(target, args, kwargs):
     elif op == "cumsum":
         axis = args[1] if len(args) > 1 else kwargs["dim"]
         out = np.cumsum(a[0], axis=axis, dtype=object)
-    elif op in {"sum", "mean", "amax", "amin"}:
+    elif op == "native_dropout":
+        probability = args[1] if len(args) > 1 else kwargs["p"]
+        training = args[2] if len(args) > 2 else kwargs.get("train", True)
+        if training and probability not in (0, 1):
+            raise ValueError("exact reference refuses a stochastic mask")
+        kept = not training or probability == 0
+        values = a[0] if kept else np.full(a[0].shape, Fraction(0), dtype=object)
+        return ExactTensor(values, dtype), ExactTensor(np.full(a[0].shape, kept, dtype=object), torch.bool)
+    elif op in {"sum", "mean", "amax", "amin", "prod"}:
         axis = args[1] if len(args) > 1 else kwargs.get("dim")
         axis = None if axis is None or axis == [] else tuple(axis) if isinstance(axis, (list, tuple)) else axis
         keep = args[2] if len(args) > 2 else kwargs.get("keepdim", False)
-        out = {"sum": np.sum, "mean": np.mean, "amax": np.max, "amin": np.min}[op](a[0], axis=axis, keepdims=keep)
+        out = {"sum": np.sum, "mean": np.mean, "amax": np.max, "amin": np.min, "prod": np.prod}[op](a[0], axis=axis, keepdims=keep)
     elif op in {"conv1d", "conv2d", "conv3d", "convolution"}:
         if op == "convolution" and (args[6] or any(args[7])):
             raise ValueError("exact reference refuses transposed convolution")

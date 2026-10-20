@@ -46,13 +46,18 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
         return None
     contract = parameters(selection["spec"])
     if any(
-        a["dtype"] not in {"f16", "bf16", "f32", "f64", "complex<f32>"}
+        a["dtype"] not in {"f16", "bf16", "f32", "f64", "complex<f32>", "i1"}
         for r in report["cases"]
         if r.get("status") == "bundled"
         for a in r.get("output_abi", [])
     ):
         return None
     module = parse_mlir_file(directory / "model.mlir")
+    from merlin.targetgen.entry_output_movement import expose_argument_results
+
+    # User results carry the requested output quantization even when their
+    # source is an argument. Post-call observations retain original storage.
+    expose_argument_results(module, report)
     function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
     from merlin.kernels.shapes import observe_contractions
     from merlin.llvmlower.uniform_numeric_literals import compile_time_operand

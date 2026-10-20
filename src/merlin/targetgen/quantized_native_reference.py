@@ -128,6 +128,13 @@ def main():
             if not isinstance(leaf, ExactTensor):
                 raise ValueError("non-rational source output")
             dtype = abi["dtype"]
+            if dtype == "i1":
+                # A literal endpoint mask is a Boolean storage result, not a
+                # calibrated arithmetic output. Keep every bit independently.
+                if any(v not in (False, True, 0, 1) for v in leaf.values.flat):
+                    raise ValueError("non-Boolean rational mask")
+                outputs[str(index)] = np.asarray(leaf.values, dtype=np.bool_).tobytes().hex()
+                continue
             if dtype == "complex<f32>":
                 real = np.vectorize(lambda v: Gaussian.of(v).real, otypes=[object])(leaf.values)
                 imag = np.vectorize(lambda v: Gaussian.of(v).imag, otypes=[object])(leaf.values)

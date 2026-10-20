@@ -50,6 +50,29 @@ def run_torch(script):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_deterministic_masks_singleton_products_and_zero_exponential_branch_are_rational():
+    run_torch(r'''
+import numpy as np, torch
+from fractions import Fraction as F
+from merlin.targetgen.exact_arithmetic import ExactTensor
+from merlin.targetgen.exact_quantized_reference import evaluate_operation
+x=ExactTensor(np.array([F(-3,4),F(1,3)],dtype=object),torch.float32)
+for p in (0,1):
+ y,mask=evaluate_operation(torch.ops.aten.native_dropout.default,(x,p,True),{})
+ assert y.values.tolist()==(x.values.tolist() if p==0 else [F(0),F(0)])
+ assert mask.values.tolist()==[p==0,p==0]
+try:
+ evaluate_operation(torch.ops.aten.native_dropout.default,(x,.5,True),{})
+except ValueError: pass
+else: raise AssertionError('stochastic reference accepted')
+singleton=ExactTensor(x.values.reshape(2,1),torch.float32)
+out=evaluate_operation(torch.ops.aten.prod.dim_int,(singleton,1,False),{})
+assert out.values.tolist()==x.values.tolist()
+out=evaluate_operation(torch.ops.aten.elu.default,(x,0,2,1),{})
+assert out.values.tolist()==[F(0),F(2,3)]
+''')
+
+
 def test_real_fx_graphs_use_exact_oracle_for_both_readout_selections():
     run_torch(r"""
 import torch

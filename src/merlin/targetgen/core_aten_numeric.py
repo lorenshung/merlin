@@ -180,6 +180,9 @@ def prepare_spec_int8(
     from merlin.targetgen.source_power_specialization import specialize
 
     specialize(directory, report)
+    from merlin.targetgen.source_mask_endpoints import specialize as specialize_mask
+
+    specialize_mask(directory, report)
     result = prepare(directory, report, _prepare_spec_int8, **kwargs)
     if result.get("native_admission", {}).get("status") != "device":
         from merlin.targetgen.source_integer_remainder import specialize as specialize_remainder
