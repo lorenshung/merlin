@@ -230,3 +230,44 @@ def test_nan_classification_after_conversion_has_no_arithmetic_witness():
       }}""")
     assert qualify_nan_readout(module, [{"source_data_arithmetic": False}]) == []
     assert unlowered_data_reductions(module, "test.limb")
+
+
+@pytest.mark.parametrize("width", [8, 32, 64])
+def test_storage_copy_does_not_cover_a_retained_host_threshold(tmp_path, width):
+    module = parse_mlir_text(f"""module {{func.func @forward(%x:tensor<4xi{width}>) -> tensor<4xi{width}> {{
+      %empty=tensor.empty() : tensor<4xi{width}>
+      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
+        ins(%x:tensor<4xi{width}>) outs(%empty:tensor<4xi{width}>) {{
+        ^bb0(%a:i{width},%unused:i{width}):
+        %z=arith.constant 0 : i{width}
+        %p=arith.cmpi slt,%a,%z : i{width}
+        %v=arith.select %p,%z,%a : i{width}
+        linalg.yield %v : i{width}
+      }} -> tensor<4xi{width}>
+      return %r : tensor<4xi{width}>
+    }} }}""")
+    original = str(module) + "\n"
+    (tmp_path / "model.mlir").write_text(original)
+    np.savez(tmp_path / "inputs.npz", in0=np.array([-1, 0, 1, 127], dtype=f"int{width}"))
+
+    class Provider:
+        def admit_numeric_schedule(self, *args, **kwargs):
+            raise AssertionError("host threshold cannot request a native device proof")
+
+    assert (
+        prepare_integer_components(
+            tmp_path,
+            dict(cases=[dict(input_abi=[dict(dtype=f"i{width}")])]),
+            dict(spec={}, host={}),
+            Provider(),
+            None,
+            module,
+            limb_attribute="test.limb",
+        )
+        is None
+    )
+    assert (tmp_path / "model.mlir").read_text() == original
+    assert (
+        json.loads((tmp_path / "exact-dtype-refusal.json").read_text())["code"]
+        == "native_family_arithmetic_retained_host"
+    )

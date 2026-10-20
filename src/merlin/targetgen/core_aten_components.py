@@ -412,6 +412,20 @@ def prepare_integer_components(
             # Sign/selection producers read raw storage words. They do not use a
             # numerical grid, even for signaling NaNs, infinities and signed zeros.
             bounds = [0 if b is None else b for b in bounds]
+    if any(proof.get("arithmetic") == "source_compare_select_retained_host" for proof in sign_proofs):
+        # An identity component producer followed by the source threshold on
+        # the host is not native coverage of that threshold's arithmetic.
+        (directory / "exact-dtype-refusal.json").write_text(
+            json.dumps(
+                dict(
+                    family="F2",
+                    code="native_family_arithmetic_retained_host",
+                    reason="device components only copy storage; source compare/select remains on host",
+                )
+            )
+            + "\n"
+        )
+        return None
     if semantics.get("method") == "typed_storage_and_modular_ring_v1":
         from merlin.llvmlower.integer_division_components import rewrite_integer_divisions
 
