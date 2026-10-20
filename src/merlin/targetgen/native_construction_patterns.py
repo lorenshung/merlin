@@ -113,30 +113,38 @@ class Payloads:
     def nonzero_literal(self, root):
         """Prove a literal addend, rather than a runtime value with literal ancestry.
 
-        All carrier alternatives must supply the same nonzero scalar/splat.
+        Every carrier alternative must supply a literal scalar/splat.
         Runtime selects containing IEEE masks or NaN encodings are not offsets.
         Opaque carriers remain subject to the independent fail-closed screen.
         """
-        from merlin.targetgen.native_payload_carriers import carrier_sources
+        from merlin.targetgen.native_payload_carriers import carrier_sources, op_name
 
-        active = set()
-
-        def literal(value):
-            if value in active:
-                return None
+        pending, seen, literals = [root], set(), []
+        while pending:
+            value = pending.pop()
+            if value in seen:
+                continue
+            seen.add(value)
             direct = self.constant(value)
             if direct is not None:
-                return direct
-            active.add(value)
+                literals.append(direct)
+                continue
             edges = carrier_sources(value)
-            values = [literal(edge) for edge in edges] if edges else []
-            active.remove(value)
-            if values and values[0] is not None and all(v == values[0] for v in values):
-                return values[0]
-            return None
-
-        value = literal(root)
-        return value is not None and value != 0
+            owner = value.owner
+            name = op_name(owner)
+            if edges is None and name is not None and name.startswith(("arith.", "math.")):
+                # A closed literal expression remains a possible offset, also
+                # when loop backedges carry it through arithmetic. Runtime
+                # operands still fail this proof at their external leaves.
+                edges = tuple(owner.operands)
+            if not edges:
+                # A runtime leaf or an opaque producer is not a literal
+                # operand merely because a sibling ancestry contains constants.
+                return False
+            pending.extend(edges)
+        # Backedges introduce no new value by themselves. Every external leaf
+        # must be a literal, and a cycle without a literal seed proves nothing.
+        return bool(literals) and any(value != 0 for value in literals)
 
     def offset_before(self, root):
         """Find a literal addend through casts, arithmetic and all known carriers."""

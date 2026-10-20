@@ -422,3 +422,50 @@ def test_dense_splat_literal_offset_still_refuses():
         literal=True,
     )
     assert construction_evidence(module, excluded=["readout_offset_rounding"])["status"] == "host"
+
+
+@pytest.mark.parametrize("seed,host", [("%half", True), ("%x", False)])
+def test_literal_offset_proof_handles_loop_backedges_and_runtime_seeds(seed, host):
+    module = parse_mlir_text(
+        """module {
+      func.func @forward(%x:f32, %y:f32) -> i32 {
+        %lb=arith.constant 0 : index
+        %ub=arith.constant 2 : index
+        %step=arith.constant 1 : index
+        %half=arith.constant 0.5 : f32
+        %carried=scf.for %iv=%lb to %ub step %step iter_args(%v="""
+        + seed
+        + """) -> (f32) {
+          scf.yield %v : f32
+        }
+        %sum=arith.addf %y,%carried : f32
+        %r=arith.fptosi %sum : f32 to i32
+        func.return %r : i32
+      }}"""
+    )
+    decision = construction_evidence(module, excluded=["readout_offset_rounding"])
+    assert (decision["status"] == "host") is host
+
+
+@pytest.mark.parametrize("primitive", ["arith.addf", "arith.mulf"])
+def test_loop_carried_literal_arithmetic_cannot_hide_an_offset(primitive):
+    module = parse_mlir_text(
+        """module {
+      func.func @forward(%x:f32) -> i32 {
+        %lb=arith.constant 0 : index
+        %ub=arith.constant 2 : index
+        %step=arith.constant 1 : index
+        %half=arith.constant 0.5 : f32
+        %two=arith.constant 2.0 : f32
+        %bias=scf.for %iv=%lb to %ub step %step iter_args(%v=%half) -> (f32) {
+          %next="""
+        + primitive
+        + """ %v,%two : f32
+          scf.yield %next : f32
+        }
+        %sum=arith.addf %x,%bias : f32
+        %r=arith.fptosi %sum : f32 to i32
+        func.return %r : i32
+      }}"""
+    )
+    assert construction_evidence(module, excluded=["readout_offset_rounding"])["status"] == "host"
