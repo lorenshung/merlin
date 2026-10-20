@@ -67,10 +67,26 @@ def normalize_quantizer_nans(model, policy):
         return 0
     import torch
     count=0
+    def quantized_source(value):
+        pending, seen = [value], set()
+        while pending:
+            current = pending.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            if current.op == 'call_function' and str(current.target).startswith('quantized_decomposed.dequantize_'):
+                return True
+            pending.extend(current.all_input_nodes)
+        return False
     for node in list(model.graph.nodes):
         if node.op != 'call_function' or str(node.target) != 'quantized_decomposed.quantize_per_tensor.default':
             continue
         source,scale,zero,low,high=node.args[:5]
+        if quantized_source(source):
+            # Internal Q edges retain their direct recipe producer. After an
+            # external byte quantizer, rational arithmetic is finite; unknown
+            # nonfinite source arithmetic still refuses its separate proof.
+            continue
         if not low <= 0 <= high:
             raise ValueError('storage-zero NaN requires zero in the declared code range')
         # Literal qparams are required by the static recipe. No payload read.
@@ -85,7 +101,7 @@ def normalize_quantizer_nans(model, policy):
             fill=model.graph.call_function(torch.ops.aten.full_like.default,(source,replacement))
             selected=model.graph.call_function(torch.ops.aten.where.self,(mask,fill,source))
         for added in (mask,fill,selected):
-            added.meta.update(source.meta)
+            added.meta.update({key:source.meta[key] for key in ('val','tensor_meta','stack_trace','nn_module_stack','source_fn_stack') if key in source.meta})
         if 'val' in mask.meta:
             mask.meta['val']=mask.meta['val'].to(dtype=torch.bool)
         node.args=(selected,*node.args[1:])
