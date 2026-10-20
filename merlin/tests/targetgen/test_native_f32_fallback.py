@@ -78,8 +78,11 @@ def test_native_f32_word_admission_never_reads_sample_or_eager(tmp_path, monkeyp
     )
     assert unrelated == dict(status="not_in_shard", input_abi=[dict(dtype="bf16")])
     assert decision is None
-    assert called
-    first_source = called[0]
+    # A literal compare/select clamp is a declared floating activation: it is
+    # refused here before any provider schedule request (the quantized byte
+    # activation path owns it). A negation asks the provider for a schedule.
+    assert bool(called) == (word_map == "negate")
+    first_called = list(called)
     assert not (tmp_path / "source-ieee-closure.json").exists()
     # No admissibility or generated-kernel property may use these observations.
     (tmp_path / "inputs.npz").write_bytes(b"not a readable tensor archive")
@@ -94,5 +97,5 @@ def test_native_f32_word_admission_never_reads_sample_or_eager(tmp_path, monkeyp
         parse_mlir_text(source),
         limb_attribute="test.limb",
     )
-    assert called == [first_source]
+    assert called == first_called
     assert (tmp_path / "model.mlir").read_text() == source
