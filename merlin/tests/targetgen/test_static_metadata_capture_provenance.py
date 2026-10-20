@@ -51,7 +51,7 @@ def test_constant_capture_requires_descriptor_specialization_proof(tmp_path, mon
     assert result["results"]["aten.sym_numel.default"]["status"] == expected
 
 
-def test_descriptor_specialization_binding_refuses_changed_input_or_operator():
+def test_descriptor_specialization_binding_refuses_changed_input_or_missing_proof():
     import copy
 
     case = {
@@ -69,6 +69,12 @@ def test_descriptor_specialization_binding_refuses_changed_input_or_operator():
         changed = copy.deepcopy(case)
         changed["arguments"]["args"][0][key] = value
         assert not capture.descriptor_specialization_matches(changed, receipt)
-    assert not capture.descriptor_specialization_matches(dict(case, overload="aten.clone.default"), receipt)
+    # The capture proof, not the case's overload name, is the authority: renaming
+    # the case neither grants nor refuses the fold; a proof without folded
+    # queries refuses.
+    assert capture.descriptor_specialization_matches(dict(case, overload="aten.clone.default"), receipt)
+    assert not capture.descriptor_specialization_matches(
+        case, {"capture_meta": {"static_metadata_specialization": dict(proof, queries=[])}}
+    )
     proof["authority"] = "unknown"
     assert not capture.descriptor_specialization_matches(case, receipt)

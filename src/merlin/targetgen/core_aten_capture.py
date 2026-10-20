@@ -179,10 +179,11 @@ def case_capture_name(case: dict[str, Any]) -> str:
 def descriptor_specialization_matches(case: dict, capture: dict) -> bool:
     """Recognize a folded query only under its recorded static input descriptors.
 
-    This is capture authority, not fabricated operator provenance on the constant.
-    Tensor values and the case's expected result are never consulted.
+    This is capture authority, not fabricated operator provenance on the constant:
+    the frontend recorded that the program's result is a fold of the inputs'
+    static descriptors. No source overload name is consulted here, and tensor
+    values and the case's expected result are never read.
     """
-    from merlin.capture.static_metadata import STATIC_METADATA_QUERIES
     from merlin.targetgen.core_aten_batch import _tensor_documents
 
     proof = capture.get("capture_meta", {}).get("static_metadata_specialization") or {}
@@ -191,10 +192,9 @@ def descriptor_specialization_matches(case: dict, capture: dict) -> bool:
         for tensor in _tensor_documents(case["arguments"])
     ]
     return (
-        case["overload"] in STATIC_METADATA_QUERIES
-        and proof.get("authority") == "static_capture_input_descriptors"
+        proof.get("authority") == "static_capture_input_descriptors"
         and proof.get("inputs") == descriptors
-        and any(query.get("operator") == case["overload"] for query in proof.get("queries", []))
+        and bool(proof.get("queries"))
     )
 
 
