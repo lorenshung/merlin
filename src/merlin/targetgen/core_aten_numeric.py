@@ -496,20 +496,7 @@ def _prepare_spec_int8(
             )
         selected = []
     reference = None
-    needs_fft_preflight = any(
-        record.get("overload") in {"aten._fft_r2c.default", "aten._fft_c2r.default", "aten._fft_c2c.default"}
-        for record in report["cases"]
-        if record["status"] == "bundled"
-    )
-    if needs_fft_preflight and len(recipes) != 1:
-        plan.update(
-            status="refused",
-            refusal_code="fft_admission_refused",
-            refusal_details={"matching_static_recipes": len(recipes)},
-            fft_refusals=["FFT preflight needs one declared static activation recipe"],
-        )
-        needs_fft_preflight = False
-    if selected or non_contraction or needs_fft_preflight:
+    if selected or non_contraction:
         (directory / "model.before_spec_int8.mlir").write_bytes(original)
 
         def declaration_keys(site):
@@ -565,7 +552,7 @@ def _prepare_spec_int8(
                     )
                 return isinstance(value, list) and any(complex_argument(item) for item in value)
 
-            if not needs_fft_preflight and complex_argument(source_case["arguments"]):
+            if complex_argument(source_case["arguments"]):
                 raise NumericCaptureRefused(
                     "static int8 recipe does not admit complex tensors or scalar arguments", code="complex_calibration"
                 )

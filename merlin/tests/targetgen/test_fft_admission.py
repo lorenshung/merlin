@@ -222,7 +222,13 @@ for mode, x, required in [
 
 
 @pytest.mark.parametrize("recipe_count", [0, 2])
-def test_fft_without_unique_recipe_retains_host_source(tmp_path, monkeypatch, recipe_count):
+def test_fft_overload_name_does_not_trigger_a_recapture(tmp_path, monkeypatch, recipe_count):
+    """No source overload selects a preparation path (source_overload_dispatch: forbidden).
+
+    A program with no admitted contraction, no prospective native site and no
+    unique static recipe keeps its original host source, whatever the case's
+    overload name says.
+    """
     from merlin.targetgen import core_aten_numeric, core_aten_spec_int8
     from merlin.targetgen.capsule_source import PytorchRefSource
 
@@ -264,10 +270,7 @@ def test_fft_without_unique_recipe_retains_host_source(tmp_path, monkeypatch, re
         provider=None,
         package=tmp_path,
     )
-    assert plan["quantized_contractions"] == 0
-    assert plan["refusal_code"] == "fft_admission_refused"
-    assert plan["refusal_details"]["matching_static_recipes"] == recipe_count
-    assert plan["fft_refusals"]
+    assert not plan.get("quantized_contractions")
+    assert plan.get("refusal_code") != "fft_admission_refused" and "fft_refusals" not in plan
+    assert plan["native_admission"]["status"] == "host"
     assert (tmp_path / "model.mlir").read_text() == original
-    assert plan["source_sha256_before"] == plan["source_sha256_after"]
-    assert report["cases"][0]["numeric_admission"]["refusal_code"] == "fft_admission_refused"
