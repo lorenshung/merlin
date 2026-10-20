@@ -39,7 +39,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
     plans = []
     from merlin.llvmlower.integer_width_boundaries import preserve_integer_width_boundaries
 
-    preserve_integer_width_boundaries(module)
+    preserve_integer_width_boundaries(module, mathematical_sources=bounds)
 
     def indices(value, digits):
         omitted = (known_zero_limbs or {}).get(value, set())

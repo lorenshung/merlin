@@ -6,7 +6,7 @@ recombined storage word. This also preserves unsigned interpretation of i8.
 """
 
 
-def preserve_integer_width_boundaries(module):
+def preserve_integer_width_boundaries(module, *, mathematical_sources=()):
     from xdsl.dialects import tensor
     from xdsl.dialects.builtin import ArrayAttr, TensorType, UnitAttr
     from xdsl.dialects.linalg import ops as L
@@ -32,7 +32,8 @@ def preserve_integer_width_boundaries(module):
         if any(it.data != L.IteratorType.PARALLEL for it in op.get_iterator_types()):
             continue
         source = op.inputs[source_index]
-        if not isinstance(source, BlockArgument) or source.owner.parent_op().name != "func.func":
+        external = isinstance(source, BlockArgument) and source.owner.parent_op().name == "func.func"
+        if not external and source not in mathematical_sources:
             # Intermediate source-width producers are lowered independently.
             # Their already recombined storage requires only the original host
             # cast, never another device identity producer for each bit cast.
