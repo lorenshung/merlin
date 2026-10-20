@@ -1,12 +1,20 @@
-"""Retain deterministic mask endpoints before the frontend RNG expansion.
+"""Fold masks that a literal comparison decides over a provably bounded value.
 
-The source call's literal probability decides a uniform mask for every input.
-Private capsule RNG state has no observable dependence at either endpoint.
-Unknown effects, external state, source compositions and partial ABIs refuse.
+A mask generic compares each element of a tensor against a closed literal.
+When the closed interval of every value that tensor can hold (for example a
+uniform draw built from a bit-masked integer scaled by a literal) lies
+entirely on one side of the literal, the mask is uniform for every input and
+every generator state. The mask is replaced by that uniform literal, the
+remaining arithmetic is folded where it becomes closed, and private generator
+state that no longer reaches an observable output is removed. Everything is
+read from the IR: no case record, overload name, provenance label or tensor
+payload participates. Unknown effects, external state and undecided masks
+refuse and leave the program unchanged.
 """
 
 import hashlib
 import json
+from fractions import Fraction
 
 
 def closed_private_state(module, function):
@@ -48,107 +56,210 @@ def closed_private_state(module, function):
     return pure_tensor_source(clone)
 
 
-def specialize(directory, report):
-    from xdsl.dialects import arith, func, tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, FloatAttr, IntegerAttr, StringAttr, TensorType
-    from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
-    from xdsl.ir.affine import AffineMap
+def _decided(predicate, bounds, constant):
+    """The comparison result shared by every value in bounds, or None."""
+    from merlin.llvmlower.singleton_selectors import _relation
+
+    c = Fraction(constant)
+    relations = set()
+    if bounds.lo < c:
+        relations.add(-1)
+    if bounds.hi > c:
+        relations.add(1)
+    if bounds.lo <= c <= bounds.hi:
+        relations.add(0)
+    outcomes = {_relation(predicate, r, False, floating=True) for r in relations}
+    return outcomes.pop() if len(outcomes) == 1 else None
+
+
+def decided_masks(function):
+    """[(generic, bit, evidence)] for every elementwise mask decided by a closed interval."""
+    import math
+
+    from merlin.targetgen.closed_scalar import interval, literal
+
+    found = []
+    memo = {}
+    for op in function.body.block.ops:
+        if op.name != "linalg.generic" or len(op.results) != 1 or str(op.results[0].type.element_type) != "i1":
+            continue
+        if any(it.data.value != "parallel" for it in op.get_iterator_types()):
+            continue
+        yielded = op.body.block.last_op.operands[0]
+        compare = yielded.owner
+        if getattr(compare, "name", None) != "arith.cmpf" or compare.fastmath.data:
+            continue
+        predicate = compare.predicate.value.data
+        a, b = compare.operands
+        swapped = False
+        constant = literal(b)
+        tested = a
+        if constant is None:
+            constant, tested, swapped = literal(a), b, True
+        if not isinstance(constant, float) or not math.isfinite(constant):
+            continue
+        args = op.body.block.args
+        if tested not in args or args.index(tested) >= len(op.inputs):
+            continue
+        bounds = interval(op.inputs[args.index(tested)], memo)
+        if bounds is None or bounds.empty:
+            continue
+        if swapped:
+            # c PRED u  ==  u PRED' c with the relation reversed.
+            reverse = {2: 4, 3: 5, 4: 2, 5: 3, 9: 11, 10: 12, 11: 9, 12: 10}
+            predicate = reverse.get(predicate, predicate)
+        bit = _decided(predicate, bounds, constant)
+        if bit is None:
+            continue
+        found.append(
+            (
+                op,
+                bool(bit),
+                dict(
+                    predicate=predicate,
+                    literal=constant,
+                    interval=[str(bounds.lo), str(bounds.hi)],
+                ),
+            )
+        )
+    return found
+
+
+def fold_closed_scalars(function):
+    """Replace generic-body scalars whose value is closed by literals; return the count."""
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import FloatAttr, IntegerAttr, IntegerType
     from xdsl.rewriter import Rewriter
 
+    from merlin.targetgen.closed_scalar import UNKNOWN, evaluate
+
+    count = 0
+    for generic in [op for op in function.walk() if op.name == "linalg.generic"]:
+        for op in list(generic.body.block.ops):
+            if op.name in {"arith.constant", "linalg.yield", "linalg.index"} or len(op.results) != 1:
+                continue
+            typ = op.results[0].type
+            value = evaluate(op.results[0], {})
+            if value is UNKNOWN or value is None:
+                continue
+            if isinstance(typ, IntegerType):
+                attr = IntegerAttr(int(value), typ)
+            elif str(typ) in {"f16", "bf16", "f32", "f64"}:
+                attr = FloatAttr(float(value), typ)
+            else:
+                continue
+            Rewriter.replace_op(op, arith.ConstantOp(attr))
+            count += 1
+    return count
+
+
+def _erase_dead(function):
+    """Erase unused, effect-free top-level operations, including dead loops."""
+    from merlin.llvmlower.entry_weight_projection import _pure_dce
+
+    def name(op):
+        return getattr(getattr(op, "op_name", None), "data", op.name)
+
+    def effect_free(op):
+        # Pure reads of private state (closed_private_state) and value-only
+        # arith/math/tensor/scf/linalg operations on tensors.
+        for child in op.walk():
+            if name(child) == "ml_program.global_load":
+                continue
+            if type(child).__module__.startswith(
+                (
+                    "xdsl.dialects.arith",
+                    "xdsl.dialects.math",
+                    "xdsl.dialects.tensor",
+                    "xdsl.dialects.scf",
+                    "xdsl.dialects.linalg",
+                )
+            ):
+                continue
+            return False
+        return True
+
+    while True:
+        _pure_dce(function)
+        changed = False
+        for op in reversed(tuple(function.body.block.ops)):
+            if op.results and all(not r.uses for r in op.results) and effect_free(op):
+                op.parent.erase_op(op)
+                changed = True
+        if not changed:
+            return
+
+
+def specialize(directory, report):
+    from xdsl.dialects import arith, tensor
+    from xdsl.dialects.builtin import IntegerAttr, i1
+    from xdsl.rewriter import InsertPoint, Rewriter
+
     from merlin.frontends.linalg_mlir import parse_mlir_file
+    from merlin.llvmlower.unused_tensor_operands import prune_unused_tensor_inputs
+    from merlin.targetgen.source_primitive_effects import pure_tensor_source
 
     records = [r for r in report.get("cases", ()) if r.get("status") == "bundled"]
     if len(records) != 1:
         return None
     record = records[0]
-    case = record.get("case") or {}
-    if case.get("overload") != "aten.native_dropout.default":
-        return None
-    args = case.get("arguments", {})
-    items = args.get("args", {}).get("items", ())
-    kwargs = args.get("kwargs", {})
-    p = items[1] if len(items) > 1 else kwargs.get("p")
-    train = items[2] if len(items) > 2 else kwargs.get("train")
-    if train not in (True, False) or (train and p not in (0, 1)):
-        return None
     original = (directory / "model.mlir").read_bytes()
     module = parse_mlir_file(directory / "model.mlir")
     functions = [op for op in module.walk() if op.name == "func.func"]
     if len(functions) != 1 or functions[0].sym_name.data != "forward":
         return None
     function = functions[0]
-    if len(function.body.blocks) != 1 or len(function.body.block.args) != 1:
+    if len(function.body.blocks) != 1:
         return None
-    origin = {getattr(op.attributes.get("prov.aten"), "data", None) for op in function.walk()} - {None}
-    if origin != {case["overload"]} or not closed_private_state(module, function):
+    stateful = any(op is not function for op in module.body.block.ops)
+    if stateful and not closed_private_state(module, function):
         return None
-    source = function.body.block.args[0]
-    indices = record.get("output_indices", ())
-    posts = record.get("semantic_boundary", {}).get("post_indices", ())
-    types = list(function.function_type.outputs)
-    if len(indices) != 2 or len(posts) != 1 or set((*indices, *posts)) != set(range(len(types))):
+    if not stateful and not pure_tensor_source(function):
         return None
-    result, mask = (types[i] for i in indices)
-    if (
-        result != source.type
-        or not isinstance(result, TensorType)
-        or not isinstance(mask, TensorType)
-        or str(result.element_type) not in {"f16", "bf16", "f32", "f64"}
-        or str(mask.element_type) != "i1"
-        or any(n < 0 for n in (*result.get_shape(), *mask.get_shape()))
-    ):
+    masks = decided_masks(function)
+    if not masks:
         return None
-    kept = not train or p == 0
-    block = Block(arg_types=[source.type])
-    operations = []
-    output = block.args[0]
-    if train:
-        empty = tensor.EmptyOp([], result)
-        body = Block(arg_types=[result.element_type] * 2)
-        factor = arith.ConstantOp(FloatAttr(float(kept), result.element_type))
-        product = arith.MulfOp(body.args[0], factor.result)
-        body.add_ops([factor, product, L.YieldOp(product.result)])
-        identity = AffineMapAttr(AffineMap.identity(len(result.get_shape())))
-        scaled = L.GenericOp(
-            inputs=[block.args[0]],
-            outputs=[empty.tensor],
-            body=Region(body),
-            indexing_maps=ArrayAttr([identity, identity]),
-            iterator_types=ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * len(result.get_shape())),
-            result_types=[result],
-        )
-        operations.extend([empty, scaled])
-        output = scaled.results[0]
-    bit = arith.ConstantOp(IntegerAttr(int(kept), mask.element_type))
-    filled = tensor.SplatOp(bit.result, [], mask)
-    operations.extend([bit, filled])
-    for op in operations:
-        op.attributes["prov.aten"] = StringAttr(case["overload"])
-    returned = [None] * len(types)
-    returned[indices[0]], returned[indices[1]], returned[posts[0]] = output, filled.result, block.args[0]
-    if any(v is None or v.type != typ for v, typ in zip(returned, types, strict=True)):
-        return None
-    block.add_ops([*operations, func.ReturnOp(*returned)])
-    replacement = function.clone_without_regions()
-    replacement.body.add_block(block)
-    Rewriter.replace_op(function, replacement)
-    for op in list(module.body.block.ops):
-        if op is not replacement:
+    entry = function.body.block
+    evidence = []
+    for generic, bit, detail in masks:
+        constant = arith.ConstantOp(IntegerAttr(int(bit), i1))
+        filled = tensor.SplatOp(constant.result, [], generic.results[0].type)
+        Rewriter.insert_op([constant, filled], InsertPoint.at_start(entry))
+        generic.results[0].replace_all_uses_with(filled.result)
+        evidence.append(dict(mask=int(bit), **detail))
+
+    def name(op):
+        return getattr(getattr(op, "op_name", None), "data", op.name)
+
+    # Private generator state is unobservable (closed_private_state): its
+    # updates are dropped, after which unused generator work is dead code.
+    for op in list(function.walk()):
+        if name(op) == "ml_program.global_store":
             Rewriter.erase_op(op)
+    _erase_dead(function)
+    folded = fold_closed_scalars(function)
+    _erase_dead(function)
+    prune_unused_tensor_inputs(module)
+    _erase_dead(function)
+    if any(name(op).startswith("ml_program.") for op in function.walk()):
+        return None  # Generator state still reaches an observable result.
+    for op in list(module.body.block.ops):
+        if op is not function:
+            Rewriter.erase_op(op)
+    if not pure_tensor_source(function):
+        return None
     module.verify()
     prepared = str(module) + "\n"
     (directory / "model.mlir").write_text(prepared)
     proof = dict(
-        method="source_constant_probability_endpoint",
-        probability=p,
-        training=train,
-        mask=int(kept),
-        state_scope="capsule_private; no observable output or future endpoint output depends on RNG state",
-        retained_arithmetic="source literal scaling with its typed IEEE boundary",
+        method="ir_closed_interval_mask_endpoint",
+        masks=evidence,
+        folded_closed_scalars=folded,
+        state_scope="capsule_private; no observable output depends on generator state",
+        retained_arithmetic="the IR's own arithmetic with the decided mask literal and its typed IEEE boundary",
         source_sha256=hashlib.sha256(original).hexdigest(),
         prepared_sha256=hashlib.sha256(prepared.encode()).hexdigest(),
-        parameters="source literals and ABI only; evaluation tensors never read",
+        parameters="live IR operations, literals and closed value intervals only; no case record or tensor payload",
     )
     record["source_specialization"] = proof
     (directory / "native-source-specialization.json").write_text(json.dumps(proof, indent=2) + "\n")

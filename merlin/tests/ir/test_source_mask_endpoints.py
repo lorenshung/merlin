@@ -1,4 +1,9 @@
-"""Literal mask endpoints retain typed scaling and only discard private state."""
+"""A mask decided by a closed value interval folds; private generator state is discarded.
+
+Only the IR participates: the uniform draw's bounds come from its bit mask and
+literal scale, the threshold from the comparison literal. Case records are
+deliberately misleading and must not be read.
+"""
 
 import pytest
 
@@ -6,17 +11,43 @@ from merlin.frontends.linalg_mlir import parse_mlir_file
 from merlin.targetgen.source_mask_endpoints import specialize
 
 
-def fixture(tmp_path, *, probability=0, training=True, private=True, unknown=False):
+def fixture(tmp_path, *, threshold=1.0, predicate="olt", private=True, unknown=False, keep=1.0):
     text = f'''module {{
       "ml_program.global"() <{{sym_name="rng",sym_visibility="{"private" if private else "public"}",is_mutable,
-        type=tensor<1xi64>,value=dense<1>:tensor<1xi64>}}> : ()->()
-      func.func @forward(%x:tensor<4xf32>) -> (tensor<4xf32>,tensor<4xi1>,tensor<4xf32>)
-        attributes {{"prov.aten"="aten.native_dropout.default"}} {{
-        %state="ml_program.global_load"() <{{global=@rng}}> : ()->tensor<1xi64>
-        "ml_program.global_store"(%state) <{{global=@rng}}> : (tensor<1xi64>)->()
+        type=tensor<4xi64>,value=dense<1>:tensor<4xi64>}}> : ()->()
+      func.func @forward(%x:tensor<4xf32>) -> (tensor<4xf32>,tensor<4xi1>,tensor<4xf32>) {{
+        %state="ml_program.global_load"() <{{global=@rng}}> : ()->tensor<4xi64>
+        %e0=tensor.empty() : tensor<4xf64>
+        %u=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
+          ins(%state:tensor<4xi64>) outs(%e0:tensor<4xf64>) {{
+          ^bb0(%s:i64,%o:f64):
+          %m=arith.constant 9007199254740991 : i64
+          %b=arith.andi %s,%m : i64
+          %f=arith.uitofp %b : i64 to f64
+          %k=arith.constant 1.1102230246251565e-16 : f64
+          %v=arith.mulf %f,%k : f64
+          linalg.yield %v : f64
+        }} -> tensor<4xf64>
+        "ml_program.global_store"(%state) <{{global=@rng}}> : (tensor<4xi64>)->()
         {'"fixture.effect"() : ()->()' if unknown else ""}
-        %data=tensor.empty() : tensor<4xf32>
-        %mask=tensor.empty() : tensor<4xi1>
+        %e1=tensor.empty() : tensor<4xi1>
+        %mask=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
+          ins(%u:tensor<4xf64>) outs(%e1:tensor<4xi1>) {{
+          ^bb0(%w:f64,%o:i1):
+          %t=arith.constant {threshold} : f64
+          %c=arith.cmpf {predicate},%w,%t : f64
+          linalg.yield %c : i1
+        }} -> tensor<4xi1>
+        %e2=tensor.empty() : tensor<4xf32>
+        %data=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
+          ins(%x,%mask:tensor<4xf32>,tensor<4xi1>) outs(%e2:tensor<4xf32>) {{
+          ^bb0(%a:f32,%q:i1,%o:f32):
+          %zero=arith.constant 0.0 : f32
+          %scale=arith.constant {keep} : f32
+          %factor=arith.select %q,%scale,%zero : f32
+          %p=arith.mulf %a,%factor : f32
+          linalg.yield %p : f32
+        }} -> tensor<4xf32>
         return %data,%mask,%x : tensor<4xf32>,tensor<4xi1>,tensor<4xf32>
       }}
     }}'''
@@ -26,10 +57,8 @@ def fixture(tmp_path, *, probability=0, training=True, private=True, unknown=Fal
             dict(
                 status="bundled",
                 case=dict(
-                    overload="aten.native_dropout.default",
-                    arguments=dict(
-                        args=dict(items=[dict(kind="tensor", values="MUST NOT READ"), probability, training])
-                    ),
+                    overload="aten.add.Tensor",
+                    arguments=dict(args=dict(items=[dict(kind="tensor", values="MUST NOT READ"), 0.5, True])),
                 ),
                 output_indices=[0, 1],
                 semantic_boundary=dict(post_indices=[2]),
@@ -38,22 +67,36 @@ def fixture(tmp_path, *, probability=0, training=True, private=True, unknown=Fal
     )
 
 
-@pytest.mark.parametrize("probability,training,mask", [(0, True, 1), (1, True, 0), (0.3, False, 1)])
-def test_complete_source_endpoint_and_private_state_scope(tmp_path, probability, training, mask):
-    report = fixture(tmp_path, probability=probability, training=training)
+@pytest.mark.parametrize("threshold,mask,factor", [(1.0, 1, 1.0), (0.0, 0, 0.0)])
+def test_interval_decided_mask_and_private_state_scope(tmp_path, threshold, mask, factor):
+    report = fixture(tmp_path, threshold=threshold)
     proof = specialize(tmp_path, report)
-    assert proof and proof["mask"] == mask
+    assert proof and [m["mask"] for m in proof["masks"]] == [mask]
+    assert proof["masks"][0]["interval"] == ["0", "9007199254740991/9007199254740992"]
     module = parse_mlir_file(tmp_path / "model.mlir")
     module.verify()
-    assert not any(op.name == "builtin.unregistered" for op in module.walk())
-    assert sum(op.name == "arith.mulf" for op in module.walk()) == int(training)
+    names = [getattr(getattr(op, "op_name", None), "data", op.name) for op in module.walk()]
+    assert not any(name.startswith("ml_program.") for name in names)
+    assert "builtin.unregistered" not in [op.name for op in module.walk()]
+    # The IR's own typed scaling is retained with the decided factor literal.
+    product = next(op for op in module.walk() if op.name == "arith.mulf")
+    assert any(getattr(getattr(v.owner, "value", None), "value", None) is not None for v in product.operands)
     returned = next(op for op in module.walk() if op.name == "func.return")
+    assert returned.operands[1].owner.name == "tensor.splat"
     assert returned.operands[2] is next(op for op in module.walk() if op.name == "func.func").body.block.args[0]
+    constants = [op.value.value.data for op in module.walk() if op.name == "arith.constant" and hasattr(op.value, "value")]
+    assert factor in constants
 
 
-@pytest.mark.parametrize("options", [dict(probability=0.5), dict(private=False), dict(unknown=True)])
-def test_stochastic_or_external_effects_are_not_erased(tmp_path, options):
+@pytest.mark.parametrize(
+    "options", [dict(threshold=0.5), dict(threshold=1.5, predicate="ogt"), dict(private=False), dict(unknown=True)]
+)
+def test_undecided_stochastic_or_external_effects_are_not_erased(tmp_path, options):
     report = fixture(tmp_path, **options)
     original = (tmp_path / "model.mlir").read_bytes()
+    if options.get("predicate") == "ogt":
+        # u > 1.5 is uniformly false over [0, 1): decided, so it folds.
+        assert specialize(tmp_path, report)["masks"][0]["mask"] == 0
+        return
     assert specialize(tmp_path, report) is None
     assert (tmp_path / "model.mlir").read_bytes() == original
