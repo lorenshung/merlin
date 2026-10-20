@@ -72,7 +72,9 @@ def main():
             elif "dim" in kwargs:
                 kwargs["dim"] = []
 
-        if str(op) == "aten.convolution_backward.default":
+        if str(op) == "aten._fft_r2c.default":
+            result = rational_real_transform(args, oracle.exact_array, ExactTensor)
+        elif str(op) == "aten.convolution_backward.default":
             result = convolution_adjoint(args, oracle.exact_array, ExactTensor)
         elif str(op) == "aten.convolution.default" and args[6]:
             result = transposed_convolution(args, oracle.exact_array, ExactTensor)
@@ -158,6 +160,45 @@ class Gaussian:
         return Gaussian(
             (self.real * other.real + self.imag * other.imag) / d, (self.imag * other.real - self.real * other.imag) / d
         )
+
+
+def rational_real_transform(args, array, Tensor):
+    """Independent DFT where every required root of unity is rational.
+
+    No trigonometric approximation or compiler coefficient table is consulted.
+    The fourth roots are exact; other roots require an algebraic oracle.
+    """
+    import math
+
+    import numpy as np
+
+    values = array(args[0])
+    axes, normalization, onesided = args[1:4]
+    total = math.prod(values.shape[axis] for axis in axes)
+    roots = (Gaussian(1), Gaussian(0, -1), Gaussian(-1), Gaussian(0, 1))
+    for axis in axes:
+        n = values.shape[axis]
+        if n not in {1, 2, 4}:
+            raise ValueError("transform needs a non-rational root of unity")
+        result = np.empty(values.shape, dtype=object)
+        for point in np.ndindex(values.shape):
+            acc = Gaussian()
+            for j in range(n):
+                source = list(point)
+                source[axis] = j
+                acc += Gaussian.of(values[tuple(source)]) * roots[(4 * point[axis] * j // n) % 4]
+            result[point] = acc
+        values = result
+    divisor = 1 if normalization == 0 else total if normalization == 2 else math.isqrt(total)
+    if normalization not in {0, 1, 2} or normalization == 1 and divisor * divisor != total:
+        raise ValueError("transform normalization is not rational")
+    if divisor != 1:
+        values = np.vectorize(lambda v: v / divisor, otypes=[object])(values)
+    if onesided:
+        selection = [slice(None)] * values.ndim
+        selection[axes[-1]] = slice(0, values.shape[axes[-1]] // 2 + 1)
+        values = values[tuple(selection)]
+    return Tensor(values, args[0].dtype)
 
 
 def transposed_convolution(args, array, Tensor):

@@ -249,10 +249,10 @@ def grade_core_aten_batch(
             native_floor = grade_native_bits(record, output_bytes, execution_error=execution_error)
         if record.get("numeric_admission", {}).get("quantized_contract"):
             reference = record["numeric_admission"].get("integer_reference", {})
-            expected = reference.get("expected_output_bytes", {})
-            covered = bool(expected) and all(str(i) in expected for i in indices)
+            reference_bytes = reference.get("expected_output_bytes", {})
+            covered = bool(reference_bytes) and all(str(i) in reference_bytes for i in indices)
             passed = covered and all(
-                i < len(output_bytes) and output_bytes[i].hex() == expected[str(i)] for i in indices
+                i < len(output_bytes) and output_bytes[i].hex() == reference_bytes[str(i)] for i in indices
             )
             native_floor = dict(
                 status="pass" if passed else "mismatch",

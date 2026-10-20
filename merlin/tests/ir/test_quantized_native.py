@@ -30,6 +30,33 @@ def test_declared_calibration_independent_of_payload():
         parameters(s)
 
 
+def test_quantized_grading_checks_oracle_bytes_and_retains_eager_diagnostic():
+    from merlin.targetgen.core_aten_batch_grade import grade_core_aten_batch
+
+    reference = np.array([Fraction(1, 64)], np.float32).tobytes()
+    record = dict(
+        overload="fixture",
+        status="bundled",
+        numeric_policy="spec_int8",
+        output_indices=[0],
+        output_abi=[dict(dtype="f32", shape=[1])],
+        case=dict(expected=dict(kind="tensor", dtype="float32", shape=[1], values=[0.016])),
+        numeric_admission=dict(
+            quantized_contract=contract(),
+            integer_reference=dict(
+                status="prepared", engine="independent_source", expected_output_bytes={"0": reference.hex()}
+            ),
+        ),
+    )
+    positive = grade_core_aten_batch(dict(cases=[record]), [reference])["cases"]["fixture"]
+    assert positive["status"] == "pass" and positive["precision_class"] == "b"
+    negative = grade_core_aten_batch(dict(cases=[record]), [np.array([0.016], np.float32).tobytes()])["cases"][
+        "fixture"
+    ]
+    assert negative["status"] == "mismatch"
+    assert negative["integer_reference"]["status"] == "mismatch"
+
+
 def test_full_entry_domain_and_posts_unchanged(tmp_path):
     from merlin.llvmlower.abi import HostModel
     from merlin.llvmlower.codegen import mlir_runtime_c
@@ -85,6 +112,18 @@ def test_gaussian_reference_is_rational():
     assert p.real == Fraction(85, 33) and p.imag == Fraction(3, 11)
     q = p / b
     assert q.real == a.real and q.imag == a.imag
+
+
+def test_rational_transform_oracle_has_no_trigonometric_approximation():
+    from merlin.targetgen.exact_arithmetic import ExactTensor
+    from merlin.targetgen.quantized_native_reference import rational_real_transform
+
+    x = ExactTensor(np.array([[Fraction(i, 3) for i in range(4)]], object), "f32")
+    result = rational_real_transform([x, [1], 0, True], lambda v: v.values, ExactTensor).values
+    assert [(v.real, v.imag) for v in result.flat] == [(2, 0), (Fraction(-2, 3), Fraction(2, 3)), (Fraction(-2, 3), 0)]
+    bad = ExactTensor(np.array([Fraction(1)] * 3, object), "f32")
+    with pytest.raises(ValueError, match="non-rational root"):
+        rational_real_transform([bad, [0], 0, True], lambda v: v.values, ExactTensor)
 
 
 def test_runtime_parallel_products_do_not_gain_native_admission(tmp_path, monkeypatch):
