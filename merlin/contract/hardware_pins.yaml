@@ -1213,7 +1213,7 @@ pins:
       is a submodule with its own revision: the outer tree can move while this one does not, and vice
       versa, so recording only one of the two leaves the result ambiguous.
     repo_canonical: https://github.com/ucb-bar/gemmini
-    commit: "8c3f9923a44a2fe2c7930587be297d6d4f8c09ca"
+    commit: "6ad65b90b1eb270c20ce4f04109e3dde0180b36f"
     targets: [gemmini]
     branch: HEAD
     root_env: MERLIN_CHIPYARD
@@ -1222,13 +1222,7 @@ pins:
       - src/main/scala/gemmini/Configs.scala
       - src/main/scala/gemmini/GemminiISA.scala
       - src/main/scala/gemmini/Mesh.scala
-      # ELABORATED, NOT PARSED — and that is why it is in the read set. The three files above are read
-      # by fact extraction; this one is read by the Verilator ELABORATION that produces the counters a
-      # timing verdict is computed from. It carries an uncommitted edit, and because it was in no read
-      # set, `verify` reported "8 uncommitted change(s), none of them a source this reads" over a file
-      # that is compiled straight into the simulator. That sentence was true of the pin's declaration
-      # and false of the machine. A read set that omits what the RTL build consumes cannot answer the
-      # only question a performance claim asks of this pin.
+      # Selected FIRRTL includes the upstream load-stride assertion.
       - src/main/scala/gemmini/LoadController.scala
       # THE NORMALIZATION EXCLUSION rests on these two. The contract (examples/gemmini/target/contracts/
       # target_contract.yaml) leaves `normalization` and `softmax` undeclared because AccumulatorScale's
@@ -1244,32 +1238,6 @@ pins:
     # bytes are declared here from an unreviewed one. With this on, each read path gets a per-file
     # PINNED / OFF_PIN / UNDETERMINABLE verdict that `check_provenance.py` surfaces by name.
     content_check: true
-    # DECLARED LOCAL EDIT, with the digest of the bytes actually elaborated.
-    #
-    # WHAT THE EDIT IS: `assert(block_stride >= rows)` in the mvin row counter is commented out (4 added
-    # lines, 1 removed; nothing else). A Chisel `assert` lowers to a verification statement only — in the
-    # emitted LoadController.sv it is an `$error` inside the simulation-only guard — so removing one
-    # changes no datapath, no FSM, and no counter increment condition. It changes exactly one thing: the
-    # simulator no longer $fatals on a workload the assertion rejects.
-    #
-    # WHICH LoadController THE COUNTER BUILD ELABORATED — measured 2026-09-02, not assumed. Chisel embeds
-    # the asserting SOURCE LINE in the message it emits, and that is a fingerprint of the file that was
-    # elaborated:
-    #   generated-src/.../gen-collateral/LoadController.sv and the linked
-    #   simulator-chipyard.harness-GemminiRocketConfig binary both carry
-    #     "at LoadController.scala:192 assert(... must load more than 0 bytes)"
-    #   working tree : that assert is at line 192, `block_stride >= rows` commented at 139
-    #   at 8c3f9923  : that assert is at line 189, `block_stride >= rows` live at 136
-    # 192 is the WORKING-TREE numbering, and `block_stride` appears nowhere in the emitted Verilog or in
-    # the binary. So the build elaborated THESE bytes, not the pinned revision's. (mtimes agree and are
-    # the weaker witness: the edit is 2026-08-11 12:47, the simulator 12:53, the collateral 16:01.)
-    #
-    # CONSEQUENCE FOR THE NUMBERS: the eta values in out/artifacts/perf-calibration/gemmini/ were counted
-    # on RTL built from these bytes. Because the delta is an assertion and nothing else, the LD/EX/ST
-    # busy counters are unaffected — but that is an argument, not a licence to call them pinned. They are
-    # "8c3f9923 plus these bytes", and `provenance.citation()` is what spells that.
-    local_edits:
-      src/main/scala/gemmini/LoadController.scala: "780ee0a292d8653fa8a822aee28e2fb2cffbc25301431b4332182008d34fcf6a"
     # The ISA HEADERS this generator ships are a SEPARATE nested repository with its own revision, and
     # every dtype claim about this target is read out of them. This pin cannot describe them (see the
     # sibling below), so it declares that verifying it INCLUDES verifying them: a caller that verified
@@ -1290,12 +1258,8 @@ pins:
       header repository, and the whole point of `covers` is that that no longer hides behind this pin's
       clean verdict.
 
-      EXPECT A SECOND, LOCAL OFF-PIN FINDING: `src/main/scala/gemmini/LoadController.scala`. Its bytes
-      are declared in `local_edits` above, so it is a REVIEWED off-pin file — the finding is the citation
-      form doing its job, not a fault to chase. This pin's other three Scala files ARE clean at 8c3f9923
-      and `source_status` reports them PINNED by content. Do not re-pin this commit to make the finding
-      go away: the edit is uncommitted and belongs to nobody's revision, so there is no sha to move to.
-      Land it upstream and delete the `local_edits` entry, or revert it in the checkout and rebuild.
+      The selected source bundle uses the clean 6ad65b90 generator, including the live
+      LoadController stride assertion. Historical assertion-edited builds are separate artifacts.
 
   gemmini_isa_headers:
     description: >-
@@ -2645,6 +2609,23 @@ artifacts:
         while the configuration contract declares `isa: rv64gc_zicntr`. Those disagree in both
         directions: zicntr is not in the elaborated string, and zfh/zba/zbb/zbs are not in the declared
         one. The elaboration is the fact; the declaration is UNRELIABLE for the host ISA.
+
+  firesim_gemmini_rocket_u250_default:
+    description: Selected run6/run8/run10/run13/run14 U250 FireSim board; distinct from historical 30mhz builds.
+    path: /scratch2/loren/gemmini-coverage/sim/firesim/pinned/gemmini_rocket_default.firesim.tar.gz
+    digest: "a40ce107d340715abf6632b309d2cb6a0f9d4f6ac21843d777a29ce767aa3057"
+    built_from: [gemmini_rtl]
+    config: FireSimGemminiRocketConfig
+    target: gemmini
+    role: firesim_bitstream
+    hw_configs: [alveo_u250_firesim_gemmini_rocket_default]
+    kind: file
+    notes: >-
+      Content-bound build 2026-10-16--04-44-44. The matching FIRRTL is
+      6a53c8466b859647873d0783a66bc8c94d079c5f3d69cda8b4b8c1ed251662da.
+      Gemmini parameters match the Phase 0 source selection; physical addresses are
+      35 bits and TileLink monitors are stripped. Arithmetic equivalence does not
+      assert equal SoC topology or timing. Build-time source closure is not attested.
 
   firesim_gemmini_rocket_u250_30mhz:
     description: >-

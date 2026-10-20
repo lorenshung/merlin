@@ -22,9 +22,9 @@ boards:
       reserve is a build-layout request, not a measured hardware property. No ELF upload
       loader or baud is qualified, so upload estimates must refuse this entry.
 
-  firesim_gemmini_rocket_u250_30mhz:
+  firesim_gemmini_rocket_u250_default:
     target: gemmini
-    bitstream: alveo_u250_firesim_gemmini_rocket_30mhz
+    bitstream: alveo_u250_firesim_gemmini_rocket_default
     host_dts_sha256: c4a2009a405945ea98f731713e0f4e7dc483031ab8cd5156d871e4eb7594f1df
     dram_bytes: 16 GiB
     dram_base: 0x80000000
