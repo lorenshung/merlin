@@ -92,3 +92,68 @@ def test_pool_adjoint_reads_only_primal_shape(value):
         actual=evaluate_operation(target,args,{})
         expected=np.array([[1,2,1],[2,4,2],[1,2,1]],dtype=object)*Fraction(1,28)
         assert np.array_equal(actual.values[0,0],expected)
+
+
+@pytest.mark.parametrize('mask',[(True,False,False),(False,True,False),(False,False,True)])
+def test_convolution_adjoint_uses_only_selected_value_dependencies(mask):
+    torch=pytest.importorskip('torch')
+    import numpy as np
+    from merlin.targetgen.exact_arithmetic import exact_array,ExactTensor
+    from merlin.targetgen.exact_quantized_reference import convolution_backward
+    gradient=ExactTensor(exact_array(torch.ones(1,1,2,2)),torch.float32)
+    source=torch.full((1,1,3,3),1. if mask[1] else float('nan'))
+    weight=torch.full((1,1,2,2),1. if mask[0] else float('inf'))
+    args=(gradient,source,weight,[1],[1,1],[0,0],[1,1],False,[0,0],1,list(mask))
+    actual=convolution_backward(args[:3],args,'adjoint',[])
+    baseline=(gradient,torch.ones_like(source),torch.ones_like(weight),*args[3:])
+    expected=convolution_backward(baseline[:3],baseline,'adjoint',[])
+    for wanted,left,right in zip(mask,actual,expected,strict=True):
+        if wanted:assert np.array_equal(left.values,right.values)
+        else:assert left is None and right is None
+
+
+@pytest.mark.parametrize('beta',[-2.,0.,2.])
+@pytest.mark.parametrize('relu',[False,True])
+def test_readout_special_overlay_is_only_the_broadcast_bias_dependence(beta,relu):
+    torch=pytest.importorskip('torch')
+    pytest.importorskip('m2m.capture.integer_readout')
+    from fractions import Fraction
+    from merlin.targetgen.declared_readout_specials import retain_special_readouts
+    graph=torch.fx.Graph();acc=graph.placeholder('acc');bias=graph.placeholder('bias')
+    result=graph.call_function(torch.ops.m2m_q.exact_readout.default,(acc,.015625,[.015625],1.,bias,beta,.015625,3,-128,127,relu,False))
+    graph.output(result);model=torch.fx.GraphModule(torch.nn.Module(),graph)
+    assert retain_special_readouts(model,'byte_storage_zero_nan_saturating_infinity')==1
+    values=torch.tensor([[64,-64,0,128]],dtype=torch.int32)
+    residual=torch.tensor([float('nan'),float('inf'),-float('inf'),1.25])
+    got=model(values,residual)
+    expected=[]
+    for index,(integer,b) in enumerate(zip(values[0].tolist(),residual.tolist(),strict=True)):
+        if beta and index<3:code=0 if index==0 else 127 if (index==1)==(beta>0) else max(-128,3) if relu else -128
+        else:
+            value=Fraction(integer,4096)+(Fraction(5,4)*Fraction(beta) if index==3 else 0)
+            code=min(127,max(3 if relu else -128,round(value/Fraction(1,64))+3))
+        expected.append(code)
+    assert got.tolist()==[expected]
+    original=values.clone();model(values,torch.zeros_like(residual));assert torch.equal(values,original)
+
+
+def test_declared_special_bias_is_discarded_only_at_the_final_quantizer():
+    torch=pytest.importorskip('torch')
+    import torch.ao.quantization.fx._decomposed
+    from merlin.targetgen.exact_quantized_reference import run
+    graph=torch.fx.Graph();x=graph.placeholder('x');bias=graph.placeholder('bias')
+    q=graph.call_function(torch.ops.quantized_decomposed.quantize_per_tensor.default,(x,.015625,0,-128,127,torch.int8))
+    real=graph.call_function(torch.ops.quantized_decomposed.dequantize_per_tensor.default,(q,.015625,0,-128,127,torch.int8))
+    result=graph.call_function(torch.ops.aten.add.Tensor,(real,bias))
+    result=graph.call_function(torch.ops.aten.relu.default,(result,))
+    q=graph.call_function(torch.ops.quantized_decomposed.quantize_per_tensor.default,(result,.015625,0,-128,127,torch.int8))
+    result=graph.call_function(torch.ops.quantized_decomposed.dequantize_per_tensor.default,(q,.015625,0,-128,127,torch.int8))
+    graph.output(result);model=torch.fx.GraphModule(torch.nn.Module(),graph)
+    model._recipe_quantization_stats={'framework_capture_policy':{'quantization_nonfinite':'byte_storage_zero_nan_saturating_infinity'}}
+    inputs=(torch.ones(4),torch.tensor([float('nan'),float('inf'),-float('inf'),.25]))
+    actual=run(model,inputs).output;expected=model(*inputs)
+    assert torch.equal(actual.view(torch.uint8),expected.view(torch.uint8))
+    # Removing the Q boundary must not manufacture an IEEE NaN payload claim.
+    output=next(n for n in graph.nodes if n.op=='output');output.args=(next(n for n in graph.nodes if n.target==torch.ops.aten.relu.default),)
+    graph.eliminate_dead_code();model.recompile()
+    with pytest.raises(ValueError,match='final byte quantizer'):run(model,inputs)

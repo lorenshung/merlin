@@ -36,6 +36,8 @@ def implementation_identity() -> dict:
         "merlin.targetgen._aten_opset_worker",
         "merlin.targetgen._recipe_quantizer",
         "merlin.targetgen.declared_calibration",
+        "merlin.targetgen.declared_readout_specials",
+        "merlin.targetgen.exact_boundary_special",
         "merlin.capture.integerization",
         "merlin.capture.static_metadata",
         "merlin.targetgen.core_aten_w8a8_reference",

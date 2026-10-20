@@ -1167,6 +1167,9 @@ def main(argv=None, *, prepared_program=None, completed=None) -> int:
                 independent_error = f"{type(exc).__name__}: {exc}"[:2000]
                 independent = None
         mdl, integerization_receipt = integerize_static_pt2e(mdl, tuple(inputs), numerics=readout_numerics)
+        from merlin.targetgen.declared_readout_specials import retain_special_readouts
+        retain_special_readouts(mdl, (recipe or {}).get("quantization_nonfinite"))
+        integerization_receipt["ieee_quantizer_residuals"] = getattr(mdl, "_merlin_special_readout_proofs", [])
         if declared_graph:
             if independent is not None:
                 leaves, _ = _output_abi(independent.output)

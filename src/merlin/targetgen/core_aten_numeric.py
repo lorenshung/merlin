@@ -529,6 +529,9 @@ def _prepare_spec_int8(
                 except ValueError as exc:
                     capture_proof_error = str(exc)
             captured_plan = admission_plan(prepared_module, selection, captured=True, provider_proof=capture_proof)
+            residuals = artifact.meta.get("integerization_receipt", {}).get("ieee_quantizer_residuals", [])
+            if residuals:
+                captured_plan["ieee_special_family"] = dict(family="F3", proof="broadcast_residual_byte_quantization", readouts=residuals)
             captured_plan["scalar_tensor_carriers_folded"] = scalar_carriers
             captured_plan["quantized_affine_domain_proofs"] = domain_proofs
             if capture_proof_error:

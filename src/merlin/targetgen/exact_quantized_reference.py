@@ -15,7 +15,7 @@ import numpy as np
 
 from merlin.targetgen.exact_arithmetic import (
     ExactTensor,
-    exact_array,
+    exact_array as _finite_exact_array,
     materialize,
 )
 from merlin.targetgen.exact_arithmetic import (
@@ -25,11 +25,36 @@ from merlin.targetgen.exact_arithmetic import (
     quantize as quantize,
 )
 from merlin.targetgen.exact_arithmetic import (
-    rational as rational,
+    rational as _finite_rational,
 )
 from merlin.targetgen.exact_arithmetic import (
     round_binary as round_binary,
 )
+
+
+from contextvars import ContextVar
+from merlin.targetgen.exact_boundary_special import BoundarySpecial
+_boundary_state=ContextVar('exact_reference_boundary_state',default=None)
+
+def rational(value):
+    state=_boundary_state.get()
+    if isinstance(value,BoundarySpecial):return value
+    if state is not None and not isinstance(value,Fraction):
+        number=float(value)
+        if not math.isfinite(number):
+            state['special_seen']=True
+            return BoundarySpecial(0 if math.isnan(number) else 1 if number>0 else -1)
+    return _finite_rational(value)
+
+def exact_array(value):
+    if _boundary_state.get() is None:return _finite_exact_array(value)
+    if isinstance(value,ExactTensor):return value.values
+    if hasattr(value,'detach'):value=value.detach().cpu().tolist()
+    return np.vectorize(rational,otypes=[object])(np.asarray(value,dtype=object))
+
+
+def _clamp_array(values,bound,*,lower):
+    return np.vectorize(lambda value: value if isinstance(value,BoundarySpecial) and not value.sign else max(value,bound) if lower else min(value,bound),otypes=[object])(values)
 
 
 def mac_observation(lhs, rhs, accumulator, scales):
@@ -282,13 +307,17 @@ def _fold(columns, output_size, kernel_size, dilation, padding, stride):
 
 def convolution_backward(operands, args, node_name, sites):
     """Exact spatial adjoints, plus independent code-domain GEMM observations."""
-    grad, source, weight = [exact_array(x) for x in operands]
     stride, padding, dilation = map(list, (args[4], args[5], args[6]))
     transposed, output_padding, groups, mask = args[7:11]
+    def geometry(value):
+        return value.values.shape if isinstance(value, ExactTensor) else value.shape
+    grad = exact_array(operands[0]) if any(mask) else np.empty(geometry(operands[0]), dtype=object)
+    source = exact_array(operands[1]) if mask[1] else np.empty(geometry(operands[1]), dtype=object)
+    weight = exact_array(operands[2]) if mask[0] else np.empty(geometry(operands[2]), dtype=object)
     if transposed or any(output_padding) or source.ndim != 4:
         raise ValueError("exact reference requires non-transposed 2-D convolution_backward")
     dx, dw = np.full(source.shape, Fraction(0), dtype=object), np.full(weight.shape, Fraction(0), dtype=object)
-    db = np.sum(grad, axis=(0, 2, 3))
+    db = np.sum(grad, axis=(0, 2, 3)) if mask[2] else None
     n, cin, h, width = source.shape
     cout, cg, kh, kw = weight.shape
     fg, oh, ow = cout // groups, grad.shape[2], grad.shape[3]
@@ -386,7 +415,7 @@ def evaluate_operation(target, args, kwargs):
             "true_divide": operator.truediv,
         }[op](left, right)
     elif op in {"neg", "relu", "abs"}:
-        out = -a[0] if op == "neg" else np.maximum(a[0], 0) if op == "relu" else abs(a[0])
+        out = -a[0] if op == "neg" else _clamp_array(a[0], 0, lower=True) if op == "relu" else abs(a[0])
     elif op in {"clamp", "clamp_min", "clamp_max", "hardtanh"}:
         low = args[1] if len(args) > 1 else kwargs.get("min_val", -1) if op == "hardtanh" else kwargs.get("min")
         high = args[2] if len(args) > 2 else kwargs.get("max_val", 1) if op == "hardtanh" else kwargs.get("max")
@@ -394,12 +423,12 @@ def evaluate_operation(target, args, kwargs):
             low, high = None, low
         out = a[0]
         if low is not None:
-            out = np.maximum(out, rational(low))
+            out = _clamp_array(out, rational(low), lower=True)
         if high is not None:
-            out = np.minimum(out, rational(high))
+            out = _clamp_array(out, rational(high), lower=False)
     elif op in {"mm", "bmm", "matmul", "linear", "addmm", "baddbmm"}:
         if op in {"addmm", "baddbmm"}:
-            out = rational(kwargs.get("beta", 1)) * a[0] + rational(kwargs.get("alpha", 1)) * np.matmul(a[1], a[2])
+            out = (rational(kwargs.get("beta", 1)) * a[0] if kwargs.get("beta",1) else Fraction(0)) + rational(kwargs.get("alpha", 1)) * np.matmul(a[1], a[2])
         elif op == "linear":
             out = np.matmul(a[0], a[1].swapaxes(-1, -2))
             if len(a) > 2 and a[2] is not None:
@@ -634,8 +663,17 @@ def run(model, inputs):
 
     saved = copy.deepcopy(tuple(inputs))
     reference = Reference(model, garbage_collect_values=False)
-    exact = reference.run(*inputs)
-    output = materialize(exact)
+    state={'special_seen':False} if boundary_policy=='byte_storage_zero_nan_saturating_infinity' else None
+    token=_boundary_state.set(state)
+    try:
+        exact = reference.run(*inputs)
+        if state is not None and state['special_seen']:
+            leaves=torch.utils._pytree.tree_leaves(exact)
+            if any(isinstance(x,ExactTensor) and x.codes is None for x in leaves):
+                raise ValueError('special rational arithmetic requires a final byte quantizer')
+        output = materialize(exact)
+    finally:
+        _boundary_state.reset(token)
     divergence = {"status": "not_checked", "informational": True}
     try:
         eager = model(*saved)
