@@ -50,7 +50,9 @@ def test_full_entry_domain_and_posts_unchanged(tmp_path):
     function = next(op for op in module.walk() if op.name == "func.func")
     ret = function.body.block.last_op
     assert ret.operands[1] is function.body.block.args[0]
-    llvm = lower_to_llvm_ir(str(module), workdir=tmp_path / "lower", vectorize=False)
+    from merlin.xdsl_dialects._common import text
+
+    llvm = lower_to_llvm_ir(text(module, generic=True), workdir=tmp_path / "lower", vectorize=False)
     ll = tmp_path / "model.ll"
     ll.write_text(llvm)
     obj = ll.with_suffix(".o")
@@ -121,3 +123,91 @@ def test_native_exact_success_does_not_try_quantization(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fallback, "prepare", forbidden)
     assert prepare_spec_int8(tmp_path, {}) is expected
+
+
+def test_nan_word_overlay_is_removed_but_live_nan_is_refused():
+    from merlin.llvmlower.quantized_native import finite_source
+
+    def fixture(yielded):
+        return parse_mlir_text(
+            """module {
+          func.func @forward(%x:tensor<1xf32>) -> tensor<1xf32> {
+            %e=tensor.empty() : tensor<1xf32>
+            %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+              ins(%x:tensor<1xf32>) outs(%e:tensor<1xf32>) {
+            ^bb0(%a:f32,%b:f32):
+              %nan=arith.constant 0x7FC00000 : f32
+              %isnan=arith.cmpf uno,%a,%a : f32
+              %v=arith.select %isnan,%nan,%a : f32
+              linalg.yield """
+            + yielded
+            + """ : f32
+            } -> tensor<1xf32>
+            return %r : tensor<1xf32>
+          }}"""
+        )
+
+    module = fixture("%v")
+    finite_source(module)
+    module.verify()
+    assert not any(op.name == "arith.cmpf" for op in module.walk())
+    with pytest.raises(ValueError, match="nonfinite literal"):
+        finite_source(fixture("%nan"))
+
+
+def test_rational_divisors_survive_layouts_until_exported_quantize(tmp_path):
+    from merlin.llvmlower.abi import HostModel
+    from merlin.llvmlower.codegen import mlir_runtime_c
+    from merlin.llvmlower.floating_components import rewrite_floating_components
+    from merlin.llvmlower.pipeline import lower_to_llvm_ir
+    from merlin.llvmlower.toolchain import clang
+
+    module = parse_mlir_text("""module {
+      func.func @forward(%x:tensor<256xf32>) -> tensor<16x16xf32> attributes {llvm.emit_c_interface} {
+        %three=arith.constant 3.0 : f32
+        %divisor=tensor.splat %three : tensor<256xf32>
+        %e=tensor.empty() : tensor<256xf32>
+        %q=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+          ins(%x,%divisor:tensor<256xf32>,tensor<256xf32>) outs(%e:tensor<256xf32>) {
+        ^bb0(%a:f32,%b:f32,%out:f32):
+          %v=arith.divf %a,%b : f32
+          linalg.yield %v : f32
+        } -> tensor<256xf32>
+        %shape=arith.constant dense<[16,16]> : tensor<2xi64>
+        %view=tensor.reshape %q(%shape) : (tensor<256xf32>,tensor<2xi64>) -> tensor<16x16xf32>
+        %dst=tensor.empty() : tensor<16x16xf32>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0,d1)->(d0,d1)>,affine_map<(d0,d1)->(d0,d1)>,affine_map<(d0,d1)->(d0,d1)>],iterator_types=["parallel","parallel"]}
+          ins(%view,%view:tensor<16x16xf32>,tensor<16x16xf32>) outs(%dst:tensor<16x16xf32>) {
+        ^bb1(%a:f32,%b:f32,%out:f32):
+          %v=arith.addf %a,%b : f32
+          linalg.yield %v : f32
+        } -> tensor<16x16xf32>
+        return %r : tensor<16x16xf32>
+      }}""")
+    p = contract()
+    grids = quantize_entries(module, p)
+    bounds, proofs = rewrite_floating_components(
+        module, [None], known_grids=grids, allow_reassociation=True, quantized_contract=p
+    )
+    module.verify()
+    assert any(row["denominator"] == 3 for row in proofs)
+    from merlin.xdsl_dialects._common import text
+
+    llvm = lower_to_llvm_ir(text(module, generic=True), workdir=tmp_path / "lower", vectorize=False)
+    ll = tmp_path / "rational.ll"
+    ll.write_text(llvm)
+    obj = ll.with_suffix(".o")
+    lib = tmp_path / "rational.so"
+    subprocess.run([str(clang()), "-fPIC", "-O2", "-c", str(ll), "-o", str(obj)], check=True, capture_output=True)
+    subprocess.run(
+        ["cc", "-fPIC", "-shared", str(obj), str(mlir_runtime_c()), "-lm", "-o", str(lib)],
+        check=True,
+        capture_output=True,
+    )
+    x = np.arange(-128, 128, dtype=np.float32) / 64
+    y = np.zeros((16, 16), np.float32)
+    HostModel.load(str(lib))([(a.ctypes.data, a.shape) for a in (x, y)])
+    expected = np.asarray(
+        [min(127, max(-128, round(Fraction(2 * i, 3)))) / 64 for i in range(-128, 128)], np.float32
+    ).reshape(16, 16)
+    assert y.tobytes() == expected.tobytes()

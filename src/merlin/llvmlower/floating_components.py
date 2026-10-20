@@ -47,7 +47,8 @@ def rewrite_floating_components(
     from merlin.llvmlower.pointwise_primitives import expose_pointwise_primitives
 
     expose_reduce_domains(module)
-    expose_pointwise_primitives(module)
+    if quantized_contract is None:
+        expose_pointwise_primitives(module)
     function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
     grids = dict(zip(function.body.block.args, input_grids))
     grids.update(known_grids or {})
@@ -329,7 +330,55 @@ def rewrite_floating_components(
             )
             Rewriter.replace_op(op, operations, [result])
 
+    def rational_grid(value):
+        return raw_forms[value][1:3] if value in raw_forms else grid(value)
+
+    def rational_pack(value, exponent, operations):
+        original = raw_forms.get(value)
+        if original is not None:
+            raw_forms[value] = (*original[:3], 1)
+        try:
+            return pack(value, exponent, operations)
+        finally:
+            if original is not None:
+                raw_forms[value] = original
+
     for op in list(function.body.block.ops):
+        if quantized_contract is not None:
+            from merlin.llvmlower.quantized_native import shadow_layout
+
+            if shadow_layout(op, raw_forms, grid, pack, bounds, i128):
+                continue
+        if (
+            quantized_contract is not None
+            and op.name == "linalg.generic"
+            and len(op.results) == 1
+            and floating(op.results[0])
+            and "merlin.exact_host_arithmetic" not in op.attributes
+        ):
+            from merlin.llvmlower.static_polynomial_components import lift_static_polynomial
+            from merlin.llvmlower.static_polynomials import PolynomialRefusal
+
+            try:
+                operations, integer, exponent, bound, denominator = lift_static_polynomial(
+                    op,
+                    rational_grid,
+                    rational_pack,
+                    bounds,
+                    operand_type=i64,
+                    result_type=i128,
+                    rational_denominators={v: form[3] for v, form in raw_forms.items()},
+                )
+            except PolynomialRefusal as exc:
+                from xdsl.dialects.builtin import StringAttr
+
+                op.attributes["merlin.quantized_polynomial_refusal"] = StringAttr(str(exc))
+                if any(raw_forms.get(v, (None, 0, 0, 1))[3] != 1 for v in op.operands):
+                    raise ValueError("exact rational continuation is unproved: " + str(exc)) from exc
+            else:
+                result = reshape(integer, op.results[0].type.get_shape(), operations)
+                publish(op, result, exponent, bound, operations, denominator=denominator)
+                continue
         if op.name == "linalg.generic" and len(op.results) == 1 and floating(op.results[0]):
             from xdsl.dialects.builtin import StringAttr
 
@@ -671,4 +720,20 @@ def rewrite_floating_components(
             denominator=denominator,
         )
     module.verify()
+    if quantized_contract is not None:
+        from merlin.llvmlower.quantized_native import output_boundary
+
+        returned = function.body.block.last_op
+        operations = []
+        outputs = []
+        for value in returned.operands:
+            if value not in raw_forms:
+                outputs.append(value)
+                continue
+            integer, exponent, bound, denominator = raw_forms[value]
+            outputs.append(
+                output_boundary(integer, exponent, bound, denominator, value.type, operations, quantized_contract)
+            )
+        function.body.block.insert_ops_before(operations, returned)
+        returned.operands = outputs
     return bounds, proofs

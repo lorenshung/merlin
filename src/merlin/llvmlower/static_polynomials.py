@@ -13,7 +13,9 @@ class PolynomialRefusal(ValueError):
     pass
 
 
-def analyze_static_polynomial(op, *, work_limit=1_000_000, require_bilinear=True, statistics=None):
+def analyze_static_polynomial(
+    op, *, work_limit=1_000_000, require_bilinear=True, statistics=None, ignore_float_rounding=False
+):
     from xdsl.dialects.builtin import FloatAttr, IntegerAttr
     from xdsl.ir.affine import AffineDimExpr
 
@@ -140,15 +142,52 @@ def analyze_static_polynomial(op, *, work_limit=1_000_000, require_bilinear=True
                 result = add(*args, sign=-1 if name == "arith.subf" else 1)
             elif name == "arith.mulf":
                 result = multiply(*args)
+            elif ignore_float_rounding and name == "math.fma":
+                result = add(multiply(args[0], args[1]), args[2])
             elif name == "arith.divf":
                 divisor = args[1]
                 if set(divisor) != {()} or not divisor[()]:
                     raise PolynomialRefusal("division requires a nonzero rational literal")
                 result = {key: value / divisor[()] for key, value in args[0].items()}
-            elif name == "arith.extf":
+            elif ignore_float_rounding and name in {"arith.sitofp", "arith.uitofp"} and type(args[0]) is int:
+                from merlin.targetgen.exact_arithmetic import round_binary
+
+                value = args[0]
+                if name == "arith.uitofp":
+                    value %= 1 << child.operands[0].type.width.data
+                token = str(child.results[0].type)
+                value = round_binary(
+                    value, {"f16": 16, "bf16": 16, "f32": 32, "f64": 64}[token], bfloat16=token == "bf16"
+                )
+                result = {(): Fraction(value)} if value else {}
+            elif name == "arith.extf" or (ignore_float_rounding and name == "arith.truncf"):
                 result = args[0]
             elif name == "arith.negf":
                 result = {key: -value for key, value in args[0].items()}
+            elif ignore_float_rounding and name == "math.absf" and set(args[0]) <= {()}:
+                result = {(): abs(args[0][()])} if args[0] else {}
+            elif ignore_float_rounding and name == "arith.cmpf" and all(set(v) <= {()} for v in args):
+                a, b = (v.get((), Fraction(0)) for v in args)
+                result = int(
+                    [
+                        False,
+                        a == b,
+                        a > b,
+                        a >= b,
+                        a < b,
+                        a <= b,
+                        a != b,
+                        True,
+                        a == b,
+                        a > b,
+                        a >= b,
+                        a < b,
+                        a <= b,
+                        a != b,
+                        False,
+                        True,
+                    ][child.predicate.value.data]
+                )
             elif name == "arith.cmpi":
                 if any(type(v) is not int for v in args):
                     raise PolynomialRefusal("data-dependent predicate")
@@ -176,6 +215,10 @@ def analyze_static_polynomial(op, *, work_limit=1_000_000, require_bilinear=True
                 "arith.remui",
                 "arith.andi",
                 "arith.ori",
+                "arith.minsi",
+                "arith.maxsi",
+                "arith.minui",
+                "arith.maxui",
             }:
                 if any(type(v) is not int for v in args):
                     raise PolynomialRefusal("non-index integer expression")
@@ -188,6 +231,10 @@ def analyze_static_polynomial(op, *, work_limit=1_000_000, require_bilinear=True
                     "arith.remui": lambda: a % b,
                     "arith.andi": lambda: a & b,
                     "arith.ori": lambda: a | b,
+                    "arith.minsi": lambda: min(a, b),
+                    "arith.maxsi": lambda: max(a, b),
+                    "arith.minui": lambda: min((a, b), key=lambda v: (v < 0, v)),
+                    "arith.maxui": lambda: max((a, b), key=lambda v: (v < 0, v)),
                 }[name]()
             else:
                 raise PolynomialRefusal("unsupported static polynomial operation " + name)

@@ -1,11 +1,11 @@
 """Retain static gathers and express closed polynomial data work as integer MACs."""
 
-from math import prod
+from math import lcm, prod
 
 from merlin.llvmlower.static_polynomials import PolynomialRefusal, analyze_static_polynomial
 
 
-def lift_static_polynomial(op, grid, pack, bounds, *, operand_type=None, result_type=None):
+def lift_static_polynomial(op, grid, pack, bounds, *, operand_type=None, result_type=None, rational_denominators=None):
     """Build a width-proved exact contraction, or refuse before changing source."""
     from xdsl.dialects import arith, tensor
     from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, IndexType, IntegerAttr, TensorType, i64, i128
@@ -16,7 +16,20 @@ def lift_static_polynomial(op, grid, pack, bounds, *, operand_type=None, result_
     i64, i128 = operand_type or i64, result_type or i128
     operand_limit = i64.width.data - 2
     reconstruction_limit = i128.width.data - 8
-    atoms, rows = analyze_static_polynomial(op)
+    atoms, rows = analyze_static_polynomial(
+        op, require_bilinear=rational_denominators is None, ignore_float_rounding=rational_denominators is not None
+    )
+    denominator = 1
+    if rational_denominators is not None:
+        rows = [
+            {
+                key: coefficient / prod(rational_denominators.get(atoms[i][0], 1) for i in key)
+                for key, coefficient in row.items()
+            }
+            for row in rows
+        ]
+        denominator = lcm(*(coefficient.denominator for row in rows for coefficient in row.values()))
+        rows = [{key: coefficient * denominator for key, coefficient in row.items()} for row in rows]
     sources = list(dict.fromkeys(source for source, _ in atoms))
     grids = {source: grid(source) for source in sources}
     if any(value is None for value in grids.values()):
@@ -70,7 +83,13 @@ def lift_static_polynomial(op, grid, pack, bounds, *, operand_type=None, result_
         atom_values[i] = extract.result
     count = max(map(len, terms), default=0)
     if not count:
-        raise PolynomialRefusal("empty polynomial")
+        if rational_denominators is None:
+            raise PolynomialRefusal("empty polynomial")
+        zero = arith.ConstantOp(IntegerAttr(0, i128))
+        splat = tensor.SplatOp(zero.result, [], TensorType(i128, [len(rows), 1, 1]))
+        operations.extend([zero, splat])
+        bounds[splat.result] = 0
+        return operations, splat.result, exponent, 0, denominator
     left_type, right_type = TensorType(i64, [len(rows), 1, count]), TensorType(i64, [len(rows), count, 1])
     left_empty, right_empty = tensor.EmptyOp([], left_type), tensor.EmptyOp([], right_type)
     operations.extend([left_empty, right_empty])
@@ -120,4 +139,5 @@ def lift_static_polynomial(op, grid, pack, bounds, *, operand_type=None, result_
     )
     operations.append(contraction)
     bounds[contraction.results[0]] = bound
-    return operations, contraction.results[0], exponent, bound
+    result = (operations, contraction.results[0], exponent, bound)
+    return (*result, denominator) if rational_denominators is not None else result

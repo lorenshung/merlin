@@ -16,7 +16,7 @@ def main():
 
     from merlin.targetgen.core_aten_capture import loader_source
     from merlin.targetgen.exact_arithmetic import ExactTensor, quantize, round_binary
-    from merlin.targetgen.exact_quantized_reference import convolution_backward, evaluate_operation
+    from merlin.targetgen.exact_quantized_reference import evaluate_operation
 
     directory = Path(sys.argv[1])
     request = json.loads((directory / "quantized-native-request.json").read_text())
@@ -26,6 +26,15 @@ def main():
 
     original_rational = oracle.rational
     oracle.rational = lambda x: Gaussian.of(x) if isinstance(x, (Gaussian, complex)) else original_rational(x)
+
+    def exact_array(value):
+        if isinstance(value, ExactTensor):
+            return value.values
+        if hasattr(value, "detach"):
+            value = value.detach().cpu().tolist()
+        return np.vectorize(oracle.rational, otypes=[object])(np.asarray(value, dtype=object))
+
+    oracle.exact_array = exact_array
     outputs = {}
     for record in request["records"]:
         case = record["case"]
@@ -43,7 +52,7 @@ def main():
                 values = np.vectorize(Gaussian, otypes=[object])(real, imag)
             else:
                 values = quantize(value, scale, nonfinite=p["nonfinite"]) * scale
-            exact.append(ExactTensor(values, torch.float32))
+            exact.append(ExactTensor(np.asarray(values, dtype=object), torch.float32))
         arguments = source._decode(source._DOCUMENT["arguments"], exact)
         # Dtypes govern only the final required dequantization, not accumulation.
         args, kwargs = arguments["args"], arguments["kwargs"]
@@ -51,11 +60,25 @@ def main():
         if "dtype" in kwargs and kwargs["dtype"] is not None:
             kwargs["dtype"] = torch.float32
         op = source._op(case["overload"])
+        if (
+            str(op).split(".")[1] in {"sum", "mean", "amax", "amin"}
+            and args
+            and isinstance(args[0], ExactTensor)
+            and args[0].values.ndim == 0
+        ):
+            if len(args) > 1:
+                args = list(args)
+                args[1] = []
+            elif "dim" in kwargs:
+                kwargs["dim"] = []
+
         if str(op) == "aten.convolution_backward.default":
-            result = convolution_backward(args[:3], args, "source", [])
+            result = convolution_adjoint(args, oracle.exact_array, ExactTensor)
+        elif str(op) == "aten.convolution.default" and args[6]:
+            result = transposed_convolution(args, oracle.exact_array, ExactTensor)
         else:
             result = evaluate_operation(op, args, kwargs)
-        leaves = torch.utils._pytree.tree_leaves(result)
+        leaves = [value for value in torch.utils._pytree.tree_leaves(result) if value is not None]
         if len(leaves) != len(record["output_indices"]):
             raise ValueError("quantized oracle output count differs")
         for leaf, index, abi in zip(leaves, record["output_indices"], record["output_abi"], strict=True):
@@ -69,13 +92,17 @@ def main():
                 dtype = "f32"
             else:
                 values = quantize(leaf, scale) * scale
-            if dtype not in {"f16", "bf16", "f32"}:
+            if dtype not in {"f16", "bf16", "f32", "f64"}:
                 raise ValueError("non-floating quantized output")
             rounded = [
-                round_binary(v, 16 if dtype in {"f16", "bf16"} else 32, bfloat16=dtype == "bf16") for v in values.flat
+                round_binary(
+                    v, 16 if dtype in {"f16", "bf16"} else 64 if dtype == "f64" else 32, bfloat16=dtype == "bf16"
+                )
+                for v in np.asarray(values, dtype=object).flat
             ]
             tensor = torch.tensor(
-                rounded, dtype={"f16": torch.float16, "bf16": torch.bfloat16, "f32": torch.float32}[dtype]
+                rounded,
+                dtype={"f16": torch.float16, "bf16": torch.bfloat16, "f32": torch.float32, "f64": torch.float64}[dtype],
             )
             outputs[str(index)] = bytes(tensor.contiguous().view(torch.uint8).tolist()).hex()
         # Nonmutating source arguments are also exported by the batch ABI.
@@ -131,3 +158,81 @@ class Gaussian:
         return Gaussian(
             (self.real * other.real + self.imag * other.imag) / d, (self.imag * other.real - self.real * other.imag) / d
         )
+
+
+def transposed_convolution(args, array, Tensor):
+    import numpy as np
+    import torch
+
+    x, w, bias = args[:3]
+    stride, pad, dil, _, opad, groups = args[3:9]
+    x, w = array(x), array(w)
+    spatial = tuple(
+        (n - 1) * s - 2 * p + d * (k - 1) + o + 1
+        for n, s, p, d, k, o in zip(x.shape[2:], stride, pad, dil, w.shape[2:], opad, strict=True)
+    )
+    out = np.full((x.shape[0], w.shape[1] * groups, *spatial), Fraction(0), dtype=object)
+    if bias is not None:
+        out += array(bias).reshape((1, -1) + (1,) * len(spatial))
+    cg = x.shape[1] // groups
+    for point in np.ndindex(x.shape):
+        n, ci, *position = point
+        for co in range(w.shape[1]):
+            for kernel in np.ndindex(w.shape[2:]):
+                dest = tuple(
+                    i * s - p + k * d for i, s, p, k, d in zip(position, stride, pad, kernel, dil, strict=True)
+                )
+                if all(0 <= i < size for i, size in zip(dest, spatial, strict=True)):
+                    out[(n, ci // cg * w.shape[1] + co, *dest)] += x[point] * w[(ci, co, *kernel)]
+    return Tensor(out, torch.float32)
+
+
+def convolution_adjoint(args, array, Tensor):
+    import numpy as np
+    import torch
+
+    gradient, source, weight = args[:3]
+    stride, pad, dil = args[4:7]
+    transposed, opad, groups, mask = args[7:11]
+    g, x, w = map(array, (gradient, source, weight))
+    dx = np.full(x.shape, Fraction(0), dtype=object)
+    dw = np.full(w.shape, Fraction(0), dtype=object)
+    db = np.sum(g, axis=(0, *range(2, g.ndim)))
+    cg = x.shape[1] // groups
+    fg = g.shape[1] // groups
+    # Enumerate the primal's exact source/destination relation. No float sums.
+    if transposed:
+        for point in np.ndindex(x.shape):
+            n, ci, *position = point
+            for local_co in range(fg):
+                co = ci // cg * fg + local_co
+                for kernel in np.ndindex(w.shape[2:]):
+                    dest = tuple(
+                        i * s - p + k * d for i, s, p, k, d in zip(position, stride, pad, kernel, dil, strict=True)
+                    )
+                    if not all(0 <= i < size for i, size in zip(dest, g.shape[2:], strict=True)):
+                        continue
+                    wi = (ci, local_co, *kernel)
+                    gi = (n, co, *dest)
+                    if mask[0]:
+                        dx[point] += g[gi] * w[wi]
+                    if mask[1]:
+                        dw[wi] += g[gi] * x[point]
+    else:
+        for gi in np.ndindex(g.shape):
+            n, co, *position = gi
+            for local_ci in range(cg):
+                ci = co // fg * cg + local_ci
+                for kernel in np.ndindex(w.shape[2:]):
+                    dest = tuple(
+                        i * s - p + k * d for i, s, p, k, d in zip(position, stride, pad, kernel, dil, strict=True)
+                    )
+                    if not all(0 <= i < size for i, size in zip(dest, x.shape[2:], strict=True)):
+                        continue
+                    xi = (n, ci, *dest)
+                    wi = (co, local_ci, *kernel)
+                    if mask[0]:
+                        dx[xi] += g[gi] * w[wi]
+                    if mask[1]:
+                        dw[wi] += g[gi] * x[xi]
+    return tuple(Tensor(v, torch.float32) if wanted else None for v, wanted in zip((dx, dw, db), mask, strict=True))

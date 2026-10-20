@@ -310,6 +310,9 @@ def grade_core_aten_batch(
             verdict["numeric_admission"] = record.get("numeric_admission", {"status": "unknown"})
             verdict["numeric_selection"] = record.get("numeric_selection", {})
             admission = record.get("numeric_admission", {})
+            if admission.get("quantized_contract"):
+                verdict["precision_class"] = "b"
+                verdict["quantized_contract"] = admission["quantized_contract"]
             verdict["calibration"] = admission.get(
                 "calibration", {"source": "calibration-on-evaluation-input", "performed": False}
             )
@@ -330,7 +333,9 @@ def grade_core_aten_batch(
                         dict(
                             output_index=i,
                             status="pass" if actual.hex() == expected else "mismatch",
-                            comparison="exact_i32_or_f32_bits_signed_zero_distinct",
+                            comparison="independent_quantized_exact_rational_bytes"
+                            if admission.get("quantized_contract")
+                            else "exact_i32_or_f32_bits_signed_zero_distinct",
                             actual_sha256=__import__("hashlib").sha256(actual).hexdigest(),
                         )
                     )

@@ -136,6 +136,9 @@ def prepare_integer_components(
 
         finite_source(module)
         known = quantize_entries(module, quantized_contract)
+        from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
+
+        sign_bounds, sign_proofs = rewrite_native_sign_components(module, defer_floating_negation=True)
         known_bounds, typed_proofs = rewrite_floating_components(
             module,
             [None] * len(native_types),
@@ -143,9 +146,9 @@ def prepare_integer_components(
             allow_reassociation=True,
             quantized_contract=quantized_contract,
         )
+        known_bounds.update(sign_bounds)
         bounds = [0] * len(native_types)
         literal_folds = boolean_count = 0
-        sign_proofs = []
         semantics = dict(status="proven", method="declared_quantized_rational_family")
     else:
         from merlin.llvmlower.uniform_numeric_literals import fold_uniform_numeric_literals
@@ -191,7 +194,8 @@ def prepare_integer_components(
                         family="F2",
                         code="native_mixed_storage_promotion_unproved",
                         reason=(
-                            "mixed-storage TensorIterator temporary conversion needs a complete scalar/vector copy profile"
+                            "mixed-storage TensorIterator temporary conversion needs "
+                            "a complete scalar/vector copy profile"
                         ),
                     )
                 )
@@ -209,7 +213,10 @@ def prepare_integer_components(
                         dict(
                             family="F2",
                             code="native_copy_layout_context_unproved",
-                            reason="CPU copy profile requires one original tensor; additional destination layouts are unproved",
+                            reason=(
+                                "CPU copy profile requires one original tensor; "
+                                "additional destination layouts are unproved"
+                            ),
                         )
                     )
                     + "\n"
@@ -436,24 +443,24 @@ def prepare_integer_components(
         )
         if decision["status"] != "admitted":
             return None
+    from merlin.xdsl_dialects._common import text
+
+    source = text(module, generic=True) if quantized_contract is not None else str(module)
     try:
-        proof = provider.admit_numeric_schedule(str(module), package=package, numeric_policy=selection["spec"])
+        proof = provider.admit_numeric_schedule(source, package=package, numeric_policy=selection["spec"])
     except ValueError as exc:
         (directory / "exact-dtype-refusal.json").write_text(
             json.dumps(
                 dict(
                     family="F2",
                     reason="selected provider refuses exact components: " + str(exc),
-                    source_sha256=hashlib.sha256(str(module).encode()).hexdigest(),
+                    source_sha256=hashlib.sha256(source.encode()).hexdigest(),
                 )
             )
             + "\n"
         )
         return None
-    if (
-        proof.get("status") != "proven"
-        or proof.get("source_sha256") != hashlib.sha256(str(module).encode()).hexdigest()
-    ):
+    if proof.get("status") != "proven" or proof.get("source_sha256") != hashlib.sha256(source.encode()).hexdigest():
         reason = proof.get("reason", "component provider proof unavailable")
         (directory / "exact-dtype-refusal.json").write_text(
             json.dumps(dict(family="F2", reason=reason, provider_proof=proof)) + "\n"
@@ -547,7 +554,7 @@ def prepare_integer_components(
             quantized_non_contraction_sites=len(sites),
         )
     document = dict(selection=selection, **plan)
-    (directory / "model.mlir").write_text(str(module) + "\n")
+    (directory / "model.mlir").write_text(source + "\n")
     (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
     for record in records:
         record.update(numeric_admission=plan, numeric_selection=selection["identities"])
