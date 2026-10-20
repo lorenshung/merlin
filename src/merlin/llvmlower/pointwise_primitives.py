@@ -1,7 +1,7 @@
 """Expose scalar IEEE operation boundaries as closed tensor pointwise nodes."""
 
 
-def expose_pointwise_primitives(module):
+def expose_pointwise_primitives(module, *, integer_boundaries=False):
     from xdsl.dialects import tensor
     from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, TensorType
     from xdsl.dialects.linalg import ops as L
@@ -60,6 +60,16 @@ def expose_pointwise_primitives(module):
         if any(it.data != L.IteratorType.PARALLEL for it in op.get_iterator_types()):
             continue
         body = op.body.block
+        integer_casts = {"arith.extsi", "arith.extui", "arith.trunci"}
+        closed_integer = (
+            integer_boundaries
+            and "merlin.exact_host_arithmetic" not in op.attributes
+            and any(child.name in integer_casts for child in body.ops)
+            and all(
+                child.name in integer_casts | {"arith.constant", "arith.addi", "arith.subi", "arith.muli", "linalg.yield"}
+                for child in body.ops
+            )
+        )
         if not any(
             child.name
             in {
@@ -80,7 +90,7 @@ def expose_pointwise_primitives(module):
                 "arith.floordivsi",
             }
             for child in body.ops
-        ):
+        ) and not closed_integer:
             # Keep generated integer RNE/bit plumbing intact, including its
             # SSA-bound finite grid. Only source floating boundaries split.
             continue
@@ -114,7 +124,7 @@ def expose_pointwise_primitives(module):
             if any(value in dependent for value in child.operands):
                 dependent.update(child.results)
                 has_numeric_data |= child.name in numeric
-        if not has_numeric_data:
+        if not has_numeric_data and not closed_integer:
             continue
         shape = op.results[0].type.get_shape()
         identity = AffineMapAttr(AffineMap.identity(len(shape)))

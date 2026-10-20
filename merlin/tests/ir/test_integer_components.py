@@ -159,7 +159,7 @@ def test_widening_keeps_the_carry_above_the_original_storage_width():
       }}""")
     values = [(1 << 63) - 1, -(1 << 63), 32767, -32768]
     plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[1 << 63, 0])
-    assert len(plans) == 9
+    assert len(plans) == 8  # Source-width storage is normalized before the signed extension.
     assert evaluate(source, [values, [0] * 4]) == values
 
 
@@ -327,3 +327,40 @@ def test_binary32_sign_words_preserve_nonfinite_payloads_without_quantization():
         [1, 0x80000001, 0x7F7FFFFF, 0xFF7FFFFF],
     ]:
         assert [v & 0xFFFFFFFF for v in evaluate(source, [words])] == [v ^ 0x80000000 for v in words]
+
+
+@pytest.mark.parametrize('bits', [8, 16, 32])
+@pytest.mark.parametrize('cast', ['extui', 'extsi'])
+@pytest.mark.parametrize('wrap', [False, True])
+def test_width_changes_observe_the_source_ring(bits, cast, wrap):
+    limit = 1 << (bits - 1)
+    body = (f'%s=arith.addi %a,%b : i{bits}\n' if wrap else '')
+    body += f'%v=arith.{cast} '+('%s' if wrap else '%a')+f' : i{bits} to i64'
+    source = parse_mlir_text('''module {
+      func.func @forward(%x:tensor<4xI>,%y:tensor<4xI>) -> tensor<4xi64> {
+        %e=tensor.empty() : tensor<4xi64>
+        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
+        ins(%x,%y:tensor<4xI>,tensor<4xI>) outs(%e:tensor<4xi64>) {
+          ^bb0(%a:I,%b:I,%unused:i64):
+          BODY
+          linalg.yield %v : i64
+        } -> tensor<4xi64>
+        func.return %r : tensor<4xi64>
+      }}'''.replace('BODY',body).replace('I',f'i{bits}'))
+    values=[-1,-limit,0,limit-1]; other=[1,-1,limit-1,1]
+    expected=evaluate(source,[values,other])
+    plans=rewrite_integer_components(source,limb_attribute='test.limb',input_bounds=[limit,limit])
+    assert plans
+    assert evaluate(source,[values,other])==expected
+    if not wrap and cast=='extui':assert expected==[(v % (1 << bits)) for v in values]
+    if wrap and cast=='extsi':assert expected[-1]==-limit
+
+
+@pytest.mark.parametrize('bits', [8,16,32])
+def test_truncation_before_signed_extension_keeps_its_modular_boundary(bits):
+    text=str(module('i64',f'%t=arith.trunci %a : i64 to i{bits}\n%v=arith.extsi %t : i{bits} to i64')).replace('iBITS',f'i{bits}')
+    source=parse_mlir_text(text)
+    values=[-(1 << 63), (1 << bits)-1, (1 << (bits-1)), (1 << (bits-1))-1]
+    expected=evaluate(source,[values,[0]*4])
+    assert rewrite_integer_components(source,limb_attribute='test.limb',input_bounds=[1<<63,0])
+    assert evaluate(source,[values,[0]*4])==expected

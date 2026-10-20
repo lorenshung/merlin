@@ -37,6 +37,9 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
     bounds = dict(zip(functions[0].body.block.args, input_bounds))
     bounds.update(known_bounds or {})
     plans = []
+    from merlin.llvmlower.integer_width_boundaries import preserve_integer_width_boundaries
+
+    preserve_integer_width_boundaries(module)
 
     def indices(value, digits):
         omitted = (known_zero_limbs or {}).get(value, set())
@@ -187,14 +190,12 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
                 expressions[child.results[0]] = ({}, attr.value.data)
                 continue
             if child.name in {"arith.extsi", "arith.extui", "arith.trunci"}:
-                # Intermediate narrowing is allowed only at the final source width.
-                if child.name == "arith.trunci" and child.results[0].type != op.results[0].type.element_type:
-                    return None
-                if child.operands[0] not in expressions:
-                    return None
-                expressions[child.results[0]] = expressions[child.operands[0]]
-                continue
+                # Unexposed/compound casts cannot be polynomial substitutions:
+                # extension observes the source ring's sign/modular boundary.
+                return None
             if child.name not in {"arith.addi", "arith.subi", "arith.muli"}:
+                return None
+            if child.results[0].type.width.data < op.results[0].type.element_type.width.data:
                 return None
             if any(v not in expressions for v in child.operands):
                 return None
@@ -231,6 +232,8 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         product_value = next((v for v in yielded.operands if v is not body.args[2]), None)
         product = getattr(product_value, "owner", None)
         if getattr(product, "name", None) != "arith.muli":
+            return False
+        if product.results[0].type != body.args[2].type:
             return False
         leaves = []
         for value in product.operands:
