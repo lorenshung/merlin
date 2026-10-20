@@ -63,7 +63,7 @@ numerical_semantics:
     status: authored_pending_operator_review
     eligibility: source_scalar_dataflow_and_reduction_domains
     allowed_representation: exact_signed_byte_limbs_and_retained_ieee_host_readout
-    excluded_constructions: [nonlinear_rounding_construction, parallel_runtime_product_construction, index_generated_payload_arithmetic, nonuniform_literal_result_construction, unproved_payload_carrier, saturation_comparators, readout_offset_rounding, multi_op_identity]
+    excluded_constructions: [nonlinear_rounding_construction, parallel_runtime_product_construction, runtime_product_reduction, index_generated_payload_arithmetic, nonuniform_literal_result_construction, nonuniform_literal_coefficient_contraction, forced_ieee_special_division, unproved_payload_carrier, saturation_comparators, readout_offset_rounding, multi_op_identity]
     source_overload_dispatch: forbidden
     result_literals: uniform_fills_are_movement_nonuniform_result_tables_retain_host_construction
     evidence: {review_status: "authored, pending operator review"}

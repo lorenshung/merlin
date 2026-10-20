@@ -180,6 +180,101 @@ class Payloads:
         # An element of unknown value (None) is conservatively nonzero.
         return bool(literals) and any(value is None or value != 0 for value in literals)
 
+    def forced_special_division(self, op):
+        """A floating division or remainder whose divisor is a closed literal zero."""
+        from merlin.targetgen.native_payload_carriers import op_name
+
+        if op_name(op) not in {"arith.divf", "arith.remf"}:
+            return False
+        from merlin.targetgen.closed_scalar import UNKNOWN, evaluate
+
+        values = self.literal_values(op.operands[1])
+        if values is None:
+            closed = evaluate(op.operands[1], {})  # a closed scalar expression, e.g. |0|
+            values = None if closed is UNKNOWN else (closed,)
+        if not values or not all(v is not None and v == 0 for v in values):
+            return False
+        return self.observable(op.results[0])
+
+    def observable(self, root):
+        """Can this value reach a result? A select whose closed condition picks the
+        other alternative discards it (for example the unused branch of a complex
+        division by a real literal). Region carriers are conservatively observable."""
+        from merlin.targetgen.closed_scalar import UNKNOWN, evaluate
+        from merlin.targetgen.native_payload_carriers import op_name
+
+        pending, seen = [root], set()
+        while pending:
+            value = pending.pop()
+            if value in seen:
+                continue
+            seen.add(value)
+            for use in value.uses:
+                user = use.operation
+                name = op_name(user)
+                if name == "arith.select" and use.index > 0:
+                    condition = evaluate(user.operands[0], {})
+                    if condition is not UNKNOWN and use.index != (1 if condition else 2):
+                        continue
+                if not user.results:
+                    return True  # func.return, linalg/scf yields and stores observe it.
+                pending.extend(user.results)
+        return False
+
+    def product_reduction(self, product):
+        """Does this product multiply a reduction's accumulator by runtime payload?
+
+        A contraction adds products into its accumulator. Multiplying the
+        accumulator itself by each element is a chain of runtime products
+        (a product reduction), whatever structured operation carries it.
+        """
+        from merlin.targetgen.native_payload_carriers import op_name
+
+        parent = product.parent_op()
+        while parent is not None and op_name(parent) not in {"linalg.reduce", "linalg.generic"}:
+            parent = parent.parent_op()
+        if parent is None:
+            return False
+        block = parent.regions[0].block
+        if op_name(parent) == "linalg.reduce":
+            inputs = getattr(parent, "inputs", None)
+            if inputs is None:
+                inputs = parent.input
+            count = len(inputs) if hasattr(inputs, "__len__") else 1
+        else:
+            if not any(it.data.value == "reduction" for it in parent.get_iterator_types()):
+                return False
+            count = len(parent.inputs)
+        accumulators = set(block.args[count:])
+        operands = list(product.operands)
+        for index, operand in enumerate(operands):
+            other = operands[1 - index]
+            if operand in accumulators and self.literal_values(other) is None:
+                return True
+        return False
+
+    def literal_coefficient_table(self, product):
+        """Is a product inside a contraction weighted by a multi-valued closed table?
+
+        True when the product feeds a reduction (it is inside a generic with a
+        reduction iterator) and one operand resolves to a closed literal tensor
+        with at least two distinct nonzero values (signs count). A uniform
+        literal, a 0/c selection or scaled identity is not such a table.
+        """
+        parent = product.parent_op()
+        while parent is not None and parent.name != "linalg.generic":
+            parent = parent.parent_op()
+        if parent is None or not any(it.data.value == "reduction" for it in parent.get_iterator_types()):
+            return False
+        for operand in product.operands:
+            values = self.literal_values(operand)
+            if values is None:
+                continue
+            nonzero = {v for v in values if v is None or v != 0}
+            if None in nonzero or len(nonzero) > 1:
+                return True
+        return False
+
     def offset_before(self, root):
         """Find a literal addend through casts, arithmetic and all known carriers."""
         from merlin.targetgen.native_payload_carriers import carrier_sources, op_name

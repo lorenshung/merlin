@@ -187,6 +187,21 @@ def construction_evidence(module, *, excluded=None, result_abi=None):
             and any(str(v.type.element_type) == "i1" for v in parent.results)
             and payloads.readout(op.results[0])
         )
+        if payloads.forced_special_division(op):
+            # x / 0 and x mod 0 with a closed zero divisor make every result an
+            # IEEE special value (inf or NaN) whatever the data: outside the
+            # quantized contract and not native arithmetic.
+            evidence.append(dict(ordinal=ordinal, operation=op.name, reason="forced_ieee_special_division"))
+        if op.name in {"arith.mulf", "arith.muli"} and payloads.product_reduction(op):
+            # acc * x folded over a reduced extent is a chain of runtime
+            # products, not a contraction (which adds products into acc).
+            evidence.append(dict(ordinal=ordinal, operation=op.name, reason="runtime_product_reduction"))
+        if op.name in {"arith.mulf", "arith.muli"} and payloads.literal_coefficient_table(op):
+            # A contraction against a closed table of several distinct nonzero
+            # weights emulates a tabulated linear transform (DFT twiddles,
+            # interpolation weights). Selections, sums and one-scale tables
+            # (values in {0, c}) remain ordinary constant operands.
+            evidence.append(dict(ordinal=ordinal, operation=op.name, reason="nonuniform_literal_coefficient_contraction"))
         if op.name not in {"arith.mulf", "arith.muli"} and not boolean_product:
             continue
         if any(str(value.type) == "index" for value in op.operands) or any(literal(v) for v in op.operands):

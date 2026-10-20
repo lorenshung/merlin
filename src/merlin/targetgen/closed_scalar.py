@@ -132,6 +132,10 @@ def evaluate(value, environment, memo=None):
         x = get(owner.operands[0])
         if x is not UNKNOWN:
             out = x if name == "arith.extf" else round_to(x, result_type)
+    elif name == "math.absf":
+        x = get(owner.operands[0])
+        if x is not UNKNOWN and isinstance(x, float):
+            out = abs(x)
     elif name == "arith.negf":
         x = get(owner.operands[0])
         if x is not UNKNOWN and isinstance(x, float):
