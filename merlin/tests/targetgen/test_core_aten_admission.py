@@ -206,3 +206,35 @@ def test_generated_constructions_are_screened_even_if_the_prelude_is_later_remov
     assert plan["refusal_code"] == "non_native_unit_construction"
     assert any(e["stage"] == stage for e in plan["native_admission"]["native_unit_policy"]["evidence"])
     assert (tmp_path / "model.mlir").read_text() == str(original)
+
+
+@pytest.mark.parametrize("alias_required", [False, True])
+def test_native_selector_proof_also_requires_the_whole_call_alias_contract(tmp_path, alias_required):
+    import yaml
+    from merlin.targetgen.core_aten_admission import prepare
+
+    original = movement(reverse=True)
+    original_text = str(original)
+    (tmp_path / "model.mlir").write_text(original_text)
+    (tmp_path / "inputs.npz").write_bytes(b"original storage")
+    spec = tmp_path / "spec.yaml"
+    spec.write_text(yaml.safe_dump(dict(
+        numerical_semantics=dict(native_unit_contract=dict(excluded_constructions=[])))))
+    active = dict(status="bundled", case=dict(output_input_aliases=[[0, 0]] if alias_required else []))
+    inactive = dict(status="not_in_shard", case=dict(output_input_aliases=[[0, 0]]))
+    report = dict(cases=[active, inactive])
+
+    def implementation(directory, report, **kwargs):
+        (directory / "inputs.npz").write_bytes(b"materialized candidate")
+        return dict(candidate(original, "movement", "F1"), exact_dtype_sites=1, selection=dict(identities={}))
+
+    result = prepare(tmp_path, report, implementation, software_spec=spec)
+    assert report["cases"][0] is active and report["cases"][1] is inactive
+    assert result["native_admission"]["status"] == ("host" if alias_required else "device")
+    if alias_required:
+        assert result["refusal_code"] == "native_output_alias_contract_unproved"
+        assert result["exact_dtype_sites"] == 0
+        assert (tmp_path / "inputs.npz").read_bytes() == b"original storage"
+        assert (tmp_path / "model.mlir").read_text() == original_text
+    else:
+        assert (tmp_path / "inputs.npz").read_bytes() == b"materialized candidate"

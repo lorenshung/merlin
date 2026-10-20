@@ -94,6 +94,20 @@ def prepare(directory, report, implementation, **kwargs):
             folds.append(specialization)
     if folds:
         admission.update(status="host", reason_code="constant_metadata_fold_no_tensor_data", descriptor_folds=folds)
+    # Region kernels materialize disjoint outputs. A logical selector proof
+    # alone cannot grant the exported call's input/output alias relationship.
+    # Match the runtime's whole-call ABI guard during capsule admission too.
+    aliases = [
+        record["case"]["output_input_aliases"]
+        for record in original_report["cases"]
+        if record.get("status") in {None, "bundled"}
+        and (record.get("case") or {}).get("output_input_aliases")
+    ]
+    if aliases:
+        admission.update(
+            status="host", reason_code="native_output_alias_contract_unproved",
+            required_output_input_aliases=aliases,
+        )
     plan["native_admission"] = admission
     if admission["status"] != "device":
         (directory / "refused-device-source.mlir").write_bytes((directory / "model.mlir").read_bytes())
