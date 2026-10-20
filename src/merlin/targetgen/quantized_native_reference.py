@@ -20,8 +20,9 @@ def canonical_scalar(dtype, operation, value):
 
     from merlin.targetgen.exact_arithmetic import round_binary
 
+    dtype = {"complex<f32>": "f32", "complex<f64>": "f64"}.get(dtype, dtype)
     if isinstance(value, complex):
-        component = {"complex<f32>": "f32", "complex<f64>": "f64"}.get(dtype, dtype)
+        component = dtype
         return complex(
             canonical_scalar(component, operation, value.real), canonical_scalar(component, operation, value.imag)
         )
