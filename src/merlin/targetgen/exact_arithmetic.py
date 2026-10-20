@@ -31,8 +31,10 @@ def exact_array(value):
     return np.vectorize(rational, otypes=[object])(np.asarray(value, dtype=object))
 
 
-def round_binary(value, bits=32, *, bfloat16=False):
+def round_binary(value, bits=32, *, bfloat16=False, overflow="refuse"):
     """Correct RNE to IEEE storage, without a double rounding via binary64."""
+    if overflow not in {"refuse", "infinity"}:
+        raise ValueError("unknown floating overflow policy")
     value = rational(value)
     if bfloat16 and bits != 16:
         raise ValueError("bfloat16 requires 16 storage bits")
@@ -52,7 +54,8 @@ def round_binary(value, bits=32, *, bfloat16=False):
     unit = Fraction(2) ** (max(minimum_exp, exponent) - fraction_bits)
     rounded = round(value / unit) * unit
     if abs(rounded) >= Fraction(2) ** (maximum_exp + 1):
-        return -math.inf if value < 0 else math.inf
+        if overflow == "infinity":return -math.inf if value < 0 else math.inf
+        raise ValueError("exact floating boundary overflows")
     return -0.0 if not rounded and value < 0 else float(rounded)
 
 

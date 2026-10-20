@@ -59,18 +59,21 @@ def materialize(value):
     if isinstance(value,tuple):return tuple(materialize(x) for x in value)
     if isinstance(value,list):return [materialize(x) for x in value]
     if isinstance(value,dict):return {k:materialize(x) for k,x in value.items()}
-    if isinstance(value,ExactTensor) and any(isinstance(x,BoundarySpecial) for x in value.values.flat):
+    state=_boundary_state.get()
+    explicit_overflow=state is not None and state.get('f32_overflow')=='ieee_infinity'
+    special=isinstance(value,ExactTensor) and any(isinstance(x,BoundarySpecial) for x in value.values.flat)
+    if isinstance(value,ExactTensor) and (special or explicit_overflow and str(value.dtype)=='torch.float32'):
         import struct
         import torch
         state=_boundary_state.get()
-        if not state or state.get('floating_specials')!='single_residual_quiet_word_f32' or value.dtype!=torch.float32:
+        if special and (not state or state.get('floating_specials')!='single_residual_quiet_word_f32' or value.dtype!=torch.float32):
             raise ValueError('special rational arithmetic requires a final byte quantizer')
         words=[]
         for x in value.values.flat:
             if isinstance(x,BoundarySpecial):
                 if not x.sign and x.word is None:raise ValueError('competing or invalid NaNs lack a deterministic input word')
                 words.append(x.word if not x.sign else 0x7f800000 | (0x80000000 if x.sign<0 else 0))
-            else:words.append(struct.unpack('<I',struct.pack('<f',round_binary(x,32)))[0])
+            else:words.append(struct.unpack('<I',struct.pack('<f',round_binary(x,32,overflow='infinity' if explicit_overflow else 'refuse')))[0])
         return torch.tensor(words,dtype=torch.uint32).view(torch.float32).reshape(value.values.shape)
     return _finite_materialize(value)
 
@@ -685,7 +688,7 @@ def run(model, inputs):
 
     saved = copy.deepcopy(tuple(inputs))
     reference = Reference(model, garbage_collect_values=False)
-    state={'special_seen':False,'floating_specials':getattr(model, '_recipe_quantization_stats', {}).get('framework_capture_policy', {}).get('readout_specials')} if boundary_policy=='byte_storage_zero_nan_saturating_infinity' else None
+    state={'special_seen':False,'floating_specials':getattr(model, '_recipe_quantization_stats', {}).get('framework_capture_policy', {}).get('readout_specials'),'f32_overflow':getattr(model, '_recipe_quantization_stats', {}).get('framework_capture_policy', {}).get('f32_boundary_overflow')} if boundary_policy=='byte_storage_zero_nan_saturating_infinity' else None
     token=_boundary_state.set(state)
     try:
         exact = reference.run(*inputs)

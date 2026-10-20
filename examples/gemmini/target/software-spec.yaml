@@ -217,6 +217,8 @@ numerical_semantics:
   # preserving its f32 sign/payload word; finite integer MAC terms cannot
   # introduce a competing NaN. Negative residual coefficients are unproved.
   readout_specials: single_residual_quiet_word_f32
+  # Authored, pending operator review: one required IEEE f32 output conversion.
+  f32_boundary_overflow: ieee_infinity
   calibration_domain:
     schema: merlin.declared_observer_domain.v1
     status: authored_pending_operator_review

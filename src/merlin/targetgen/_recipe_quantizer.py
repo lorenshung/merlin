@@ -1442,6 +1442,7 @@ def apply_recipe(
             "calibration_domain": declared_domain,
             "quantization_nonfinite": recipe.get("quantization_nonfinite"),
             "readout_specials": recipe.get("readout_specials"),
+            "f32_boundary_overflow": recipe.get("f32_boundary_overflow"),
             "calibration_count": calibrated,
         },
     }

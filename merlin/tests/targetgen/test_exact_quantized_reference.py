@@ -202,7 +202,7 @@ from merlin.targetgen.exact_arithmetic import round_binary
 for bits,p,emax in [(16,11,15),(32,24,127)]:
  threshold=F(2)**(emax+1)-F(2)**(emax-p)
  maximum=F(2)**(emax+1)-F(2)**(emax-p+1)
- assert round_binary(threshold-F(1,2**100),bits)==float(maximum)
- assert round_binary(threshold,bits)==math.inf
- assert round_binary(-threshold,bits)==-math.inf
+ assert round_binary(threshold-F(1,2**100),bits,overflow="infinity")==float(maximum)
+ assert round_binary(threshold,bits,overflow="infinity")==math.inf
+ assert round_binary(-threshold,bits,overflow="infinity")==-math.inf
 """)

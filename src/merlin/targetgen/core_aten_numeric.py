@@ -443,6 +443,7 @@ def _prepare_spec_int8(
             calibration_domain=selection["spec"]["numerical_semantics"]["calibration_domain"],
             quantization_nonfinite=selection["spec"]["numerical_semantics"].get("quantization_nonfinite"),
             readout_specials=selection["spec"]["numerical_semantics"].get("readout_specials"),
+            f32_boundary_overflow=selection["spec"]["numerical_semantics"].get("f32_boundary_overflow"),
             accumulator_dtype=selection["readout_facets"][0]["accumulator_dtype"],
             software_admission=selection["spec"],
             software_numerical_engine="integer_reference",

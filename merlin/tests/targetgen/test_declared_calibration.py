@@ -229,3 +229,18 @@ def test_static_readout_refusal_has_a_machine_readable_capture_receipt(tmp_path,
     with pytest.raises(SystemExit) as caught:integerization.integerize_capture_model(None,(),numerics='integer_readout',directory=tmp_path)
     assert caught.value.code==4
     assert read_refusal(tmp_path/'refusal.json').code=='unquantized_special_readout_unproved'
+
+
+def test_selected_f32_overflow_is_declared_without_changing_legacy_default():
+    torch=pytest.importorskip('torch')
+    import torch.ao.quantization.fx._decomposed
+    from merlin.targetgen.exact_quantized_reference import run
+    graph=torch.fx.Graph();x=graph.placeholder('x');y=graph.placeholder('y')
+    scale=float(torch.tensor(1.e38,dtype=torch.float32))
+    a=graph.call_function(torch.ops.quantized_decomposed.dequantize_per_tensor.default,(x,scale,0,-128,127,torch.int8))
+    b=graph.call_function(torch.ops.quantized_decomposed.dequantize_per_tensor.default,(y,scale,0,-128,127,torch.int8))
+    result=graph.call_function(torch.ops.aten.mm.default,(a,b));graph.output(result)
+    model=torch.fx.GraphModule(torch.nn.Module(),graph);inputs=(torch.tensor([[3]],dtype=torch.int8),torch.tensor([[5]],dtype=torch.int8))
+    with pytest.raises(ValueError,match='boundary overflows'):run(model,inputs)
+    model._recipe_quantization_stats={'framework_capture_policy':{'quantization_nonfinite':'byte_storage_zero_nan_saturating_infinity','f32_boundary_overflow':'ieee_infinity'}}
+    assert run(model,inputs).output.view(torch.uint32).tolist()==[[0x7f800000]]
