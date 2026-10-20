@@ -67,3 +67,9 @@ Frontends that ingest external IR into the Merlin pipeline. Today: linalg-on-ten
 ## Notes for future agents
 
 smolVLA reuse structure: capture unit = one denoise step; `select_action` runs N steps per tick, so every weight is `reused_across_invocations` — the repeated-RHS pattern with real shapes.
+
+`bitcast_views.py` normalizes a trace-bound equal-width `aten.view.dtype` only
+when the original typed placeholder has exclusively value-reading clients.
+It checks the recorded dtype literal and trace digest, leaves returned/mutated
+aliases and width changes opaque, and preserves lineage on scalar bitcasts.
+This grants no placement, numerical-domain or original-operation equivalence.

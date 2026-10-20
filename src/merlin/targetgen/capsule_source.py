@@ -1301,7 +1301,7 @@ class PytorchRefSource:
                 try:
                     normalized, normalization = normalize_capture_mlir(
                         raw_linalg,
-                        reported_opaque=meta.get("opaque_detail") or {},
+                        reported_opaque=meta.get("opaque_detail") or {}, capture_metadata=meta,
                     )
                 except CaptureNormalizationError as exc:
                     raise M2MUnavailable(f"m2m capture normalization failed for op {op!r}/{dtype}: {exc}") from exc
