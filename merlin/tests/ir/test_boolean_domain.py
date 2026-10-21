@@ -3,7 +3,7 @@
 import pytest
 from mlir_fixtures import assert_unchanged, forward, generic, returned
 
-from merlin.llvmlower.boolean_domain import fold_boolean_domain
+from merlin.llvmlower.image_folds import fold_boolean_domain
 
 
 def source(operator, constant, extension="extui"):

@@ -6,7 +6,7 @@ import operator
 import pytest
 from mlir_fixtures import assert_unchanged, forward, generic, returned
 
-from merlin.llvmlower.boolean_image_predicates import fold_boolean_image_predicates
+from merlin.llvmlower.image_folds import fold_boolean_image_predicates
 
 # Independent of the production predicate table: IEEE cmpf on ordered operands.
 ORDERED = {"oeq": operator.eq, "one": operator.ne, "ogt": operator.gt, "olt": operator.lt, "uge": operator.ge}

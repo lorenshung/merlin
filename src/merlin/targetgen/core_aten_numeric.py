@@ -238,12 +238,14 @@ def normalize_closed_identities(module):
     Returns the number of folds. Shared by native preparation and by the
     floating-contract decision, which must see the same normalized program.
     """
-    from merlin.llvmlower.boolean_domain import fold_boolean_domain
-    from merlin.llvmlower.boolean_image_predicates import fold_boolean_image_predicates
-    from merlin.llvmlower.boolean_unit_image import fold_boolean_unit_image
     from merlin.llvmlower.empty_reductions import fold_empty_reductions
-    from merlin.llvmlower.integer_image_predicates import fold_integer_image_predicates
-    from merlin.llvmlower.integral_float_rounding import fold_integral_float_rounding
+    from merlin.llvmlower.image_folds import (
+        fold_boolean_domain,
+        fold_boolean_image_predicates,
+        fold_boolean_unit_image,
+        fold_integer_image_predicates,
+        fold_integral_float_rounding,
+    )
     from merlin.llvmlower.singleton_folds import (
         fold_singleton_carriers,
         fold_singleton_reductions,
@@ -263,10 +265,10 @@ def normalize_closed_identities(module):
     from merlin.llvmlower.singleton_folds import normalize_singleton_boundaries
 
     folds += normalize_singleton_boundaries(module)
-    from merlin.llvmlower.nan_guarded_neutral import fold_nan_guarded_neutral
+    from merlin.llvmlower.image_folds import fold_nan_guarded_neutral
 
     folds += fold_nan_guarded_neutral(module)
-    from merlin.llvmlower.integral_float_rounding import fold_integral_image_identities
+    from merlin.llvmlower.image_folds import fold_integral_image_identities
 
     folds += fold_integral_image_identities(module)
     folds += fold_singleton_reductions(module)
@@ -276,7 +278,7 @@ def normalize_closed_identities(module):
     from merlin.llvmlower.unused_tensor_operands import prune_unused_tensor_inputs
 
     folds += prune_unused_tensor_inputs(module)
-    from merlin.llvmlower.ieee_identity_selectors import fold_ieee_identity_selectors
+    from merlin.llvmlower.image_folds import fold_ieee_identity_selectors
 
     folds += fold_ieee_identity_selectors(module)
     from merlin.targetgen.closed_scalar import fold_closed_generics, fold_unit_scales

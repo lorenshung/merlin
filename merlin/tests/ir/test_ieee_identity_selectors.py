@@ -8,7 +8,7 @@ from mlir_fixtures import assert_unchanged
 @pytest.mark.parametrize("correct", [False, True])
 def test_zero_sign_selector_is_identity_only_with_the_complete_sign_word(dtype, bits, correct):
     from merlin.frontends.linalg_mlir import parse_mlir_text
-    from merlin.llvmlower.ieee_identity_selectors import fold_zero_sign_selectors
+    from merlin.llvmlower.image_folds import fold_zero_sign_selectors
 
     mask = -(1 << (bits - 1)) if correct else (1 << (bits - 2))
     module = parse_mlir_text(f"""module {{func.func @forward(%x:{dtype}) -> {dtype} {{
@@ -26,7 +26,7 @@ def test_zero_sign_selector_is_identity_only_with_the_complete_sign_word(dtype, 
 
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.ieee_identity_selectors import fold_ieee_identity_selectors
+from merlin.llvmlower.image_folds import fold_ieee_identity_selectors
 
 
 def source(predicate="ogt", factor="1.0", *, swapped=False, unknown=False):

@@ -4,7 +4,7 @@ import pytest
 from mlir_fixtures import assert_unchanged
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.nan_guarded_neutral import fold_nan_guarded_neutral
+from merlin.llvmlower.image_folds import fold_nan_guarded_neutral
 
 
 def source(operation, literal, *, escape=False, bits=False, predicate="uno", reverse=False):

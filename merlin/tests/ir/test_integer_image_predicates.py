@@ -3,7 +3,7 @@
 import pytest
 from mlir_fixtures import assert_unchanged, forward, generic, returned
 
-from merlin.llvmlower.integer_image_predicates import fold_integer_image_predicates
+from merlin.llvmlower.image_folds import fold_integer_image_predicates
 
 
 def source(integer="i64", floating="f32", threshold="0.5", predicate="oeq", conversion="sitofp"):

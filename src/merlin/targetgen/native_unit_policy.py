@@ -8,10 +8,12 @@ express them with contractions. Index arithmetic remains address selection.
 
 
 def construction_evidence(module, *, excluded=None, result_abi=None):
-    from merlin.llvmlower.boolean_domain import fold_boolean_domain
-    from merlin.llvmlower.boolean_image_predicates import fold_boolean_image_predicates
-    from merlin.llvmlower.boolean_unit_image import fold_boolean_unit_image
-    from merlin.llvmlower.integer_image_predicates import fold_integer_image_predicates
+    from merlin.llvmlower.image_folds import (
+        fold_boolean_domain,
+        fold_boolean_image_predicates,
+        fold_boolean_unit_image,
+        fold_integer_image_predicates,
+    )
     from merlin.llvmlower.singleton_folds import (
         fold_singleton_carriers,
         fold_singleton_reductions,
@@ -43,9 +45,11 @@ def construction_evidence(module, *, excluded=None, result_abi=None):
     if candidates:
         canonical = module.clone()
         from merlin.llvmlower.empty_reductions import fold_empty_reductions
-        from merlin.llvmlower.ieee_identity_selectors import fold_ieee_identity_selectors
-        from merlin.llvmlower.integral_float_rounding import fold_integral_image_identities
-        from merlin.llvmlower.nan_guarded_neutral import fold_nan_guarded_neutral
+        from merlin.llvmlower.image_folds import (
+            fold_ieee_identity_selectors,
+            fold_integral_image_identities,
+            fold_nan_guarded_neutral,
+        )
         from merlin.llvmlower.singleton_folds import normalize_singleton_boundaries
 
         image_folds = (

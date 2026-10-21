@@ -4,7 +4,7 @@ import pytest
 from mlir_fixtures import assert_unchanged, forward, generic, pointwise
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.boolean_unit_image import fold_boolean_unit_image
+from merlin.llvmlower.image_folds import fold_boolean_unit_image
 
 
 def source(operation, *, element="f32", integer="i1", literal=None, unknown=False):

@@ -4,7 +4,7 @@ import pytest
 from mlir_fixtures import assert_unchanged, pointwise
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.integral_float_rounding import fold_integral_float_rounding
+from merlin.llvmlower.image_folds import fold_integral_float_rounding
 
 
 def source(*, integer=True, divisor=1.0):
