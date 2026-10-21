@@ -15,6 +15,8 @@ def encode_fixed_integer(value, exponent, result_type, emit, *, denominator=1):
     from xdsl.dialects import arith
     from xdsl.dialects.builtin import IntegerAttr, IntegerType
 
+    from merlin.llvmlower._ir import constants
+
     if str(result_type) not in FORMAT or not 0 < denominator < (1 << 31):
         raise ValueError("unsupported exact IEEE boundary")
     fraction_bits, exponent_bits, bias = FORMAT[str(result_type)]
@@ -24,8 +26,7 @@ def encode_fixed_integer(value, exponent, result_type, emit, *, denominator=1):
     width = wide.width.data
     bits = IntegerType(1 + fraction_bits + exponent_bits)
 
-    def c(v):
-        return emit(arith.ConstantOp(IntegerAttr(v, wide)))
+    c = constants(emit, wide)
 
     def binary(cls, a, b):
         return emit(cls(a, b))

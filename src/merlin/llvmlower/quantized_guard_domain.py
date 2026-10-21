@@ -337,6 +337,7 @@ def canonicalize_quantized_affine(module, *, exact_rational=False):
     from xdsl.ir import Block
 
     from merlin.common.mlir_query import op_name
+    from merlin.llvmlower._ir import emitter
 
     if exact_rational is not True:
         return []
@@ -365,9 +366,7 @@ def canonicalize_quantized_affine(module, *, exact_rational=False):
             continue
         body = Block(arg_types=[v.type for v in op.body.block.args])
 
-        def emit(child):
-            body.add_op(child)
-            return child.results[0]
+        emit = emitter(body)
 
         result = None
         for i, coefficient in enumerate(numbers[:-1]):

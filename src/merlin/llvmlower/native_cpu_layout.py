@@ -86,12 +86,12 @@ def vector_predicate(record, emit):
     from xdsl.dialects.builtin import IndexType, IntegerAttr, i1
     from xdsl.dialects.linalg import ops as L
 
+    from merlin.llvmlower._ir import constants
+
     if not record["vector_prefix"]:
         return emit(arith.ConstantOp(IntegerAttr(0, i1)))
 
-    def c(value):
-        return emit(arith.ConstantOp(IntegerAttr(value, IndexType())))
-
+    c = constants(emit, IndexType())
     position, factor = c(0), 1
     for axis in record["axes"]:
         index = emit(L.IndexOp(axis))

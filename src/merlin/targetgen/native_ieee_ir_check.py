@@ -15,16 +15,14 @@ def conversion_function(source, target, policy):
     from xdsl.dialects.builtin import bf16, f16, f32, f64
     from xdsl.ir import Block
 
+    from merlin.llvmlower._ir import emitter
     from merlin.llvmlower.ieee_dyadic_ir import decode, encode
     from merlin.llvmlower.ieee_pointwise import special_conversion
 
     types = {"f16": f16, "bf16": bf16, "f32": f32, "f64": f64}
     block = Block(arg_types=[types[source]])
 
-    def emit(op):
-        block.add_op(op)
-        return op.results[0]
-
+    emit = emitter(block)
     integer, exponent, negative = decode(block.args[0], emit)
     finite = encode(integer, exponent, types[target], emit, zero_negative=negative)
     result = special_conversion(

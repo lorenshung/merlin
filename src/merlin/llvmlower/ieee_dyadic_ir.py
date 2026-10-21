@@ -16,16 +16,16 @@ def finite_dtype_grid(token):
 
 def decode(value, emit):
     from xdsl.dialects import arith
-    from xdsl.dialects.builtin import IntegerAttr, IntegerType, i64
+    from xdsl.dialects.builtin import IntegerType, i64
+
+    from merlin.llvmlower._ir import constants
 
     fraction, exponent, bias = FORMAT[str(value.type)]
     if fraction > 24:
         raise ValueError("significand product proof is limited to binary32 or narrower")
     storage = IntegerType(1 + fraction + exponent)
 
-    def c(v):
-        return emit(arith.ConstantOp(IntegerAttr(v, i64)))
-
+    c = constants(emit, i64)
     raw = emit(arith.ExtUIOp(emit(arith.BitcastOp(value, storage)), i64))
     field = emit(arith.AndIOp(emit(arith.ShRUIOp(raw, c(fraction))), c((1 << exponent) - 1)))
     negative = emit(arith.CmpiOp(emit(arith.AndIOp(raw, c(1 << (fraction + exponent)))), c(0), "ne"))
@@ -44,7 +44,9 @@ def decode(value, emit):
 
 def encode(value, power, result_type, emit, *, zero_negative=None):
     from xdsl.dialects import arith
-    from xdsl.dialects.builtin import IntegerAttr, IntegerType, i128
+    from xdsl.dialects.builtin import IntegerType, i128
+
+    from merlin.llvmlower._ir import constants
 
     fraction, exponent, bias = FORMAT[str(result_type)]
     storage = IntegerType(1 + fraction + exponent)
@@ -53,8 +55,7 @@ def encode(value, power, result_type, emit, *, zero_negative=None):
     if power.type != i128:
         power = emit(arith.ExtSIOp(power, i128))
 
-    def c(v):
-        return emit(arith.ConstantOp(IntegerAttr(v, i128)))
+    c = constants(emit, i128)
 
     def b(cls, a, d):
         return emit(cls(a, d))

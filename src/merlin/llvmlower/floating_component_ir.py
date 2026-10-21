@@ -3,7 +3,7 @@
 from functools import partial
 
 from xdsl.dialects import arith
-from xdsl.dialects.builtin import IntegerAttr, IntegerType
+from xdsl.dialects.builtin import IntegerType
 
 from merlin.llvmlower import _ir
 from merlin.llvmlower.fixed_point_ir import FORMAT
@@ -19,8 +19,7 @@ def pack_ieee_integer(value, exponent, integer_type, emit):
     raw = emit(arith.BitcastOp(value, storage))
     raw = emit(arith.ExtUIOp(raw, i64))
 
-    def constant(v):
-        return emit(arith.ConstantOp(IntegerAttr(v, i64)))
+    constant = _ir.constants(emit, i64)
 
     def binary(cls, a, b):
         return emit(cls(a, b))

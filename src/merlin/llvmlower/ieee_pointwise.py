@@ -155,16 +155,16 @@ def overlay(op, inputs, fallback, emit):
 def special_arithmetic(name, operands, emit):
     """Closed x86 IEEE add/sub/mul/div propagation, expressed entirely in bits."""
     from xdsl.dialects import arith
-    from xdsl.dialects.builtin import IntegerAttr, IntegerType
+    from xdsl.dialects.builtin import IntegerType
 
+    from merlin.llvmlower._ir import constants
     from merlin.llvmlower.fixed_point_ir import FORMAT
 
     typ = operands[0].type
     fraction, exponent, _ = FORMAT[str(typ)]
     integer = IntegerType(1 + fraction + exponent)
 
-    def c(value):
-        return emit(arith.ConstantOp(IntegerAttr(value, integer)))
+    c = constants(emit, integer)
 
     def binary(cls, a, b):
         return emit(cls(a, b))
@@ -239,9 +239,10 @@ def special_arithmetic(name, operands, emit):
 def special_conversion(name, operand, destination, emit, *, finite_fallback=None):
     """Retain NaN sign/payload when RV floating conversions would canonicalize it."""
     from xdsl.dialects import arith, scf
-    from xdsl.dialects.builtin import IntegerAttr, IntegerType, i64
+    from xdsl.dialects.builtin import IntegerType, i64
     from xdsl.ir import Block, Region
 
+    from merlin.llvmlower._ir import constants, emitter
     from merlin.llvmlower.fixed_point_ir import FORMAT
 
     source_fraction, source_exponent, _ = FORMAT[str(operand.type)]
@@ -251,13 +252,8 @@ def special_conversion(name, operand, destination, emit, *, finite_fallback=None
     flag = special(operand, emit)
     selected = Block()
 
-    def e(op):
-        selected.add_op(op)
-        return op.results[0]
-
-    def c(value):
-        return e(arith.ConstantOp(IntegerAttr(value, i64)))
-
+    e = emitter(selected)
+    c = constants(e, i64)
     raw = e(arith.BitcastOp(operand, source_storage))
     if source_storage != i64:
         raw = e(arith.ExtUIOp(raw, i64))
