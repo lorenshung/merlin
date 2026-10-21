@@ -62,11 +62,7 @@ def unlowered_data_reductions(module, limb_attribute):
             # they are not retained numerical comparisons of tensor values.
             if op.operands and all(isinstance(value.type, IndexType) for value in op.operands):
                 continue
-            parent = op
-            while parent is not None and "merlin.exact_host_arithmetic" not in parent.attributes:
-                parent = parent.parent_op()
-            if parent is None:
-                result.append(ordinal)
+            result.append(ordinal)
             continue
         if op.name not in {"linalg.generic", "linalg.reduce", "scf.for"} or limb_attribute in op.attributes:
             continue
@@ -159,10 +155,6 @@ def prepare_integer_components(
             (directory / "exact-dtype-refusal.json").write_text(json.dumps(dict(family="F2", **semantics)) + "\n")
             return None
         from merlin.llvmlower.boolean_components import rewrite_boolean_components
-
-        def observe(stage):
-            if construction_observer is not None:
-                construction_observer(module, stage)
 
         known_bounds, boolean_count = rewrite_boolean_components(module)
         observe("boolean_components")
