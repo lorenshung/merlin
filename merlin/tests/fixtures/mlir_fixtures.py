@@ -20,24 +20,38 @@ def element(typ):
     return match.group(1) if match else typ
 
 
-def generic(ins, result, body, *, yields="%v", name="%r", iterators=None, args="abcdefgh"):
-    """``name = linalg.generic`` with identity maps over ``ins`` ([(value, type)]) into a fresh empty.
+def generic(
+    ins,
+    result,
+    body,
+    *,
+    yields="%v",
+    name="%r",
+    iterators=None,
+    args="abcdefgh",
+    maps=None,
+    out=None,
+    acc="%unused",
+    attrs="",
+):
+    """``name = linalg.generic`` over ``ins`` ([(value, type)]) into ``out`` (default a fresh empty).
 
-    Block arguments are ``%a, %b, ...`` for the inputs and ``%unused`` for the output; ``body`` is
-    the scalar computation and ``yields`` its result.
+    Maps default to identities. Block arguments are ``%a, %b, ...`` for the inputs and ``acc``
+    for the output; ``body`` is the scalar computation and ``yields`` its result.
     """
     rank = len(re.findall(r"[\d?]+x", result))
     dims = ",".join(f"d{i}" for i in range(rank))
-    maps = ",".join([f"affine_map<({dims})->({dims})>"] * (len(ins) + 1))
+    maps = ",".join(maps or [f"affine_map<({dims})->({dims})>"] * (len(ins) + 1))
     kinds = ",".join(f'"{kind}"' for kind in iterators or ["parallel"] * rank)
-    empty, out = f"{name}_init", element(result)
-    params = "".join(f"%{arg}:{element(typ)}," for arg, (_, typ) in zip(args, ins))
-    return f"""{empty}=tensor.empty() : {result}
-{name}=linalg.generic {{indexing_maps=[{maps}],iterator_types=[{kinds}]}}
-  ins({",".join(v for v, _ in ins)}:{",".join(t for _, t in ins)}) outs({empty}:{result}) {{
-^bb0({params}%unused:{out}):
+    init = "" if out else f"{name}_init=tensor.empty() : {result}\n"
+    out, typ = out or f"{name}_init", element(result)
+    params = "".join(f"%{arg}:{element(t)}," for arg, (_, t) in zip(args, ins))
+    attrs = f" attrs={attrs}" if attrs else ""
+    return f"""{init}{name}=linalg.generic {{indexing_maps=[{maps}],iterator_types=[{kinds}]}}
+  ins({",".join(v for v, _ in ins)}:{",".join(t for _, t in ins)}) outs({out}:{result}){attrs} {{
+^bb0({params}{acc}:{typ}):
 {body}
-linalg.yield {yields} : {out}
+linalg.yield {yields} : {typ}
 }} -> {result}"""
 
 
