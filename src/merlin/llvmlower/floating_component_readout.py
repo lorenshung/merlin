@@ -10,7 +10,7 @@ from xdsl.rewriter import Rewriter
 
 from merlin.llvmlower._ir import emitter, generic, identity
 from merlin.llvmlower.fixed_point_ir import FORMAT, encode_fixed_integer
-from merlin.llvmlower.ieee_pointwise import dependence_proof
+from merlin.llvmlower.ieee_pointwise import canonical_bf16_storage, dependence_proof
 
 
 def component_readout(
@@ -128,15 +128,7 @@ def component_readout(
             from merlin.llvmlower.ieee_pointwise import overlay
 
             selected = overlay(op, block.args[2 : 2 + len(op.inputs)], selected, emit)
-        if str(output_type) == "bf16" and "merlin.cpu_storage_profile" in op.attributes:
-            import json
-
-            from merlin.llvmlower.ieee_pointwise import canonical_bf16_storage
-
-            selected = canonical_bf16_storage(
-                selected, json.loads(op.attributes["merlin.cpu_storage_profile"].data), emit
-            )
-        block.add_op(L.YieldOp(selected))
+        block.add_op(L.YieldOp(canonical_bf16_storage(op, selected, emit)))
         if aggregate:
             # A positive-zero seeded contraction rounds exact cancellation to +0.
             result = converted

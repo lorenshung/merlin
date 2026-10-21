@@ -15,6 +15,7 @@ def rewrite_zero_division(module):
 
     from merlin.llvmlower._ir import constants, identity, point
     from merlin.llvmlower.fixed_point_ir import FORMAT
+    from merlin.llvmlower.ieee_pointwise import canonical_bf16_storage
     from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
 
     count = 0
@@ -67,15 +68,7 @@ def rewrite_zero_division(module):
             if token == "bf16":
                 quiet_payload = constant(0x7FC0)
             result = emit(arith.SelectOp(nan, quiet_payload, result))
-            result = emit(arith.BitcastOp(result, typ.element_type))
-            if token == "bf16" and "merlin.cpu_storage_profile" in op.attributes:
-                import json
-
-                from merlin.llvmlower.ieee_pointwise import canonical_bf16_storage
-
-                profile = json.loads(op.attributes["merlin.cpu_storage_profile"].data)
-                result = canonical_bf16_storage(result, profile, emit)
-            return result
+            return canonical_bf16_storage(op, emit(arith.BitcastOp(result, typ.element_type)), emit)
 
         rank = len(typ.get_shape())
         result = point(

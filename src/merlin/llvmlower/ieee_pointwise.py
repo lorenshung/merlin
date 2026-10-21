@@ -32,13 +32,21 @@ def finite_or_zero(value, emit):
     return emit(arith.SelectOp(flag, zero, value))
 
 
-def canonical_bf16_storage(value, profile, emit):
-    """Certified scalar C10 versus AVX2 vector NaN storage; finite words untouched."""
+def canonical_bf16_storage(op, value, emit):
+    """Certified scalar C10 versus AVX2 vector NaN storage of op's BF16 result; finite words untouched.
+
+    Only a BF16 value of an op that records a CPU storage profile changes.
+    """
+    import json
+
     from xdsl.dialects import arith
     from xdsl.dialects.builtin import IntegerAttr, i16
 
     from merlin.llvmlower.native_cpu_layout import vector_predicate
 
+    if str(value.type) != "bf16" or "merlin.cpu_storage_profile" not in op.attributes:
+        return value
+    profile = json.loads(op.attributes["merlin.cpu_storage_profile"].data)
     raw = emit(arith.BitcastOp(value, i16))
     magnitude = emit(arith.AndIOp(raw, emit(arith.ConstantOp(IntegerAttr(0x7FFF, i16)))))
     nan = emit(arith.CmpiOp(magnitude, emit(arith.ConstantOp(IntegerAttr(0x7F80, i16))), "ugt"))

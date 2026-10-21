@@ -18,7 +18,7 @@ def rewrite_significand_products(module):
     from merlin.llvmlower.fixed_point_ir import FORMAT
     from merlin.llvmlower.floating_component_ir import point
     from merlin.llvmlower.ieee_dyadic_ir import decode, encode
-    from merlin.llvmlower.ieee_pointwise import overlay
+    from merlin.llvmlower.ieee_pointwise import canonical_bf16_storage, overlay
     from merlin.llvmlower.uniform_numeric_literals import compile_time_operand
 
     bounds, proofs = {}, []
@@ -104,16 +104,7 @@ def rewrite_significand_products(module):
             exponent = emit(arith.AddiOp(a[1], b[1]))
             negative_zero = emit(arith.XOrIOp(a[2], b[2]))
             rounded = encode(args[0], exponent, op.results[0].type.element_type, emit, zero_negative=negative_zero)
-            rounded = overlay(op, list(args[1:3]), rounded, emit)
-            if token == "bf16" and "merlin.cpu_storage_profile" in op.attributes:
-                import json
-
-                from merlin.llvmlower.ieee_pointwise import canonical_bf16_storage
-
-                rounded = canonical_bf16_storage(
-                    rounded, json.loads(op.attributes["merlin.cpu_storage_profile"].data), emit
-                )
-            return rounded
+            return canonical_bf16_storage(op, overlay(op, list(args[1:3]), rounded, emit), emit)
 
         result = point(
             [reshaped, *op.inputs],

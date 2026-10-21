@@ -9,7 +9,7 @@ def rewrite_ieee_conversions(module, *, copy_profiles=None):
     from merlin.llvmlower import _ir
     from merlin.llvmlower.floating_component_ir import point
     from merlin.llvmlower.ieee_dyadic_ir import decode, encode
-    from merlin.llvmlower.ieee_pointwise import special_conversion
+    from merlin.llvmlower.ieee_pointwise import canonical_bf16_storage, special_conversion
 
     bounds, proofs = {}, []
     for op in list(module.walk()):
@@ -86,15 +86,7 @@ def rewrite_ieee_conversions(module, *, copy_profiles=None):
                         arith.BitcastOp(emit(arith.ConstantOp(IntegerAttr(0x7FFFFFFF, integer))), target)
                     )
                 result = emit(arith.SelectOp(nan, replacement, result))
-            if str(target) == "bf16" and "merlin.cpu_storage_profile" in op.attributes:
-                import json
-
-                from merlin.llvmlower.ieee_pointwise import canonical_bf16_storage
-
-                result = canonical_bf16_storage(
-                    result, json.loads(op.attributes["merlin.cpu_storage_profile"].data), emit
-                )
-            return result
+            return canonical_bf16_storage(op, result, emit)
 
         result = point([integer], op.results[0].type, readout, operations)
         Rewriter.replace_op(op, operations, [result])
