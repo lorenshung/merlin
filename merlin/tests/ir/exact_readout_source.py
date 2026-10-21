@@ -82,22 +82,6 @@ class Scalar:
         finite = self.cmp(exponent, self.c(exp_mask, i64), "ne")
         return mantissa, power, finite
 
-    def compare_dyadics(self, a, ae, b, be):
-        """Compare a*2**ae with b*2**be; |a|, |b| < 2**63.
-
-        Capping alignment at 64 preserves order even at extreme exponents:
-        any nonzero shifted integer then dominates the unshifted integer.
-        """
-        i128, i64 = IntegerType(128), IntegerType(64)
-        difference = self.sub(ae, be)
-        shift_a = self.emit(arith.MinSIOp(self.emit(arith.MaxSIOp(difference, self.c(0, i64))), self.c(64, i64)))
-        shift_b = self.emit(
-            arith.MinSIOp(self.emit(arith.MaxSIOp(self.neg(difference), self.c(0, i64))), self.c(64, i64))
-        )
-        left = self.shl(self.cast(a, i128), self.cast(shift_a, i128))
-        right = self.shl(self.cast(b, i128), self.cast(shift_b, i128))
-        return self.cmp(left, right, "sgt"), self.cmp(left, right, "eq")
-
     def search(self, zp, low, high, compare):
         """Eight bisections implement saturated RNE over any byte range.
 
@@ -240,8 +224,6 @@ def build_readout(
     from xdsl.dialects.builtin import IndexType, TensorType
     from xdsl.dialects.linalg.ops import IndexOp
     from xdsl.ir.affine import AffineMap
-
-    from exact_readout_source import _broadcast_map, _elementwise
 
     if beta == 0:
         bias = None  # addmm beta=0 ignores self, including NaN/inf.
