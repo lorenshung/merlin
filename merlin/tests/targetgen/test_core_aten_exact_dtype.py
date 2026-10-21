@@ -3,6 +3,7 @@
 import hashlib
 
 import pytest
+from targetgen_fixtures import selector_catalog
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.core_aten_exact_dtype import bitwise_catalog_coverage
@@ -21,27 +22,10 @@ def module_and_manifest(*, arithmetic=False):
     root = next(op for op in operations if op.name == "linalg.copy")
     splat = next(op for op in operations if op.name == "tensor.splat")
     constant = next(op for op in operations if op.name == "arith.constant")
-    kernel = dict(symbol="copy_bytes", meta=dict(proof="closed_static_element_selectors", readout="scratchpad_bytes"))
-    numeric = dict(family="F1", quantization="none", exact_arithmetic=True, byte_order="little")
-    bindings = [
-        dict(
-            root_ordinal=operations.index(root),
-            symbol="copy_bytes",
-            numeric=numeric,
-            operands={"x": dict(op_ordinal=operations.index(splat), result=0)},
-        )
-    ]
+    bindings = [(operations.index(root), {"x": dict(op_ordinal=operations.index(splat), result=0)})]
     if not arithmetic:
-        bindings.append(
-            dict(
-                root_ordinal=operations.index(splat),
-                symbol="copy_bytes",
-                numeric=numeric,
-                operands={"literal": dict(op_ordinal=operations.index(constant), result=0)},
-            )
-        )
-    manifest = dict(source_sha256=hashlib.sha256(str(module).encode()).hexdigest(), bindings=bindings, kernels=[kernel])
-    return module, manifest
+        bindings.append((operations.index(splat), {"literal": dict(op_ordinal=operations.index(constant), result=0)}))
+    return module, selector_catalog(module, "copy_bytes", *bindings)
 
 
 def test_closed_bitwise_lineage_and_source_identity():

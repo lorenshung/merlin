@@ -1,5 +1,6 @@
 """Drivers shared by the native component admission tests (merlin/tests/targetgen)."""
 
+import hashlib
 import json
 import os
 import subprocess
@@ -81,3 +82,13 @@ def run_m2m_script(script):
         timeout=120,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def selector_catalog(module, symbol, *bindings):
+    """A provider catalog binding ``symbol``, a closed static element selector, at each (root_ordinal, operands)."""
+    numeric = dict(family="F1", quantization="none", exact_arithmetic=True, byte_order="little")
+    return dict(
+        source_sha256=hashlib.sha256(str(module).encode()).hexdigest(),
+        bindings=[dict(root_ordinal=r, symbol=symbol, operands=o, numeric=dict(numeric)) for r, o in bindings],
+        kernels=[dict(symbol=symbol, meta=dict(proof="closed_static_element_selectors", readout="scratchpad_bytes"))],
+    )

@@ -4,6 +4,7 @@ import json
 
 import pytest
 from mlir_fixtures import assert_unchanged
+from targetgen_fixtures import selector_catalog
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.result_layout import ATTRIBUTE, module_attribute
@@ -80,32 +81,16 @@ def test_alias_marker_alone_is_no_device_proof(tmp_path):
 
 
 def test_complete_selector_proof_reopens_the_exact_alias_source(tmp_path):
-    import hashlib
-
     module, report = source_and_report()
     indices = expose_alias_results(module, report)
     operations = list(module.walk())
     root = next(op for op in operations if op.name == "linalg.transpose")
-    digest = hashlib.sha256(str(module).encode()).hexdigest()
-    manifest = dict(
-        source_sha256=digest,
-        kernels=[
-            dict(symbol="select_bytes", meta=dict(proof="closed_static_element_selectors", readout="scratchpad_bytes"))
-        ],
-        bindings=[
-            dict(
-                root_ordinal=operations.index(root),
-                symbol="select_bytes",
-                operands=dict(x=dict(func_arg=0)),
-                numeric=dict(family="F1", quantization="none", exact_arithmetic=True, byte_order="little"),
-            )
-        ],
-    )
+    manifest = selector_catalog(module, "select_bytes", (operations.index(root), dict(x=dict(func_arg=0))))
     plan = dict(
         numerical_family="F1",
         exact_dtype_sites=1,
         provider_catalog=manifest,
-        materialized_output_aliases=dict(source_sha256=digest, output_indices=indices),
+        materialized_output_aliases=dict(source_sha256=manifest["source_sha256"], output_indices=indices),
     )
     path = tmp_path / "model.mlir"
     path.write_text(str(module) + "\n")

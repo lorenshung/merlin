@@ -1,9 +1,8 @@
 """Storage transport with a proved NaN-only epilogue retains every other bit."""
 
-import hashlib
-
 import pytest
 from mlir_fixtures import generic
+from targetgen_fixtures import selector_catalog
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.core_aten_exact_dtype import bitwise_catalog_coverage
@@ -57,20 +56,7 @@ def test_word_epilogue_requires_real_device_storage_lineage():
     operations = list(module.walk())
     transport = next(op for op in operations if op.name == "linalg.generic")
     ordinal = operations.index(transport)
-    manifest = dict(
-        source_sha256=hashlib.sha256(str(module).encode()).hexdigest(),
-        bindings=[
-            dict(
-                root_ordinal=ordinal,
-                symbol="transport",
-                operands=dict(x=dict(func_arg=0)),
-                numeric=dict(family="F1", quantization="none", exact_arithmetic=True, byte_order="little"),
-            )
-        ],
-        kernels=[
-            dict(symbol="transport", meta=dict(proof="closed_static_element_selectors", readout="scratchpad_bytes"))
-        ],
-    )
+    manifest = selector_catalog(module, "transport", (ordinal, dict(x=dict(func_arg=0))))
     assert bitwise_catalog_coverage(module, manifest) == [ordinal]
     manifest["bindings"] = []
     with pytest.raises(ValueError, match="no source-bound"):
