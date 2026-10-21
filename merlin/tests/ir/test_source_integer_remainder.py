@@ -74,18 +74,16 @@ def test_whole_integer_image_has_a_canonical_zero_after_quantization(tmp_path, i
     assert original != tmp_path.joinpath("model.mlir").read_bytes()
 
 
-@pytest.mark.parametrize("divisor", [0.0, 0.3, 0.3333333333333333, 2.0, float("inf")])
-def test_zero_nonintegral_reciprocal_and_ieee_special_divisors_refuse(tmp_path, divisor):
-    report = fixture(tmp_path, divisor)
+@pytest.mark.parametrize(
+    "divisor,options",
+    [(d, {}) for d in (0.0, 0.3, 0.3333333333333333, 2.0, float("inf"))]
+    + [(0.5, dict(integer="f32", floating="f64")), (0.5, dict(floating="f16")), (0.5, dict(foreign=True))],
+)
+def test_special_divisor_unproved_domain_or_effect_refuses(tmp_path, divisor, options):
+    report = fixture(tmp_path, divisor, **options)
     before = tmp_path.joinpath("model.mlir").read_bytes()
     assert specialize(tmp_path, report, SPEC) is None
     assert tmp_path.joinpath("model.mlir").read_bytes() == before
-
-
-@pytest.mark.parametrize("options", [dict(integer="f32", floating="f64"), dict(floating="f16"), dict(foreign=True)])
-def test_unproved_domain_or_effect_refuses(tmp_path, options):
-    report = fixture(tmp_path, 0.5, **options)
-    assert specialize(tmp_path, report, SPEC) is None
 
 
 def test_oracle_qualification_failure_does_not_turn_into_a_payload_dependent_host_choice(tmp_path, monkeypatch):

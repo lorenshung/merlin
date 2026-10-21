@@ -89,15 +89,6 @@ def test_boolean_square_lowered_as_a_product_is_an_identity(tmp_path):
     assert specialize(tmp_path, report())["family"] == "storage_copy_or_declared_conversion"
 
 
-def test_boolean_two_entry_table_is_never_emitted(tmp_path):
-    fixture(
-        tmp_path,
-        "%c=arith.uitofp %a : i1 to f32\n%k=arith.constant 3.0 : f32\n%m=arith.addf %c,%k : f32\nlinalg.yield %m : f32",
-        source="i1",
-    )
-    assert specialize(tmp_path, report()) is None
-
-
 @pytest.mark.parametrize(
     "case_metadata", [dict(overload="aten.add.Tensor"), dict(exponent=2.0), dict(overload="aten.pow.Tensor_Scalar", exponent=1.0)]
 )
@@ -116,23 +107,6 @@ def test_operation_labelled_as_power_is_not_rewritten_when_the_ir_is_an_addition
     before = path.read_bytes()
     assert specialize(tmp_path, report(exponent=1.0)) is None
     assert path.read_bytes() == before
-
-
-@pytest.mark.parametrize("failure", ["non_identity", "foreign_call", "unknown_arithmetic", "runtime_exponent"])
-def test_incomplete_semantic_binding_is_not_a_source_specialization(tmp_path, failure):
-    body = power("f32", "f32", 2 if failure == "non_identity" else 1)
-    prelude = ""
-    if failure == "foreign_call":
-        prelude = "func.call @unknown() : () -> ()"
-    elif failure == "unknown_arithmetic":
-        prelude = '%opaque="arith.future_carrier"(%x) : (tensor<4xf32>) -> tensor<4xf32>'
-    elif failure == "runtime_exponent":
-        body = "%p=math.powf %a,%a : f32\nlinalg.yield %p : f32"
-    path = fixture(tmp_path, body, prelude=prelude)
-    before = path.read_bytes()
-    assert specialize(tmp_path, report()) is None
-    assert path.read_bytes() == before
-    assert not (tmp_path / "native-source-specialization.json").exists()
 
 
 def complex_fixture(tmp_path, real, imaginary, component_map="affine_map<(d0)->(d0)>"):
@@ -194,14 +168,14 @@ def test_complex_unit_power_is_an_exact_component_copy(tmp_path):
     assert specialize(tmp_path, report(complex_output=True))["family"] == "storage_copy_or_declared_conversion"
 
 
-def test_complex_component_reversal_is_not_a_copy(tmp_path):
-    # flip on complex storage: each component reads its projection reversed.
-    complex_fixture(tmp_path, "linalg.yield %r : f32", "linalg.yield %i : f32", "affine_map<(d0)->(2-d0)>")
-    assert specialize(tmp_path, report(complex_output=True)) is None
-
-
-def test_complex_component_swap_is_not_a_copy(tmp_path):
-    complex_fixture(tmp_path, "linalg.yield %i : f32", "linalg.yield %r : f32")
+# flip on complex storage: each component reads its projection reversed; a swap exchanges them.
+@pytest.mark.parametrize(
+    "real,imaginary,maps",
+    [("%r", "%i", ["affine_map<(d0)->(2-d0)>"]), ("%i", "%r", [])],
+    ids=["reversal", "swap"],
+)
+def test_complex_component_permutation_is_not_a_copy(tmp_path, real, imaginary, maps):
+    complex_fixture(tmp_path, f"linalg.yield {real} : f32", f"linalg.yield {imaginary} : f32", *maps)
     assert specialize(tmp_path, report(complex_output=True)) is None
 
 
@@ -281,19 +255,33 @@ def test_unit_power_copy_keeps_the_programs_conversion_chain(tmp_path, source, c
     assert evaluate(body.last_op.operands[0], {body.args[0]: word}) == value
 
 
-def test_unit_power_copy_refuses_a_chain_that_rounds_before_widening(tmp_path):
-    path = fixture(
-        tmp_path,
+BOOLEAN = dict(source="i1")
+UNPROVED = {
+    "non_identity": (power("f32", "f32", 2), "", {}),
+    "foreign_call": (power("f32", "f32", 1), "func.call @unknown() : () -> ()", {}),
+    "unknown_arithmetic": (power("f32", "f32", 1), '%opaque="arith.future_carrier"(%x) : (tensor<4xf32>) -> tensor<4xf32>', {}),
+    "runtime_exponent": ("%p=math.powf %a,%a : f32\nlinalg.yield %p : f32", "", {}),
+    # A Boolean affine map has a two-entry table: never emitted.
+    "boolean_two_entry_table": (
+        "%c=arith.uitofp %a : i1 to f32\n%k=arith.constant 3.0 : f32\n%m=arith.addf %c,%k : f32\nlinalg.yield %m : f32",
+        "",
+        BOOLEAN,
+    ),
+    # sitofp maps i1 true to -1.0, so the complete Boolean table is (+0, -1): neither a copy nor a fill.
+    "boolean_signed_conversion": ("%c=arith.sitofp %a : i1 to f32\nlinalg.yield %c : f32", "", BOOLEAN),
+    "chain_rounds_before_widening": (
         unit_power("%n=arith.sitofp %a : i32 to f32\n%f=arith.extf %n : f32 to f64", "f64"),
-        source="i32",
-        output="f64",
-    )
+        "",
+        dict(source="i32", output="f64"),
+    ),
+}
+
+
+@pytest.mark.parametrize("failure", list(UNPROVED))
+def test_incomplete_semantic_binding_is_not_a_source_specialization(tmp_path, failure):
+    body, prelude, options = UNPROVED[failure]
+    path = fixture(tmp_path, body, prelude=prelude, **options)
     before = path.read_bytes()
     assert specialize(tmp_path, report()) is None
     assert path.read_bytes() == before
-
-
-def test_boolean_signed_conversion_is_not_an_identity(tmp_path):
-    # sitofp maps i1 true to -1.0, so the complete Boolean table is (+0, -1): neither a copy nor a fill.
-    fixture(tmp_path, "%c=arith.sitofp %a : i1 to f32\nlinalg.yield %c : f32", source="i1")
-    assert specialize(tmp_path, report()) is None
+    assert not (tmp_path / "native-source-specialization.json").exists()
