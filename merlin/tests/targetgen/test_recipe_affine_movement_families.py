@@ -12,6 +12,7 @@ conversion states each in its exact integer form (``recipe_numerics``).
 from __future__ import annotations
 
 import ast
+import json
 import os
 import subprocess
 from pathlib import Path
@@ -131,12 +132,10 @@ def test_the_quantizer_names_the_support_set_operators():
         assert op in " ".join(table["window_mean"]), op
 
 
-_SCRIPT = r"""
+_RECIPE = r"""
 import json
-import numpy as np
 import torch
 from merlin.targetgen import _recipe_quantizer as quant
-from merlin.targetgen import recipe_numerics as RN
 recipe = {
     "schema": "quant_recipe_v1", "status": "derived",
     "families": ["contraction", "window_mean", "affine_map", "movement"],
@@ -144,6 +143,10 @@ recipe = {
     "activation": {"dtype": "int8", "granularity": "tensor", "symmetric": True,
                    "quant_min": -128, "quant_max": 127, "mode": "static"},
 }
+"""
+_SCRIPT = _RECIPE + r"""
+import numpy as np
+from merlin.targetgen import recipe_numerics as RN
 class Model(torch.nn.Module):
     def forward(self, x, y):
         d = torch.sub(x, y)
@@ -195,26 +198,24 @@ print(json.dumps({
 """
 
 
-def test_the_capture_quantizer_states_each_map_in_its_integer_form():
+def _capture_report(script):
+    """Run ``script`` under the TorchAO capture interpreter and return its last JSON line."""
     python = os.environ.get("MERLIN_M2M_PYTHON")
     if not python or not Path(python).is_file():
         pytest.skip("TorchAO capture interpreter is not configured")
     root = repo_root()
     paths = [root / "src", root / "src/merlin/targetgen", *sorted((root / "packages").glob("*/src"))]
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(str(path) for path in paths)}
-    result = subprocess.run([python, "-c", _SCRIPT], capture_output=True, text=True, timeout=300, env=env)
+    result = subprocess.run([python, "-c", script], capture_output=True, text=True, timeout=300, env=env)
     assert result.returncode == 0, result.stdout + result.stderr[-5000:]
-    import json
+    return json.loads(result.stdout.strip().splitlines()[-1])
 
-    report = json.loads(result.stdout.strip().splitlines()[-1])
+
+def test_the_capture_quantizer_states_each_map_in_its_integer_form():
+    report = _capture_report(_SCRIPT)
     assert report["maps"] == 3 and report["moves"] == 2
-    assert report["operators"] == [
-        "aten.add.Tensor",
-        "aten.cat.default",
-        "aten.neg.default",
-        "aten.pad.default",
-        "aten.sub.Tensor",
-    ]
+    operators = ["aten.add.Tensor", "aten.cat.default", "aten.neg.default", "aten.pad.default", "aten.sub.Tensor"]
+    assert report["operators"] == operators
     for operator in ("aten.sub.Tensor", "aten.add.Tensor", "aten.neg.default"):
         assert operator in report["verified"] or operator in report["refused"]
     for reason in report["refused"].values():
@@ -239,17 +240,7 @@ def test_backward_and_constant_ops_are_named():
     assert "add.Tensor" in " ".join(table["affine_map"])
 
 
-_STANDALONE = r"""
-import json
-import torch
-from merlin.targetgen import _recipe_quantizer as quant
-recipe = {
-    "schema": "quant_recipe_v1", "status": "derived",
-    "families": ["contraction", "window_mean", "affine_map", "movement"],
-    "weight": {"dtype": "int8", "granularity": "tensor", "symmetric": True, "quant_min": -127, "quant_max": 127},
-    "activation": {"dtype": "int8", "granularity": "tensor", "symmetric": True,
-                   "quant_min": -128, "quant_max": 127, "mode": "static"},
-}
+_STANDALONE = _RECIPE + r"""
 class Sum(torch.nn.Module):
     def forward(self, x, y):
         return torch.add(x, y)
@@ -277,17 +268,7 @@ print(json.dumps(report))
 
 def test_a_sum_a_mean_and_a_constant_read_themselves_out():
     """No quantized reader closes them, so where a standalone readout is licensed their output is quantized."""
-    python = os.environ.get("MERLIN_M2M_PYTHON")
-    if not python or not Path(python).is_file():
-        pytest.skip("TorchAO capture interpreter is not configured")
-    root = repo_root()
-    paths = [root / "src", root / "src/merlin/targetgen", *sorted((root / "packages").glob("*/src"))]
-    env = {**os.environ, "PYTHONPATH": os.pathsep.join(str(path) for path in paths)}
-    result = subprocess.run([python, "-c", _STANDALONE], capture_output=True, text=True, timeout=300, env=env)
-    assert result.returncode == 0, result.stdout + result.stderr[-5000:]
-    import json
-
-    report = json.loads(result.stdout.strip().splitlines()[-1])
+    report = _capture_report(_STANDALONE)
     assert report["sum"]["annotated_affine_maps"] == 1
     assert report["mean"]["annotated_means"] == 1
     for name, operator in (("sum", "aten.add.Tensor"), ("mean", "aten.mean.dim")):
