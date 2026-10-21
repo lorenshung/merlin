@@ -4,7 +4,6 @@
 import pytest
 from mlir_fixtures import forward, generic, pointwise
 
-from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.literal_zero_components import fold_literal_zero_components
 
 LIMB = '{test.limb="integer"}'
@@ -52,19 +51,9 @@ def test_index_arithmetic_is_not_treated_as_a_fixed_width_integer():
 
 
 def test_zero_result_does_not_erase_an_opaque_call():
-    module = parse_mlir_text("""module {
-      func.func private @effect() -> i8
-      func.func @forward(%x:tensor<2xi8>) -> tensor<2xi32> {
-        %e=tensor.empty() : tensor<2xi32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x:tensor<2xi8>) outs(%e:tensor<2xi32>) attrs={test.limb="unproved"} {
-        ^bb0(%a:i8,%out:i32):
-          %effect=func.call @effect() : () -> i8
-          %zero=arith.constant 0 : i32
-          linalg.yield %zero : i32
-        } -> tensor<2xi32>
-        return %r : tensor<2xi32>
-      }}""")
+    body = "%effect=func.call @effect() : () -> i8\n%zero=arith.constant 0 : i32"
+    call = generic([("%x", "tensor<2xi8>")], "tensor<2xi32>", body, yields="%zero", attrs='{test.limb="unproved"}')
+    module = forward("%x:tensor<2xi8>", "tensor<2xi32>", call, decls="func.func private @effect() -> i8")
     assert fold_literal_zero_components(module, "test.limb") == 0
     assert any(op.name == "func.call" for op in module.walk())
 

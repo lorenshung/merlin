@@ -57,11 +57,12 @@ def generic(
 }} -> {result}"""
 
 
-def forward(params, result, body, *, ret="%r"):
-    """Parse ``module { func.func @forward(params) -> result { body; return ret } }``."""
+def forward(params, result, body, *, ret="%r", attrs="", decls=""):
+    """Parse ``module { decls func.func @forward(params) -> result attrs { body; return ret } }``."""
     types = result.removeprefix("(").removesuffix(")")
+    attrs = f" attributes {attrs}" if attrs else ""
     return parse_mlir_text(
-        f"module {{func.func @forward({params}) -> {result} {{\n{body}\nreturn {ret} : {types}\n}} }}"
+        f"module {{{decls}\nfunc.func @forward({params}) -> {result}{attrs} {{\n{body}\nreturn {ret} : {types}\n}} }}"
     )
 
 

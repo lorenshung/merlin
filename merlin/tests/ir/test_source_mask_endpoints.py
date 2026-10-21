@@ -6,52 +6,37 @@ deliberately misleading and must not be read.
 """
 
 import pytest
+from mlir_fixtures import forward, generic
 
 from merlin.frontends.linalg_mlir import parse_mlir_file
 from merlin.targetgen.source_mask_endpoints import specialize
 
 
 def fixture(tmp_path, *, threshold=1.0, predicate="olt", private=True, unknown=False, keep=1.0):
-    text = f'''module {{
-      "ml_program.global"() <{{sym_name="rng",sym_visibility="{"private" if private else "public"}",is_mutable,
-        type=tensor<4xi64>,value=dense<1>:tensor<4xi64>}}> : ()->()
-      func.func @forward(%x:tensor<4xf32>) -> (tensor<4xf32>,tensor<4xi1>,tensor<4xf32>) {{
-        %state="ml_program.global_load"() <{{global=@rng}}> : ()->tensor<4xi64>
-        %e0=tensor.empty() : tensor<4xf64>
-        %u=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-          ins(%state:tensor<4xi64>) outs(%e0:tensor<4xf64>) {{
-          ^bb0(%s:i64,%o:f64):
-          %m=arith.constant 9007199254740991 : i64
-          %b=arith.andi %s,%m : i64
+    uniform = """%m=arith.constant 9007199254740991 : i64
+          %b=arith.andi %a,%m : i64
           %f=arith.uitofp %b : i64 to f64
           %k=arith.constant 1.1102230246251565e-16 : f64
-          %v=arith.mulf %f,%k : f64
-          linalg.yield %v : f64
-        }} -> tensor<4xf64>
-        "ml_program.global_store"(%state) <{{global=@rng}}> : (tensor<4xi64>)->()
-        {'"fixture.effect"() : ()->()' if unknown else ""}
-        %e1=tensor.empty() : tensor<4xi1>
-        %mask=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-          ins(%u:tensor<4xf64>) outs(%e1:tensor<4xi1>) {{
-          ^bb0(%w:f64,%o:i1):
-          %t=arith.constant {threshold} : f64
-          %c=arith.cmpf {predicate},%w,%t : f64
-          linalg.yield %c : i1
-        }} -> tensor<4xi1>
-        %e2=tensor.empty() : tensor<4xf32>
-        %data=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-          ins(%x,%mask:tensor<4xf32>,tensor<4xi1>) outs(%e2:tensor<4xf32>) {{
-          ^bb0(%a:f32,%q:i1,%o:f32):
-          %zero=arith.constant 0.0 : f32
+          %v=arith.mulf %f,%k : f64"""
+    draw = generic([("%state", "tensor<4xi64>")], "tensor<4xf64>", uniform, name="%u")
+    store = '"ml_program.global_store"(%state) <{global=@rng}> : (tensor<4xi64>)->()\n'
+    store += '"fixture.effect"() : ()->()\n' if unknown else ""
+    decide = f"%t=arith.constant {threshold} : f64\n%c=arith.cmpf {predicate},%a,%t : f64"
+    mask = generic([("%u", "tensor<4xf64>")], "tensor<4xi1>", decide, yields="%c", name="%mask")
+    scale = f"""%zero=arith.constant 0.0 : f32
           %scale=arith.constant {keep} : f32
-          %factor=arith.select %q,%scale,%zero : f32
-          %p=arith.mulf %a,%factor : f32
-          linalg.yield %p : f32
-        }} -> tensor<4xf32>
-        return %data,%mask,%x : tensor<4xf32>,tensor<4xi1>,tensor<4xf32>
-      }}
-    }}'''
-    (tmp_path / "model.mlir").write_text(text)
+          %factor=arith.select %b,%scale,%zero : f32
+          %p=arith.mulf %a,%factor : f32"""
+    masked = [("%x", "tensor<4xf32>"), ("%mask", "tensor<4xi1>")]
+    data = generic(masked, "tensor<4xf32>", scale, yields="%p", name="%data")
+    load = '%state="ml_program.global_load"() <{global=@rng}> : ()->tensor<4xi64>\n'
+    visibility = "private" if private else "public"
+    rng = f'''"ml_program.global"() <{{sym_name="rng",sym_visibility="{visibility}",is_mutable,
+        type=tensor<4xi64>,value=dense<1>:tensor<4xi64>}}> : ()->()'''
+    results = "(tensor<4xf32>,tensor<4xi1>,tensor<4xf32>)"
+    body = f"{load}{draw}\n{store}{mask}\n{data}"
+    module = forward("%x:tensor<4xf32>", results, body, ret="%data,%mask,%x", decls=rng)
+    (tmp_path / "model.mlir").write_text(str(module))
     return dict(
         cases=[
             dict(

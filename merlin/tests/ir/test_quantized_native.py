@@ -9,7 +9,6 @@ import pytest
 from mlir_fixtures import forward, generic, native_library, pointwise
 
 from merlin.common.yaml import load_yaml
-from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.quantized_native import parameters, quantize_entries
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -62,14 +61,9 @@ def test_quantized_grading_checks_oracle_bytes_and_retains_eager_diagnostic():
 
 def test_full_entry_domain_and_posts_unchanged(tmp_path):
     n = 520
-    module = parse_mlir_text(f"""module {{ func.func @forward(%x:tensor<{n}xf32>) -> (tensor<{n}xf32>,tensor<{n}xf32>) attributes {{llvm.emit_c_interface}} {{
-      %e=tensor.empty() : tensor<{n}xf32>
-      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-        ins(%x:tensor<{n}xf32>) outs(%e:tensor<{n}xf32>) {{
-      ^bb0(%a:f32,%b:f32): linalg.yield %a : f32
-      }} -> tensor<{n}xf32>
-      return %r,%x : tensor<{n}xf32>,tensor<{n}xf32>
-    }} }}""")
+    t = f"tensor<{n}xf32>"
+    copy = generic([("%x", t)], t, "", yields="%a")
+    module = forward(f"%x:{t}", f"({t},{t})", copy, ret="%r,%x", attrs="{llvm.emit_c_interface}")
     quantize_entries(module, contract())
     module.verify()
     function = next(op for op in module.walk() if op.name == "func.func")
@@ -277,28 +271,12 @@ def test_nan_word_overlay_is_removed_but_live_nan_is_refused():
 def test_rational_divisors_survive_layouts_until_exported_quantize(tmp_path):
     from merlin.llvmlower.floating_components import rewrite_floating_components
 
-    module = parse_mlir_text("""module {
-      func.func @forward(%x:tensor<256xf32>) -> tensor<16x16xf32> attributes {llvm.emit_c_interface} {
-        %three=arith.constant 3.0 : f32
-        %divisor=tensor.splat %three : tensor<256xf32>
-        %e=tensor.empty() : tensor<256xf32>
-        %q=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x,%divisor:tensor<256xf32>,tensor<256xf32>) outs(%e:tensor<256xf32>) {
-        ^bb0(%a:f32,%b:f32,%out:f32):
-          %v=arith.divf %a,%b : f32
-          linalg.yield %v : f32
-        } -> tensor<256xf32>
-        %shape=arith.constant dense<[16,16]> : tensor<2xi64>
-        %view=tensor.reshape %q(%shape) : (tensor<256xf32>,tensor<2xi64>) -> tensor<16x16xf32>
-        %dst=tensor.empty() : tensor<16x16xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0,d1)->(d0,d1)>,affine_map<(d0,d1)->(d0,d1)>,affine_map<(d0,d1)->(d0,d1)>],iterator_types=["parallel","parallel"]}
-          ins(%view,%view:tensor<16x16xf32>,tensor<16x16xf32>) outs(%dst:tensor<16x16xf32>) {
-        ^bb1(%a:f32,%b:f32,%out:f32):
-          %v=arith.addf %a,%b : f32
-          linalg.yield %v : f32
-        } -> tensor<16x16xf32>
-        return %r : tensor<16x16xf32>
-      }}""")
+    t, square = "tensor<256xf32>", "tensor<16x16xf32>"
+    prelude = f"%three=arith.constant 3.0 : f32\n%divisor=tensor.splat %three : {t}\n"
+    quotient = generic([("%x", t), ("%divisor", t)], t, "%v=arith.divf %a,%b : f32", name="%q")
+    view = f"%shape=arith.constant dense<[16,16]> : tensor<2xi64>\n%view=tensor.reshape %q(%shape) : ({t},tensor<2xi64>) -> {square}"
+    total = generic([("%view", square), ("%view", square)], square, "%v=arith.addf %a,%b : f32")
+    module = forward(f"%x:{t}", square, f"{prelude}{quotient}\n{view}\n{total}", attrs="{llvm.emit_c_interface}")
     p = contract()
     grids = quantize_entries(module, p)
     bounds, proofs = rewrite_floating_components(
