@@ -7,6 +7,8 @@ from xdsl.parser import Parser
 from merlin.frontends.linalg_mlir import make_context
 from merlin.llvmlower.contraction_quantization import SPEC, quantize_module, selected_contractions
 
+QUANT = dict(quant_min=SPEC.quant_min, quant_max=SPEC.quant_max, eps=SPEC.eps)
+
 
 def module(body=None, init="0.0"):
     contraction = (
@@ -28,10 +30,23 @@ def module(body=None, init="0.0"):
     ).parse_module()
 
 
+def select(m):
+    """The contractions selected for the i8 x i8 -> i32 capability at rank 2."""
+    return list(selected_contractions(m, [("i8", "i8", "i32")], (2,)))
+
+
+def resized(**shapes):
+    """``module()`` with its ``2x3x``/``3x2x``/``2x2x`` operand shapes replaced (keys a, b, r)."""
+    text = str(module())
+    for old, key in (("2x3x", "a"), ("3x2x", "b"), ("2x2x", "r")):
+        text = text.replace(old, shapes.get(key, old))
+    return Parser(make_context(), text).parse_module()
+
+
 def test_opt_in_preserves_float_abi_and_uses_existing_lowering():
     m = module()
     original_type = next(op for op in m.walk() if op.name == "func.func").function_type
-    chosen = list(selected_contractions(m, [("i8", "i8", "i32")], (2,)))
+    chosen = select(m)
     assert len(chosen) == 1
     assert quantize_module(m, chosen) == 1
     assert next(op for op in m.walk() if op.name == "func.func").function_type == original_type
@@ -63,10 +78,10 @@ def test_reference_is_integer_pytorch_and_dequantizes_in_order():
     from merlin.targetgen.core_aten_w8a8_reference import evaluate
 
     m = module()
-    chosen = list(selected_contractions(m, [("i8", "i8", "i32")], (2,)))
+    chosen = select(m)
     a = np.array([[0, 0.5, -1], [1, 0.25, 0]], np.float32)
     b = np.array([[1, -1], [0.5, 0.25], [0, -0.5]], np.float32)
-    outputs, scales = evaluate(m, [a, b], chosen, quant_min=SPEC.quant_min, quant_max=SPEC.quant_max, eps=SPEC.eps)
+    outputs, scales = evaluate(m, [a, b], chosen, **QUANT)
     s = torch.tensor(1 / 127, dtype=torch.float32)
     qa, qb = [torch.round(torch.from_numpy(x) * (1 / s)).to(torch.int32) for x in (a, b)]
     expected = ((qa @ qb).float().double() * (s.double() * s.double())).float()
@@ -111,7 +126,7 @@ def test_exact_reference_grade_does_not_use_fp32_error():
 def test_float_storage_policy_restores_original_dtype(element):
     m = Parser(make_context(), str(module()).replace("f32", element)).parse_module()
     original_type = next(op for op in m.walk() if op.name == "func.func").function_type
-    selected = list(selected_contractions(m, [("i8", "i8", "i32")], (2,)))
+    selected = select(m)
     assert quantize_module(m, selected) == 1
     assert next(op for op in m.walk() if op.name == "func.func").function_type == original_type
     m.verify()
@@ -125,11 +140,9 @@ def test_non_mac_reduction_and_overflow_are_refused():
 
     mul = next(op for op in m.walk() if isinstance(op, arith.MulfOp))
     Rewriter.replace_op(mul, arith.SubfOp(*mul.operands))
-    assert not list(selected_contractions(m, [("i8", "i8", "i32")], (2,)))
-    huge = Parser(
-        make_context(), str(module()).replace("2x3x", "2x200000x").replace("3x2x", "200000x2x")
-    ).parse_module()
-    assert not list(selected_contractions(huge, [("i8", "i8", "i32")], (2,)))
+    assert not select(m)
+    huge = resized(a="2x200000x", b="200000x2x")
+    assert not select(huge)
 
 
 def test_zero_tensors_use_existing_epsilon_policy():
@@ -137,15 +150,8 @@ def test_zero_tensors_use_existing_epsilon_policy():
     from merlin.targetgen.core_aten_w8a8_reference import evaluate
 
     m = module()
-    selected = list(selected_contractions(m, [("i8", "i8", "i32")], (2,)))
-    output, scales = evaluate(
-        m,
-        [np.zeros((2, 3), np.float32), np.zeros((3, 2), np.float32)],
-        selected,
-        quant_min=SPEC.quant_min,
-        quant_max=SPEC.quant_max,
-        eps=SPEC.eps,
-    )
+    selected = select(m)
+    output, scales = evaluate(m, [np.zeros((2, 3), np.float32), np.zeros((3, 2), np.float32)], selected, **QUANT)
     assert torch.equal(output[0], torch.zeros((2, 2)))
     assert scales[0]["lhs"] == np.float32(SPEC.eps)
     assert scales[0]["rhs"] == np.float32(SPEC.eps)
@@ -172,7 +178,7 @@ def test_half_operands_with_float_accumulation_are_quantized():
     function.function_type = FunctionType.from_lists(
         [arg.type for arg in function.body.block.args], [op.results[0].type]
     )
-    chosen = list(selected_contractions(m, [("i8", "i8", "i32")], (2,)))
+    chosen = select(m)
     assert chosen == [op]
     assert quantize_module(m, chosen) == 1
 
@@ -208,14 +214,12 @@ def test_declared_range_changes_partial_sum_bound_and_refuses_unsplit_k():
     pytest.importorskip("torch")
     from merlin.targetgen.core_aten_w8a8_reference import evaluate
 
-    m = Parser(make_context(), str(module()).replace("2x3x", "2x64x").replace("3x2x", "64x2x")).parse_module()
-    chosen = list(selected_contractions(m, [("i8", "i8", "i32")], (2,)))
+    m = resized(a="2x64x", b="64x2x")
+    chosen = select(m)
     arrays = [np.ones((2, 64), np.float32), np.ones((64, 2), np.float32)]
     with pytest.raises(ValueError, match="primitive K"):
-        evaluate(m, arrays, chosen, quant_min=SPEC.quant_min, quant_max=SPEC.quant_max, eps=SPEC.eps, dispatch=[unsafe])
-    _, sites = evaluate(
-        m, arrays, chosen, quant_min=SPEC.quant_min, quant_max=SPEC.quant_max, eps=SPEC.eps, dispatch=[safe]
-    )
+        evaluate(m, arrays, chosen, **QUANT, dispatch=[unsafe])
+    _, sites = evaluate(m, arrays, chosen, **QUANT, dispatch=[safe])
     assert sites[0]["accumulator"][0][0] == acc
     assert sites[0]["k_split"]["split_required"]
     assert sites[0]["accumulator_metrics"]["internal_headroom"] > 0
@@ -272,27 +276,10 @@ def native_model(m, root):
     source = root / "model.mlir"
     source.write_text(str(m))
     lowered = lower_model_file(source, root / "lower", targets=(), textual=True)
-    obj, shared = root / "model.o", root / "model.so"
-    subprocess.run(
-        [str(toolchain.clang()), "-O2", "-fPIC", "-c", str(lowered.ll_path), "-o", str(obj)],
-        check=True,
-        capture_output=True,
-    )
-    subprocess.run(
-        [
-            str(toolchain.clang()),
-            "-shared",
-            "-Wl,-Bsymbolic",
-            "-fPIC",
-            str(obj),
-            str(mlir_runtime_c()),
-            "-lm",
-            "-o",
-            str(shared),
-        ],
-        check=True,
-        capture_output=True,
-    )
+    obj, shared, clang = root / "model.o", root / "model.so", str(toolchain.clang())
+    subprocess.run([clang, "-O2", "-fPIC", "-c", str(lowered.ll_path), "-o", str(obj)], check=True, capture_output=True)
+    link = [clang, "-shared", "-Wl,-Bsymbolic", "-fPIC", str(obj), str(mlir_runtime_c()), "-lm", "-o", str(shared)]
+    subprocess.run(link, check=True, capture_output=True)
     return HostModel.load(str(shared))
 
 
@@ -301,9 +288,9 @@ def test_emitted_dequant_overflow_and_nonfinite_runtime(tmp_path):
     from merlin.targetgen.core_aten_w8a8_reference import evaluate
 
     m = module()
-    selected = list(selected_contractions(m, [("i8", "i8", "i32")], (2,)))
+    selected = select(m)
     original = m.clone()
-    original_selected = list(selected_contractions(original, [("i8", "i8", "i32")], (2,)))
+    original_selected = select(original)
     quantize_module(m, selected)
     native = native_model(m, tmp_path / "dequant")
     for a_value, b_value in [(1e38, 1e-4), (0.0, 0.0), (np.nan, 1.0), (np.inf, 1.0), (-np.inf, 1.0)]:
@@ -311,9 +298,7 @@ def test_emitted_dequant_overflow_and_nonfinite_runtime(tmp_path):
         b = np.full((3, 2), b_value, np.float32)
         actual = np.zeros((2, 2), np.float32)
         native([(v.ctypes.data, v.shape) for v in (a, b, actual)])
-        outputs, _ = evaluate(
-            original, [a, b], original_selected, quant_min=SPEC.quant_min, quant_max=SPEC.quant_max, eps=SPEC.eps
-        )
+        outputs, _ = evaluate(original, [a, b], original_selected, **QUANT)
         assert actual.tobytes() == outputs[0].numpy().tobytes()
         if np.isfinite(a_value):
             assert np.isfinite(actual).all()
@@ -325,12 +310,7 @@ def test_emitted_dequant_overflow_and_nonfinite_runtime(tmp_path):
     assert np.isnan(actual).all()
     with pytest.raises(ValueError, match="not representable"):
         evaluate(
-            original,
-            [np.full((2, 3), 1e38, np.float32), np.full((3, 2), 1e38, np.float32)],
-            original_selected,
-            quant_min=SPEC.quant_min,
-            quant_max=SPEC.quant_max,
-            eps=SPEC.eps,
+            original, [np.full((2, 3), 1e38, np.float32), np.full((3, 2), 1e38, np.float32)], original_selected, **QUANT
         )
     # Run the emitted assertion in a child so an expected abort cannot kill pytest.
     import subprocess
@@ -365,17 +345,10 @@ def test_exhaustive_emitted_quantizer_sweep_by_class(tmp_path):
     # Exhaust all finite binary16 values promoted to f32, plus every reduced
     # int8 tie and its f32 neighbours at several independently fixed scales.
     half = np.arange(1 << 16, dtype=np.uint16).view(np.float16)
+    least, tiny = np.nextafter(np.float32(0), np.float32(1)), np.finfo(np.float32).tiny
     classes = {
         "finite_binary16": half[np.isfinite(half)].astype(np.float32),
-        "subnormal": np.array(
-            [
-                np.nextafter(np.float32(0), np.float32(1)),
-                np.finfo(np.float32).tiny / 2,
-                -np.nextafter(np.float32(0), np.float32(1)),
-                -np.finfo(np.float32).tiny / 2,
-            ],
-            np.float32,
-        ),
+        "subnormal": np.array([least, tiny / 2, -least, -tiny / 2], np.float32),
         "signed_zero": np.array([0.0, -0.0], np.float32),
     }
     fixed_scales = {}
@@ -389,10 +362,8 @@ def test_exhaustive_emitted_quantizer_sweep_by_class(tmp_path):
     for name, values in classes.items():
         x = values.reshape(1, -1).copy()
         k = x.size
-        m = Parser(
-            make_context(), str(module()).replace("2x3x", f"1x{k}x").replace("3x2x", f"{k}x1x").replace("2x2x", "1x1x")
-        ).parse_module()
-        chosen = list(selected_contractions(m, [("i8", "i8", "i32")], (2,)))
+        m = resized(a=f"1x{k}x", b=f"{k}x1x", r="1x1x")
+        chosen = select(m)
         quantize_module(m, chosen)
         contraction = next(op for op in m.walk() if "merlin.numeric_policy" in op.attributes)
         codes = contraction.operands[0]
@@ -420,9 +391,7 @@ def test_exhaustive_emitted_quantizer_sweep_by_class(tmp_path):
         actual_q, actual_s = np.zeros(x.shape, np.int8), np.zeros((), np.float32)
         b = np.zeros((k, 1), np.float32)
         native([(v.ctypes.data, v.shape) for v in (x, b, actual_s, actual_q)])
-        q, s, _, _ = quantize_operand(
-            torch.from_numpy(x), quant_min=SPEC.quant_min, quant_max=SPEC.quant_max, eps=SPEC.eps
-        )
+        q, s, _, _ = quantize_operand(torch.from_numpy(x), **QUANT)
         if name in fixed_scales:
             s = torch.tensor(fixed_scales[name], dtype=torch.float32)
             q = quantize_codes(torch.from_numpy(x), s, quant_min=SPEC.quant_min, quant_max=SPEC.quant_max)
