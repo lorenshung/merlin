@@ -408,16 +408,69 @@ def fold_closed_generics(module):
     return count
 
 
-def fold_unit_scales(module):
-    """Replace x * 1 and x / 1 (a closed literal exactly +1.0) by x.
+def _elementwise_map(op):
+    """(input, yielded) of a one-input, one-result, identity-map, all-parallel generic, else None."""
+    from xdsl.dialects.builtin import AffineMapAttr
+    from xdsl.ir.affine import AffineMap
 
-    Multiplying or dividing by one returns its operand's bits for every
-    finite value, infinity, signed zero and quiet NaN; the result is
-    movement. Returns the number of folds.
+    if _name(op) != "linalg.generic" or len(op.inputs) != 1 or len(op.results) != 1:
+        return None
+    if any(it.data.value != "parallel" for it in op.get_iterator_types()):
+        return None
+    rank = len(op.results[0].type.get_shape())
+    if any(m != AffineMapAttr(AffineMap.identity(rank)) for m in op.get_indexing_maps()):
+        return None
+    return op.inputs[0], op.body.block.last_op.operands[0]
+
+
+def _elementwise_round_trip(op):
+    """A narrowing generic whose input is the widening of a same-format tensor
+    (through elementwise copies): the tensor it reproduces, else None."""
+    found = _elementwise_map(op)
+    if found is None:
+        return None
+    tensor, yielded = found
+    body = op.body.block
+    if _name(yielded.owner) != "arith.truncf" or yielded.owner.operands[0] is not body.args[0]:
+        return None
+    while True:
+        producer = _elementwise_map(tensor.owner) if hasattr(tensor.owner, "results") else None
+        if producer is None:
+            return None
+        inner, value = producer
+        block = tensor.owner.body.block
+        if value is block.args[0]:
+            tensor = inner  # an elementwise copy
+            continue
+        if _name(value.owner) == "arith.extf" and value.owner.operands[0] is block.args[0]:
+            return inner if inner.type == op.results[0].type else None
+        return None
+
+
+def fold_unit_scales(module):
+    """Replace exact identities by their operand: x * 1, x / 1 (a closed literal
+    exactly +1.0) and the widen-then-narrow round trip truncf(extf(x)) back to
+    x's own format.
+
+    Each returns its operand's bits for every finite value, infinity, signed
+    zero and quiet NaN; the result is movement. Returns the number of folds.
     """
     count = 0
     for op in list(module.walk()):
         name = _name(op)
+        if name == "arith.truncf" and _name(op.operands[0].owner) == "arith.extf":
+            source = op.operands[0].owner.operands[0]
+            if source.type == op.results[0].type:
+                op.results[0].replace_all_uses_with(source)
+                op.parent.erase_op(op)
+                count += 1
+            continue
+        if name == "linalg.generic":
+            source = _elementwise_round_trip(op)
+            if source is not None:
+                op.results[0].replace_all_uses_with(source)
+                count += 1
+            continue
         if name not in {"arith.mulf", "arith.divf"} or len(op.results) != 1:
             continue
         candidates = [(1, 0)] if name == "arith.divf" else [(1, 0), (0, 1)]

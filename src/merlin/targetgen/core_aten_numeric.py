@@ -250,8 +250,13 @@ def normalize_closed_identities(module):
     folds += fold_ieee_identity_selectors(module)
     from merlin.targetgen.closed_scalar import fold_closed_generics, fold_unit_scales
 
-    # x * 1 and x / 1 are exact identities (movement, graded bit-exact).
-    folds += fold_unit_scales(module)
+    # x * 1 and x / 1 are exact identities (movement, graded bit-exact). The
+    # literal operand they read becomes unused and is pruned with them.
+    for _ in range(3):  # a pruned literal operand can expose a round trip across generics
+        unit_scales = fold_unit_scales(module)
+        if not unit_scales:
+            break
+        folds += unit_scales + prune_unused_tensor_inputs(module)
 
     # An elementwise generic whose inputs are all closed literals (for
     # example an empty reduction narrowed to f16/bf16 storage) is a uniform
