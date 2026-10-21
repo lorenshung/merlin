@@ -31,13 +31,10 @@ def selection():
         spec=resolved,
         host=validate_host_capabilities(load_yaml(base / "host-capabilities.yaml")),
         resolution=record,
-        identities={
-            name: {"path": str(base / filename)}
-            for name, filename in (
-                ("software_spec", "software-spec.yaml"),
-                ("host_capabilities", "host-capabilities.yaml"),
-            )
-        },
+        identities=dict(
+            software_spec={"path": str(base / "software-spec.yaml")},
+            host_capabilities={"path": str(base / "host-capabilities.yaml")},
+        ),
     )
 
 
@@ -200,10 +197,9 @@ def test_fp32_metrics_distinguish_zero_golden_and_zero_error():
     assert observed["sqnr_db"] == 0.0
 
 
-def rank2_module():
-    return Parser(
-        make_context(),
-        """builtin.module {
+def rank2_module(k=40):
+    """A 3xk by kx4 f32 matmul."""
+    source = """builtin.module {
       func.func @forward(%a: tensor<3x40xf32>, %b: tensor<40x4xf32>) -> tensor<3x4xf32> {
         %c = arith.constant 0.0 : f32
         %e = tensor.empty() : tensor<3x4xf32>
@@ -212,8 +208,8 @@ def rank2_module():
           outs(%z : tensor<3x4xf32>) -> tensor<3x4xf32>
         func.return %r : tensor<3x4xf32>
       }
-    }""",
-    ).parse_module()
+    }"""
+    return Parser(make_context(), source.replace("40", str(k))).parse_module()
 
 
 def test_rank2_chain_and_each_independent_host_rank_restriction(selection):
@@ -371,10 +367,7 @@ assert torch.isfinite(run_pt2e_reference(model(1e38,1e-38),inputs).output).all()
 
 @pytest.mark.parametrize("k,admitted", [(1024, True), (1025, False)])
 def test_cast_selection_enforces_declared_exact_range(selection, k, admitted):
-    module = rank2_module()
-    source = str(module).replace("40", str(k))
-    module = Parser(make_context(), source).parse_module()
-    (site,) = admission_plan(module, selection)["sites"]
+    (site,) = admission_plan(rank2_module(k), selection)["sites"]
     assert (site["status"] == "admitted") is admitted
     assert site["cast_exact_range_obligation"]["max_abs_bound"] == k * 128 * 128
     assert site["cast_exact_range_obligation"]["exact_limit"] == 2**24
@@ -444,9 +437,7 @@ def test_software_rank_constraints_refuse_non_ranks(rank):
     "k,admitted", [(1024, True), (1025, True), (4096, True), (11008, True), (131071, True), (131072, False)]
 )
 def test_planned_integer_readout_uses_int32_bound(selection, k, admitted):
-    source = str(rank2_module()).replace("40", str(k))
-    module = Parser(make_context(), source).parse_module()
-    (site,) = admission_plan(module, selection, planned_exact_readout=True)["sites"]
+    (site,) = admission_plan(rank2_module(k), selection, planned_exact_readout=True)["sites"]
     assert (site["status"] == "admitted") is admitted
     assert site["cast_exact_range_obligation"] is None
     assert site["readout"] == "int32_host_exact_pending_capture"
