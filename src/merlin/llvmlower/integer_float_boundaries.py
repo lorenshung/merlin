@@ -6,35 +6,6 @@ subsequent floating operations. No division is moved across that boundary.
 """
 
 
-def has_literal_zero_divisor(module):
-    """Portable divf does not specify the CPU's invalid-result NaN bits.
-
-    Follow only uniform literals and generic input arguments. Loop-carried
-    values, arbitrary expressions and tensor data are deliberately not inferred.
-    """
-    from xdsl.dialects.builtin import FloatAttr, IntegerAttr
-    from xdsl.ir import BlockArgument
-
-    def zero(value, seen):
-        if value in seen:
-            return False
-        seen = seen | {value}
-        owner = value.owner
-        if isinstance(value, BlockArgument):
-            parent = owner.parent_op()
-            if parent is not None and parent.name == "linalg.generic" and value.index < len(parent.inputs):
-                return zero(parent.inputs[value.index], seen)
-            return False
-        if owner.name == "arith.constant":
-            literal = owner.properties.get("value", owner.attributes.get("value"))
-            return isinstance(literal, (FloatAttr, IntegerAttr)) and literal.value.data == 0
-        if owner.name in {"tensor.splat", "linalg.fill", "arith.extf", "arith.truncf", "arith.sitofp"}:
-            return zero(owner.operands[0], seen)
-        return False
-
-    return any(op.name == "arith.divf" and zero(op.operands[1], set()) for op in module.walk())
-
-
 def rewrite_integer_float_boundaries(module, input_bounds, *, output_grids=None):
     from xdsl.dialects import arith, tensor
     from xdsl.dialects.builtin import ArrayAttr, IntegerAttr, TensorType, UnitAttr, i128

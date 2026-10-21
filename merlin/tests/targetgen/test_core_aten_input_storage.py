@@ -13,7 +13,7 @@ import pytest
 from merlin.common.paths import repo_root
 from merlin.targetgen.capture_refusals import InputStorageUnavailable
 from merlin.targetgen.core_aten_capture import case_capture_name, loader_source
-from merlin.targetgen.core_aten_input_storage import native_input_storage_plan, require_native_input_storage
+from merlin.targetgen.core_aten_input_storage import native_input_storage_plan
 
 OVERLOAD = "aten.native_layer_norm_backward.default"
 
@@ -90,7 +90,7 @@ def test_keyword_and_tuple_normalized_arguments_preserve_coverage():
         args=dict(kind="tuple", items=[args[0]]),
         kwargs=dict(input=args[1], normalized_shape=dict(kind="tuple", items=[3]), mean=args[3], rstd=args[4]),
     )
-    require_native_input_storage(OVERLOAD, document["arguments"])
+    native_input_storage_plan(OVERLOAD, document["arguments"])
 
 
 def test_device_metadata_does_not_change_cpu_storage_convention():

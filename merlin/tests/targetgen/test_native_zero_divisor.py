@@ -3,10 +3,8 @@
 import json
 
 import numpy as np
-import pytest
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.integer_float_boundaries import has_literal_zero_divisor
 from merlin.targetgen.core_aten_components import prepare_integer_components
 from merlin.targetgen.native_dtype_domain import component_semantics
 
@@ -32,11 +30,6 @@ def division_module(literal):
         func.return %r : tensor<1xf32>
       }}"""
     )
-
-
-@pytest.mark.parametrize("literal,expected", [("0.0", True), ("-0.0", True), ("2.0", False)])
-def test_uniform_literal_divisors(literal, expected):
-    assert has_literal_zero_divisor(division_module(literal)) is expected
 
 
 def test_certified_integer_conversion_zero_division():

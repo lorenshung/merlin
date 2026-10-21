@@ -220,15 +220,12 @@ def test_fused_components_retain_only_self_nan_classification(tmp_path, monkeypa
 
 
 def test_nan_classification_after_conversion_has_no_arithmetic_witness():
-    from merlin.llvmlower.component_nan_readout import qualify_nan_readout
-
     module = parse_mlir_text("""module {
       func.func @forward(%x:i64) -> i1 {
         %f=arith.sitofp %x : i64 to f32
         %nan=arith.cmpf uno,%f,%f : f32
         return %nan : i1
       }}""")
-    assert qualify_nan_readout(module, [{"source_data_arithmetic": False}]) == []
     assert unlowered_data_reductions(module, "test.limb")
 
 

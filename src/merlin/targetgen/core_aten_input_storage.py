@@ -113,11 +113,6 @@ def native_input_storage_plan(overload, arguments):
     }
 
 
-def require_native_input_storage(overload, arguments):
-    """Validate source geometry under the deterministic zero-storage convention."""
-    return native_input_storage_plan(overload, arguments)
-
-
 def apply_native_input_storage(source, case):
     """Carry the native backing span to the compiled caller input allocator."""
     plan = native_input_storage_plan(case["overload"], case["arguments"])
