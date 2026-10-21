@@ -1,13 +1,12 @@
 """A native reduction must offload its numerator, not only its input conversion."""
 
-import json
-
 import numpy as np
 import pytest
 from mlir_fixtures import generic, pointwise
+from targetgen_fixtures import DecliningProvider, assert_host_refusal, eager_record
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.targetgen.core_aten_components import prepare_integer_components, unlowered_data_reductions
+from merlin.targetgen.core_aten_components import unlowered_data_reductions
 
 
 @pytest.mark.parametrize("intrinsic", ["exp", "sin", "cos", "log", "rsqrt"])
@@ -40,28 +39,8 @@ def test_integer_conversion_does_not_admit_a_retained_host_float_sum(tmp_path):
         }} -> tensor<f32>
         func.return %sum : tensor<f32>
       }}}}""")
-    original = str(module) + "\n"
-    (tmp_path / "model.mlir").write_text(original)
-    np.savez(tmp_path / "inputs.npz", in0=np.array([1, 2, 3, 4], np.int64))
-
-    class Provider:
-        def admit_numeric_schedule(self, *args, **kwargs):
-            raise AssertionError("input conversion cannot request a reduction placement proof")
-
-    decision = prepare_integer_components(
-        tmp_path,
-        dict(cases=[dict(input_abi=[dict(dtype="i64")])]),
-        dict(spec={}, host={}),
-        Provider(),
-        None,
-        module,
-        limb_attribute="test.limb",
-    )
-    assert decision is None
-    assert (tmp_path / "model.mlir").read_text() == original
-    assert (
-        json.loads((tmp_path / "exact-dtype-refusal.json").read_text())["code"] == "native_aggregate_nan_order_unproved"
-    )
+    inputs, cases = [np.array([1, 2, 3, 4], np.int64)], [dict(input_abi=[dict(dtype="i64")])]
+    assert_host_refusal(tmp_path, module, inputs, cases, "native_aggregate_nan_order_unproved")
 
 
 def test_device_pointwise_prelude_does_not_hide_a_host_bilinear_loop(tmp_path):
@@ -92,27 +71,9 @@ def test_device_pointwise_prelude_does_not_hide_a_host_bilinear_loop(tmp_path):
         }} -> tensor<f32>
         func.return %r : tensor<f32>
       }}}}""")
-    original = str(module) + "\n"
-    (tmp_path / "model.mlir").write_text(original)
-    np.savez(tmp_path / "inputs.npz", in0=np.array([1, 2], np.float16), in1=np.array([3, 4], np.float16))
-
-    class Provider:
-        def admit_numeric_schedule(self, *args, **kwargs):
-            raise AssertionError("a partial prelude must not request placement")
-
-    decision = prepare_integer_components(
-        tmp_path,
-        dict(cases=[dict(input_abi=[dict(dtype="f16")] * 2)]),
-        dict(spec={}, host={}),
-        Provider(),
-        None,
-        module,
-        limb_attribute="test.limb",
-    )
-    assert decision is None
-    assert (tmp_path / "model.mlir").read_text() == original
-    refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
-    assert refusal["code"] == "native_competing_nan_priority_unproved"
+    inputs = [np.array([1, 2], np.float16), np.array([3, 4], np.float16)]
+    cases = [dict(input_abi=[dict(dtype="f16")] * 2)]
+    assert_host_refusal(tmp_path, module, inputs, cases, "native_competing_nan_priority_unproved")
 
 
 @pytest.mark.parametrize("predicate", ["cmpf", "maximumf", "minimumf"])
@@ -166,41 +127,14 @@ def test_fused_components_retain_only_self_nan_classification(tmp_path, monkeypa
         {computation}
         return %r,%x,%y,%z : tensor<2xf32>,tensor<2xf32>,tensor<2xf32>,tensor<2xf32>
       }} }}""")
-    (tmp_path / "model.mlir").write_text(str(module) + "\n")
     values = [np.array(v, np.float32) for v in ([1, 2], [3, 4], [5, 6])]
-    np.savez(tmp_path / "inputs.npz", **{f"in{i}": value for i, value in enumerate(values)})
     expected = values[0] * values[1] + values[2] if qualified else values[0]
-    record = dict(
-        status="bundled",
-        input_abi=[dict(dtype="f32")] * 3,
-        output_indices=[0],
-        semantic_boundary=dict(post_indices=[1, 2, 3]),
-        native_eager_boundary=dict(
-            authority="untransformed_native_cpu_eager",
-            output_bytes=[expected.tobytes().hex()],
-            post_input_bytes=[v.tobytes().hex() for v in values],
-        ),
-    )
-    called = []
-
-    class Provider:
-        def admit_numeric_schedule(self, source, **kwargs):
-            called.append(source)
-            return dict(status="declined", reason="test grants no device implementation")
-
-    decision = prepare_integer_components(
-        tmp_path,
-        dict(cases=[record]),
-        dict(spec={}, host={}),
-        Provider(),
-        None,
-        module,
-        limb_attribute="test.limb",
-    )
-    assert decision is None  # The provider deliberately withholds its proof.
-    assert not called
-    refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
-    assert refusal["code"] == "native_parallel_runtime_product_construction"
+    hexes = [v.tobytes().hex() for v in values]
+    record = eager_record([dict(dtype="f32")] * 3, [expected.tobytes().hex()], hexes, [1, 2, 3])
+    provider = DecliningProvider()  # It would withhold its proof; it must not even be asked.
+    code = "native_parallel_runtime_product_construction"
+    assert_host_refusal(tmp_path, module, values, [record], code, provider)
+    assert not provider.called
 
 
 def test_nan_classification_after_conversion_has_no_arithmetic_witness():
@@ -217,29 +151,6 @@ def test_nan_classification_after_conversion_has_no_arithmetic_witness():
 def test_storage_copy_does_not_cover_a_retained_host_threshold(tmp_path, width):
     typ = f"tensor<4xi{width}>"
     body = f"%z=arith.constant 0 : i{width}\n%p=arith.cmpi slt,%a,%z : i{width}\n%v=arith.select %p,%z,%a : i{width}"
-    module = pointwise([typ], typ, body)
-    original = str(module) + "\n"
-    (tmp_path / "model.mlir").write_text(original)
-    np.savez(tmp_path / "inputs.npz", in0=np.array([-1, 0, 1, 127], dtype=f"int{width}"))
-
-    class Provider:
-        def admit_numeric_schedule(self, *args, **kwargs):
-            raise AssertionError("host threshold cannot request a native device proof")
-
-    assert (
-        prepare_integer_components(
-            tmp_path,
-            dict(cases=[dict(input_abi=[dict(dtype=f"i{width}")])]),
-            dict(spec={}, host={}),
-            Provider(),
-            None,
-            module,
-            limb_attribute="test.limb",
-        )
-        is None
-    )
-    assert (tmp_path / "model.mlir").read_text() == original
-    assert (
-        json.loads((tmp_path / "exact-dtype-refusal.json").read_text())["code"]
-        == "native_family_arithmetic_retained_host"
-    )
+    inputs, cases = [np.array([-1, 0, 1, 127], dtype=f"int{width}")], [dict(input_abi=[dict(dtype=f"i{width}")])]
+    code = "native_family_arithmetic_retained_host"
+    assert_host_refusal(tmp_path, pointwise([typ], typ, body), inputs, cases, code)

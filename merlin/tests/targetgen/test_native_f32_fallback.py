@@ -2,9 +2,9 @@
 
 import numpy as np
 import pytest
+from targetgen_fixtures import DecliningProvider, eager_record, prepare_components
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.targetgen.core_aten_components import prepare_integer_components
 
 
 @pytest.mark.parametrize("inactive", [False, True])
@@ -34,7 +34,6 @@ def test_native_f32_word_admission_never_reads_sample_or_eager(tmp_path, monkeyp
                 "%r = arith.select %less, %literal, %a : f32",
             )
         )
-    if word_map == "literal_clamp":
         assert any(op.name == "arith.select" for op in module.walk())
     source = str(module) + "\n"
     (tmp_path / "model.mlir").write_text(source)
@@ -44,58 +43,27 @@ def test_native_f32_word_admission_never_reads_sample_or_eager(tmp_path, monkeyp
     )
     np.savez(tmp_path / "inputs.npz", in0=x)
     expected = -x if word_map == "negate" else np.where(x < 0, np.float32(0), x)
-    record = dict(
-        status="bundled",
-        input_abi=[dict(dtype="f32")],
-        output_indices=[0],
-        semantic_boundary=dict(post_indices=[1]),
-        native_eager_boundary=dict(
-            authority="untransformed_native_cpu_eager",
-            output_bytes=[expected.tobytes().hex()],
-            post_input_bytes=[x.tobytes().hex()],
-        ),
-    )
-    called = []
-
-    class Provider:
-        def admit_numeric_schedule(self, source, **kwargs):
-            called.append(source)
-            assert "test.limb" in source
-            return dict(status="declined", reason="test deliberately does not grant a device proof")
-
+    record = eager_record([dict(dtype="f32")], [expected.tobytes().hex()], [x.tobytes().hex()], [1])
+    provider = DecliningProvider()
+    called = provider.called
     records = [record]
     unrelated = dict(status="not_in_shard", input_abi=[dict(dtype="bf16")])
     if inactive:
         records = [unrelated, record, dict(status="not_selected")]
-    decision = prepare_integer_components(
-        tmp_path,
-        dict(cases=records),
-        dict(spec={}, host={}),
-        Provider(),
-        None,
-        module,
-        limb_attribute="test.limb",
-    )
+    decision = prepare_components(tmp_path, module, records, provider)
     assert unrelated == dict(status="not_in_shard", input_abi=[dict(dtype="bf16")])
     assert decision is None
     # A literal compare/select clamp is a declared floating activation: it is
     # refused here before any provider schedule request (the quantized byte
     # activation path owns it). A negation asks the provider for a schedule.
     assert bool(called) == (word_map == "negate")
+    assert all("test.limb" in source for source in called)
     first_called = list(called)
     assert not (tmp_path / "source-ieee-closure.json").exists()
     # No admissibility or generated-kernel property may use these observations.
     (tmp_path / "inputs.npz").write_bytes(b"not a readable tensor archive")
     record["native_eager_boundary"] = {"poison": "never read"}
     called.clear()
-    prepare_integer_components(
-        tmp_path,
-        dict(cases=records),
-        dict(spec={}, host={}),
-        Provider(),
-        None,
-        parse_mlir_text(source),
-        limb_attribute="test.limb",
-    )
+    prepare_components(tmp_path, parse_mlir_text(source), records, provider)
     assert called == first_called
     assert (tmp_path / "model.mlir").read_text() == source

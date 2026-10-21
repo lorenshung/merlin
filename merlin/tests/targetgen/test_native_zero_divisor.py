@@ -1,12 +1,10 @@
 """Native invalid-result NaN bits require an explicit source policy."""
 
-import json
-
 import numpy as np
-from mlir_fixtures import forward, generic
+from mlir_fixtures import forward, generic, pointwise
+from targetgen_fixtures import assert_host_refusal
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.targetgen.core_aten_components import prepare_integer_components
 from merlin.targetgen.native_dtype_domain import component_semantics
 
 
@@ -27,27 +25,13 @@ def test_uncertified_binary64_zero_divisor_falls_back_before_provider(tmp_path):
     source = str(division_module("0.0"))
     source = source.replace("i32", "f64").replace("f32", "f64")
     source = source.replace("arith.sitofp %a : f64 to f64", "arith.negf %a : f64")
-    module = parse_mlir_text(source)
-    original = str(module) + "\n"
-    (tmp_path / "model.mlir").write_text(original)
-    np.savez(tmp_path / "inputs.npz", in0=np.array([0], np.float64))
+    inputs, cases = [np.array([0], np.float64)], [dict(input_abi=[dict(dtype="f64")])]
+    code = "native_binary64_arithmetic_form_unproved"
+    assert_host_refusal(tmp_path, parse_mlir_text(source), inputs, cases, code)
 
-    class Provider:
-        def admit_numeric_schedule(self, *args, **kwargs):
-            raise AssertionError("undefined native NaN bits cannot request a device proof")
 
-    assert (
-        prepare_integer_components(
-            tmp_path,
-            dict(cases=[dict(input_abi=[dict(dtype="f64")])]),
-            dict(spec={}, host={}),
-            Provider(),
-            None,
-            module,
-            limb_attribute="test.limb",
-        )
-        is None
-    )
-    assert (tmp_path / "model.mlir").read_text() == original
-    refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
-    assert refusal["code"] == "native_binary64_arithmetic_form_unproved"
+def test_bf16_nan_negation_needs_explicit_source_policy(tmp_path):
+    """Native reduced-precision NaN policy is not inferred from IEEE negf."""
+    module = pointwise(["tensor<1xbf16>"], "tensor<1xbf16>", "%v=arith.negf %a : bf16")
+    inputs, cases = [np.array([float("nan")], np.float32)], [dict(input_abi=[dict(dtype="bf16")])]
+    assert_host_refusal(tmp_path, module, inputs, cases, "native_cpu_word_layout_unproved")
