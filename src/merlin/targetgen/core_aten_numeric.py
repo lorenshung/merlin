@@ -148,6 +148,27 @@ def prepare_spec_int8(
     report: dict,
     **kwargs,
 ):
+    """Admit a device candidate, or keep the original host program byte for byte.
+
+    Source specializations and closed normalizations rewrite model.mlir and
+    its sidecars while a device candidate is formed. A case that does not end
+    on the device runs its original captured host program: every file present
+    before preparation is restored. New evidence files (admission and refusal
+    receipts) are kept.
+    """
+    snapshot = {path.name: path.read_bytes() for path in directory.iterdir() if path.is_file()}
+    result = _prepare_spec_int8_candidates(directory, report, **kwargs)
+    if (result or {}).get("native_admission", {}).get("status") != "device":
+        for name, data in snapshot.items():
+            (directory / name).write_bytes(data)
+    return result
+
+
+def _prepare_spec_int8_candidates(
+    directory: Path,
+    report: dict,
+    **kwargs,
+):
     from merlin.targetgen.core_aten_admission import prepare
 
     from merlin.targetgen.source_power_specialization import specialize
