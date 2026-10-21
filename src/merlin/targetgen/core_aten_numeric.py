@@ -122,6 +122,26 @@ def restore_caller_layouts(module, original, fresh, semantic_path):
     semantic_path.write_text(json.dumps(boundary, sort_keys=True) + "\n")
 
 
+def expose_results(module, values):
+    """Append values to forward's results, with unconstrained layouts; return the prior result count."""
+    from xdsl.dialects.builtin import FunctionType, StringAttr
+
+    from merlin.llvmlower.result_layout import ATTRIBUTE
+
+    function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
+    returned = next(op for op in function.body.block.ops if op.name == "func.return")
+    count = len(returned.operands)
+    returned.operands = [*returned.operands, *values]
+    function.properties["function_type"] = FunctionType.from_lists(
+        [arg.type for arg in function.body.block.args], [value.type for value in returned.operands]
+    )
+    if ATTRIBUTE in module.attributes:
+        layout = json.loads(module.attributes[ATTRIBUTE].data)
+        layout["results"].extend([None] * len(values))
+        module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
+    return count
+
+
 def scalarized_contraction_candidates(module):
     """Find frontend contraction families expressed as ordered scalar loops.
 
@@ -380,25 +400,12 @@ def _prepare_spec_int8(
             # Expose raw accumulators as well as every user/post-call result. The
             # oracle interprets source integer arithmetic, independently of lowering
             # and simulator outputs; eager is retained for boundary semantics.
-            from xdsl.dialects.builtin import FunctionType
-
-            from merlin.llvmlower.result_layout import ATTRIBUTE
-
-            function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
-            returned = next(op for op in function.body.block.ops if op.name == "func.return")
             accumulators = [
                 contractions[site["source_operation_ordinal"]].results[0]
                 for site in selected
                 if site.get("readout") != "int32_host_exact"
             ]
-            returned.operands = [*returned.operands, *accumulators]
-            function.properties["function_type"] = FunctionType.from_lists(
-                [arg.type for arg in function.body.block.args], [value.type for value in returned.operands]
-            )
-            if ATTRIBUTE in module.attributes:
-                layout = json.loads(module.attributes[ATTRIBUTE].data)
-                layout["results"].extend([None] * len(accumulators))
-                module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
+            expose_results(module, accumulators)
             module.verify()
             (directory / "model.native_reference.mlir").write_text(str(module) + "\n")
             (directory / "native-int8-request.json").write_text(
@@ -790,18 +797,9 @@ def _prepare_spec_int8(
                 ):
                     values(document, index)
             record["case"]["comparison_parameters"] = dict(rtol=0.0, atol=0.0, equal_nan=True)
-            function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")
-            returned = next(op for op in function.body.block.ops if op.name == "func.return")
-            originals = list(returned.operands)
             # Retain actual i32 and host readout buffers as additional grading outputs.
-            returned.operands = [*originals, *(v for pair in observations for v in pair)]
-            from xdsl.dialects.builtin import FunctionType
-
-            function.properties["function_type"] = FunctionType.from_lists(
-                [a.type for a in function.body.block.args], [v.type for v in returned.operands]
-            )
-            expected_bytes = map_reference_byte_boundary(fresh, reference, len(originals))
-            acc_index = len(originals)
+            acc_index = expose_results(module, [v for pair in observations for v in pair])
+            expected_bytes = map_reference_byte_boundary(fresh, reference, acc_index)
             for site, scale, observed in zip(selected, reference["scales"], observations, strict=True):
                 if observed:
                     expected_bytes[str(acc_index)] = np.asarray(scale["accumulator"], np.int32).tobytes().hex()
@@ -848,16 +846,7 @@ def _prepare_spec_int8(
             products = {json.dumps(scale.get("product")): scale.get("product") for scale in plan["scales"]}
             if len(products) == 1 and isinstance(next(iter(products.values())), (int, float)):
                 record["output_scale"] = next(iter(products.values()))
-            observed_count = sum(len(observed) for observed in observations)
-            report["output_count"] += observed_count
-            from xdsl.dialects.builtin import StringAttr
-
-            from merlin.llvmlower.result_layout import ATTRIBUTE
-
-            if ATTRIBUTE in module.attributes:
-                layout = json.loads(module.attributes[ATTRIBUTE].data)
-                layout["results"].extend([None] * observed_count)
-                module.attributes[ATTRIBUTE] = StringAttr(json.dumps(layout, sort_keys=True))
+            report["output_count"] += sum(len(observed) for observed in observations)
             module.verify()
             (directory / "model.mlir").write_text(str(module) + "\n")
     if (
