@@ -4,6 +4,7 @@ Run in the explicitly selected reference-framework environment with --write.
 The checked certificate is a required source fixture, not a case verdict cache.
 """
 
+import functools
 import hashlib
 import json
 import struct
@@ -373,5 +374,10 @@ if __name__ == "__main__":
 
     result = generate()
     path = Path(sys.argv[sys.argv.index("--write") + 1])
-    path.write_text(json.dumps(result, sort_keys=True, indent=2) + "\n")
+    compact = functools.partial(json.dumps, sort_keys=True, separators=(",", ":"))
+    rows = {
+        key: "[\n" + ",\n".join(map(compact, value)) + "\n]" if isinstance(value, list) else compact(value)
+        for key, value in result.items()
+    }
+    path.write_text("{\n" + ",\n".join(f"{compact(key)}:{rows[key]}" for key in sorted(rows)) + "\n}\n")
     print(result["content_sha256"], len(result["conversions"]), "full-domain conversion forms")
