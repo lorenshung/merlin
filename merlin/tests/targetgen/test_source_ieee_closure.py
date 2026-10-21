@@ -1,60 +1,11 @@
-"""IEEE closure runs in the declared capture interpreter and binds its observations."""
+"""Unproved native IEEE sources refuse before any device proof or eager readout."""
 
-import hashlib
 import json
 import os
 from pathlib import Path
 
 import numpy as np
 import pytest
-
-from merlin.targetgen.core_aten_numeric import _source_reference
-
-
-@pytest.mark.parametrize("operation,status", [("arith.addf", "no_source_nan"), ("arith.mulf", "source_nan")])
-def test_source_ieee_closure_uses_declared_interpreter(tmp_path, operation, status):
-    python = os.environ.get("MERLIN_M2M_PYTHON")
-    if not python or not Path(python).is_file():
-        pytest.skip("declared capture interpreter unavailable")
-    source = """module {
-      func.func @forward(%x:tensor<1xf32>) -> tensor<1xf32> {
-        %e=tensor.empty() : tensor<1xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x:tensor<1xf32>) outs(%e:tensor<1xf32>) {
-        ^bb0(%a:f32,%unused:f32):
-          %zero=arith.constant 0.0 : f32
-          %v=OP %a,%zero : f32
-          linalg.yield %v : f32
-        } -> tensor<1xf32>
-        return %r : tensor<1xf32>
-      }}""".replace("OP", operation)
-    (tmp_path / "model.mlir").write_text(source)
-    np.savez(tmp_path / "inputs.npz", in0=np.array([np.inf], np.float32))
-    result = _source_reference(tmp_path, "--ieee-closure")
-    assert result.returncode == 0, result.stderr[-2000:]
-    receipt = json.loads((tmp_path / "source-ieee-closure.json").read_text())
-    assert receipt["status"] == status
-    assert receipt["source_sha256"] == hashlib.sha256(source.encode()).hexdigest()
-    assert receipt["input_sha256"] == hashlib.sha256((tmp_path / "inputs.npz").read_bytes()).hexdigest()
-    assert "no_finite_numerical_qualification" in receipt["scope"]
-
-
-def test_native_source_observation_retains_every_storage_bit(tmp_path):
-    python = os.environ.get("MERLIN_M2M_PYTHON")
-    if not python or not Path(python).is_file():
-        pytest.skip("declared capture interpreter unavailable")
-    source = """module {
-      func.func @forward(%x:tensor<3xf16>) -> (tensor<3xf16>,tensor<3xf16>) {
-        return %x,%x : tensor<3xf16>,tensor<3xf16>
-      }}"""
-    (tmp_path / "model.mlir").write_text(source)
-    values = np.array([-0.0, 1.0, -1.0], np.float16)
-    np.savez(tmp_path / "inputs.npz", in0=values)
-    result = _source_reference(tmp_path, "--native-source")
-    assert result.returncode == 0, result.stderr[-2000:]
-    receipt = json.loads((tmp_path / "source-ieee-closure.json").read_text())
-    assert receipt["output_bytes"] == [values.tobytes().hex()] * 2
-    assert receipt["scope"] == "typed_source_ieee_storage_bits_no_target_qualification"
 
 
 def test_unproved_native_source_refuses_without_reading_eager_or_inputs(tmp_path):
@@ -113,65 +64,6 @@ def test_unproved_native_source_refuses_without_reading_eager_or_inputs(tmp_path
     assert refusal["code"] == "native_component_transfer_unadmitted"
     assert "source_agreement" not in refusal
     assert (tmp_path / "model.mlir").read_text() == source
-
-
-def test_native_source_unsigned_byte_conversion_has_no_sign_extension(tmp_path):
-    python = os.environ.get("MERLIN_M2M_PYTHON")
-    if not python or not Path(python).is_file():
-        pytest.skip("declared capture interpreter unavailable")
-    source = """module {
-      func.func @forward(%x:tensor<1xi8>) -> tensor<1xf32> {
-        %e=tensor.empty() : tensor<1xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x:tensor<1xi8>) outs(%e:tensor<1xf32>) {
-        ^bb0(%a:i8,%unused:f32):
-          %v=arith.uitofp %a : i8 to f32
-          linalg.yield %v : f32
-        } -> tensor<1xf32>
-        return %r : tensor<1xf32>
-      }}"""
-    (tmp_path / "model.mlir").write_text(source)
-    np.savez(tmp_path / "inputs.npz", in0=np.array([-1], np.int8))
-    result = _source_reference(tmp_path, "--native-source")
-    assert result.returncode == 0, result.stderr[-2000:]
-    receipt = json.loads((tmp_path / "source-ieee-closure.json").read_text())
-    assert receipt["output_bytes"] == [np.array([255.0], np.float32).tobytes().hex()]
-
-
-@pytest.mark.parametrize("right_word,ambiguous", [(0x7FC00000, False), (0xFFC00000, True)])
-@pytest.mark.parametrize("rank", [0, 1])
-def test_special_audit_refuses_competing_nan_signs(tmp_path, right_word, ambiguous, rank):
-    python = os.environ.get("MERLIN_M2M_PYTHON")
-    if not python or not Path(python).is_file():
-        pytest.skip("declared capture interpreter unavailable")
-    source = """module {
-      func.func @forward(%x:tensor<1xf32>,%y:tensor<1xf32>) -> tensor<1xf32> {
-        %e=tensor.empty() : tensor<1xf32>
-        %r=linalg.generic {
-          indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]
-        } ins(%x,%y:tensor<1xf32>,tensor<1xf32>) outs(%e:tensor<1xf32>) {
-        ^bb0(%a:f32,%b:f32,%unused:f32):
-          %v=arith.addf %a,%b : f32
-          linalg.yield %v : f32
-        } -> tensor<1xf32>
-        return %r : tensor<1xf32>
-      }}"""
-    if rank == 0:
-        source = (
-            source.replace("tensor<1xf32>", "tensor<f32>")
-            .replace("affine_map<(d0)->(d0)>", "affine_map<()->()>")
-            .replace('iterator_types=["parallel"]', "iterator_types=[]")
-        )
-    (tmp_path / "model.mlir").write_text(source)
-    np.savez(
-        tmp_path / "inputs.npz",
-        in0=np.array([0x7FC00000], np.uint32).view(np.float32),
-        in1=np.array([right_word], np.uint32).view(np.float32),
-    )
-    result = _source_reference(tmp_path, "--native-source")
-    assert result.returncode == 0, result.stderr[-2000:]
-    receipt = json.loads((tmp_path / "source-ieee-closure.json").read_text())
-    assert receipt["ieee_special_audit"]["ambiguous_nan_payload"] is ambiguous
 
 
 def test_native_reduced_storage_requires_complete_source_observation(tmp_path):

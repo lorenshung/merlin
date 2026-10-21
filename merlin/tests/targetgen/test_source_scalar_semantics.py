@@ -26,9 +26,9 @@ def source(arguments, result, body):
       }} }}""")
 
 
-def run(module, arrays, audit=None):
+def run(module, arrays):
     pytest.importorskip("torch")
-    values, _ = evaluate(module, arrays, [], quant_min=-128, quant_max=127, eps=2**-12, ieee_audit=audit)
+    values, _ = evaluate(module, arrays, [], quant_min=-128, quant_max=127, eps=2**-12)
     return values[0].reshape(-1)
 
 
@@ -121,43 +121,19 @@ def test_unsigned_i64_conversion_avoids_double_rounding(token, p):
         assert actual == dtype(expected)
 
 
-@pytest.mark.parametrize("masked", [False, True])
-def test_nan_audit_observes_only_selected_outputs(masked):
-    suffix = "%v=arith.select %nan,%a0,%sum : f32" if masked else "%v=arith.addf %a0,%a1 : f32"
+def test_nan_select_keeps_the_selected_payload():
     module = source(
         ["f32", "f32"],
         "f32",
-        f"""%sum=arith.addf %a0,%a1 : f32
+        """%sum=arith.addf %a0,%a1 : f32
       %nan=arith.cmpf uno,%sum,%sum : f32
-      {suffix}""",
+      %v=arith.select %nan,%a0,%sum : f32""",
     )
     words = [np.array([word], np.uint32).view(np.float32) for word in [0x7FC00001, 0xFFC00002]]
-    audit = {}
-    result = run(module, words, audit)
-    assert audit["ambiguous_nan_payload"] is (not masked)
-    if masked:
-        assert result.view(__import__("torch").int32).item() == 0x7FC00001
+    assert run(module, words).view(__import__("torch").int32).item() == 0x7FC00001
 
 
-def test_nan_payload_bits_cannot_become_an_unaudited_float_predicate():
-    module = source(
-        ["f32", "f32"],
-        "i1",
-        """%sum=arith.addf %a0,%a1 : f32
-      %word=arith.bitcast %sum : f32 to i32
-      %one=arith.constant 1 : i32
-      %payload=arith.andi %word,%one : i32
-      %fp=arith.bitcast %payload : i32 to f32
-      %zero=arith.constant 0.0 : f32
-      %v=arith.cmpf oeq,%fp,%zero : f32""",
-    )
-    words = [np.array([word], np.uint32).view(np.float32) for word in [0x7FC00001, 0x7FC00002]]
-    audit = {}
-    run(module, words, audit)
-    assert audit["ambiguous_nan_payload"] is True
-
-
-def test_nan_payload_audit_follows_masks_across_tensor_regions():
+def test_nan_select_follows_masks_across_tensor_regions():
     module = parse_mlir_text("""module {
       func.func @forward(%x:tensor<1xf32>,%y:tensor<1xf32>) -> tensor<1xf32> {
         %e=tensor.empty() : tensor<1xf32>
@@ -179,9 +155,7 @@ def test_nan_payload_audit_follows_masks_across_tensor_regions():
         return %r : tensor<1xf32>
       }}""")
     words = [np.array([word], np.uint32).view(np.float32) for word in [0x7FC00001, 0xFFC00002]]
-    audit = {}
-    result = run(module, words, audit)
-    assert audit["ambiguous_nan_payload"] is False
+    result = run(module, words)
     assert result.view(__import__("torch").int32).item() == 0x7FC00001
 
 
@@ -281,28 +255,28 @@ def test_ieee_conversion_keeps_zero_sign(token):
     assert torch.signbit(run(module, [value])).item() is True
 
 
-@pytest.mark.parametrize("take_loop,ambiguous", [(True, True), (False, False)])
-def test_nested_static_control_preserves_observable_nan_payload_scope(take_loop, ambiguous):
+def test_nested_static_control_selects_the_untaken_branch_payload():
     module = source(
         ["f32", "f32"],
         "f32",
-        f"""%lo = arith.constant 0 : index
+        """%lo = arith.constant 0 : index
         %hi = arith.constant 1 : index
-        %loop = scf.for %i = %lo to %hi step %hi iter_args(%acc = %a0) -> (f32) {{
+        %loop = scf.for %i = %lo to %hi step %hi iter_args(%acc = %a0) -> (f32) {
           %sum = arith.addf %acc, %a1 : f32
           scf.yield %sum : f32
-        }}
-        %condition = arith.constant {int(take_loop)} : i1
-        %v = scf.if %condition -> (f32) {{
+        }
+        %condition = arith.constant 0 : i1
+        %v = scf.if %condition -> (f32) {
           scf.yield %loop : f32
-        }} else {{
+        } else {
           scf.yield %a0 : f32
-        }}""",
+        }""",
     )
     left = np.array([0x7FC00001], dtype=np.uint32).view(np.float32)
     right = np.array([0x7FC00002], dtype=np.uint32).view(np.float32)
-    audit = {}
-    actual = run(module, [left, right], audit)
-    assert audit["ambiguous_nan_payload"] is ambiguous
-    if not take_loop:
-        assert actual.numpy().tobytes() == left.tobytes()
+    assert run(module, [left, right]).numpy().tobytes() == left.tobytes()
+
+
+def test_unsigned_byte_conversion_has_no_sign_extension():
+    module = source(["i8"], "f32", "%v=arith.uitofp %a0 : i8 to f32")
+    assert run(module, [np.array([-1], np.int8)]).item() == 255.0
