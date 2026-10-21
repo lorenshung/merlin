@@ -248,7 +248,10 @@ def normalize_closed_identities(module):
     from merlin.llvmlower.ieee_identity_selectors import fold_ieee_identity_selectors
 
     folds += fold_ieee_identity_selectors(module)
-    from merlin.targetgen.closed_scalar import fold_closed_generics
+    from merlin.targetgen.closed_scalar import fold_closed_generics, fold_unit_scales
+
+    # x * 1 and x / 1 are exact identities (movement, graded bit-exact).
+    folds += fold_unit_scales(module)
 
     # An elementwise generic whose inputs are all closed literals (for
     # example an empty reduction narrowed to f16/bf16 storage) is a uniform

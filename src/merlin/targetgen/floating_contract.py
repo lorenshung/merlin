@@ -10,15 +10,13 @@ normalizations, some live floating arithmetic, float-to-float conversion or
 data-dependent floating selection still consumes data that originates in a
 floating function argument.
 
-A literal scale or offset is affine arithmetic whatever the literal's value
-(x * 1 is still a scaled map). Two IR forms are identities and do not count:
-a widening followed by a narrowing back to the original format, and a select
-whose two alternatives are the same value up to an exact IEEE identity
-(select(c, x, x * 1)), which is x for every condition. No source overload,
-provenance label, case record or tensor payload participates.
+A literal scale or offset is affine arithmetic, except the exact identities
+x * 1 and x / 1, which the closed normalization (fold_unit_scales) removes:
+they are movement, graded on eager bits (ruling "exact identities are
+bit-exact"). A widening followed by a narrowing back to the original format
+is an identity too. No source overload, provenance label, case record or
+tensor payload participates.
 """
-
-import math
 
 from merlin.targetgen.native_payload_carriers import op_name
 
@@ -52,45 +50,6 @@ def _element(value):
     return str(getattr(typ, "element_type", typ))
 
 
-def _constant(value):
-    """The value of a closed uniform scalar/splat literal, else None."""
-    from xdsl.dialects.builtin import DenseIntOrFPElementsAttr
-
-    owner = value.owner
-    if op_name(owner) != "arith.constant":
-        return None
-    attr = owner.properties.get("value", owner.attributes.get("value"))
-    if hasattr(attr, "value") and hasattr(attr.value, "data"):
-        return attr.value.data
-    if isinstance(attr, DenseIntOrFPElementsAttr):
-        values = list(attr.get_values())
-        if values and all(v == values[0] and str(v) == str(values[0]) for v in values):
-            return values[0]
-    return None
-
-
-def scalar_literal(value):
-    """Follow linalg block arguments and splats back to a closed uniform literal."""
-    seen = set()
-    while value not in seen:
-        seen.add(value)
-        literal = _constant(value)
-        if literal is not None:
-            return literal
-        owner = value.owner
-        name = op_name(owner)
-        if name == "tensor.splat":
-            value = owner.operands[0]
-            continue
-        if name is None and hasattr(owner, "parent_op"):
-            parent = owner.parent_op()
-            if getattr(parent, "name", None) == "linalg.generic" and value.index < len(parent.inputs):
-                value = parent.inputs[value.index]
-                continue
-        return None
-    return None
-
-
 def _is_identity(op):
     """Only an exact widening-then-narrowing round trip is an identity operation."""
     name = op_name(op)
@@ -100,59 +59,6 @@ def _is_identity(op):
             op.results[0].type
         )
     return False
-
-
-def _ieee_identical(op):
-    """Is op an exact IEEE identity of one operand (x*1, x/1, x+(-0), x-(+0))?"""
-    name = op_name(op)
-    if name in {"arith.mulf", "arith.divf"}:
-        literals = [scalar_literal(op.operands[1])]
-        if name == "arith.mulf":
-            literals.append(scalar_literal(op.operands[0]))
-        return any(isinstance(v, float) and v == 1.0 for v in literals)
-    if name in {"arith.addf", "arith.subf"}:
-        for index, operand in enumerate(op.operands):
-            if name == "arith.subf" and index == 0:
-                continue
-            literal = scalar_literal(operand)
-            if isinstance(literal, float) and literal == 0.0:
-                negative = math.copysign(1.0, literal) < 0
-                if (name == "arith.addf" and negative) or (name == "arith.subf" and not negative):
-                    return True
-        return False
-    return False
-
-
-def _identity_operand(op):
-    """The operand an IEEE-identical op reproduces, else None."""
-    if not _ieee_identical(op):
-        return None
-    first, second = op.operands
-    if op_name(op) in {"arith.mulf", "arith.addf"} and scalar_literal(first) is not None:
-        return second
-    return first
-
-
-def collapse_identity_selects(module):
-    """Rewrite select(c, x, y) to x when y is x up to an exact IEEE identity (or y is x)."""
-    count = 0
-    for op in list(module.walk()):
-        if op_name(op) != "arith.select":
-            continue
-        _, first, second = op.operands
-        kept = None
-        for a, b in ((first, second), (second, first)):
-            root_a, root_b = _through_identities(a), _through_identities(b)
-            owner = root_b.owner
-            reproduced = _identity_operand(owner) if hasattr(owner, "results") else None
-            if root_a is root_b or (reproduced is not None and _through_identities(reproduced) is root_a):
-                kept = a
-                break
-        if kept is not None:
-            op.results[0].replace_all_uses_with(kept)
-            op.parent.erase_op(op)
-            count += 1
-    return count
 
 
 def _carried_source(value):
@@ -168,7 +74,7 @@ def _carried_source(value):
 
 
 def _through_identities(value):
-    """Skip exact arithmetic identities and generic boundaries back to the reproduced value."""
+    """Step back through elementwise generic boundaries to the reproduced value."""
     seen = set()
     while value not in seen:
         seen.add(value)
@@ -319,7 +225,6 @@ def requires_quantized_model(module):
     from merlin.targetgen.core_aten_numeric import normalize_closed_identities
 
     clone = module.clone()
-    collapse_identity_selects(clone)
     try:
         normalize_closed_identities(clone)
     except Exception:  # noqa: BLE001 - an unnormalizable program keeps its raw arithmetic

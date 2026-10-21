@@ -56,8 +56,10 @@ def elementwise(source, output, body):
         ("f32", "f64", "%v=arith.extf %a : f32 to f64\nlinalg.yield %v : f64", True),
         # Movement, identities, NaN re-encoding and integer storage keep eager bits.
         ("f32", "f32", "linalg.yield %a : f32", False),
-        # A literal scale or offset is an affine map whatever the literal's value.
-        ("f32", "f32", "%k=arith.constant 1.0 : f32\n%v=arith.mulf %a,%k : f32\nlinalg.yield %v : f32", True),
+        # x * 1 and x / 1 are exact identities (ruling "exact identities are bit-exact"); any other
+        # literal scale or offset, including x + (-0.0), is an affine map.
+        ("f32", "f32", "%k=arith.constant 1.0 : f32\n%v=arith.mulf %a,%k : f32\nlinalg.yield %v : f32", False),
+        ("bf16", "bf16", "%k=arith.constant 1.0 : bf16\n%v=arith.divf %a,%k : bf16\nlinalg.yield %v : bf16", False),
         ("f32", "f32", "%k=arith.constant -0.0 : f32\n%v=arith.addf %a,%k : f32\nlinalg.yield %v : f32", True),
         # A select between x and an exact IEEE identity of x is x for every condition.
         (

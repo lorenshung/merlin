@@ -1,7 +1,7 @@
 """Closed elementwise generics become exact uniform fills; nothing else is folded."""
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.targetgen.closed_scalar import fold_closed_generics
+from merlin.targetgen.closed_scalar import fold_closed_generics, fold_unit_scales
 
 
 def program(body, ins="%c", types="tensor<bf16>", source="tensor<f32>"):
@@ -35,3 +35,16 @@ def test_runtime_input_is_not_folded():
 def test_non_finite_closed_result_is_not_folded():
     module = program("%d = arith.divf %a, %a : f32\n%n = arith.truncf %d : f32 to bf16\nlinalg.yield %n : bf16")
     assert fold_closed_generics(module) == 0
+
+
+def test_unit_scale_is_an_exact_identity():
+    for body, folded in (
+        ("%k = arith.constant 1.0 : f32\n%m = arith.mulf %k, %a : f32\n%n = arith.truncf %m : f32 to bf16\nlinalg.yield %n : bf16", 1),
+        ("%k = arith.constant 1.0 : f32\n%m = arith.divf %a, %k : f32\n%n = arith.truncf %m : f32 to bf16\nlinalg.yield %n : bf16", 1),
+        ("%k = arith.constant 1.0 : f32\n%m = arith.divf %k, %a : f32\n%n = arith.truncf %m : f32 to bf16\nlinalg.yield %n : bf16", 0),
+        ("%k = arith.constant 2.0 : f32\n%m = arith.mulf %a, %k : f32\n%n = arith.truncf %m : f32 to bf16\nlinalg.yield %n : bf16", 0),
+        ("%k = arith.constant -1.0 : f32\n%m = arith.mulf %a, %k : f32\n%n = arith.truncf %m : f32 to bf16\nlinalg.yield %n : bf16", 0),
+    ):
+        module = program(body, ins="%x")
+        assert fold_unit_scales(module) == folded
+        module.verify()

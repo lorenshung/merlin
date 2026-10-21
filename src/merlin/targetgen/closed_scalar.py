@@ -406,3 +406,27 @@ def fold_closed_generics(module):
         parent.erase_op(op)
         count += 1
     return count
+
+
+def fold_unit_scales(module):
+    """Replace x * 1 and x / 1 (a closed literal exactly +1.0) by x.
+
+    Multiplying or dividing by one returns its operand's bits for every
+    finite value, infinity, signed zero and quiet NaN; the result is
+    movement. Returns the number of folds.
+    """
+    count = 0
+    for op in list(module.walk()):
+        name = _name(op)
+        if name not in {"arith.mulf", "arith.divf"} or len(op.results) != 1:
+            continue
+        candidates = [(1, 0)] if name == "arith.divf" else [(1, 0), (0, 1)]
+        for scale, data in candidates:
+            value = literal(op.operands[scale])
+            if isinstance(value, float) and value == 1.0 and op.operands[data].type == op.results[0].type:
+                op.results[0].replace_all_uses_with(op.operands[data])
+                op.parent.erase_op(op)
+                count += 1
+                break
+    return count
+
