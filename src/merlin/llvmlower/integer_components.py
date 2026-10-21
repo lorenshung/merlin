@@ -15,21 +15,13 @@ from math import prod
 def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known_bounds=None):
     import json
 
-    from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import (
-        AffineMapAttr,
-        ArrayAttr,
-        IntegerAttr,
-        IntegerType,
-        StringAttr,
-        TensorType,
-        i8,
-        i32,
-    )
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import IntegerAttr, IntegerType, StringAttr, TensorType, i8, i32
     from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
-    from xdsl.ir.affine import AffineMap
+    from xdsl.ir import Block
     from xdsl.rewriter import Rewriter
+
+    from merlin.llvmlower._ir import emitter, generic, mac, point, splat
 
     functions = [op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward"]
     if len(functions) != 1:
@@ -77,36 +69,9 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
             capacity = 256 * capacity + 127
         return digits if mathematical else min((bits + 7) // 8, digits)
 
-    def init(shape, element, value=0):
-        constant = arith.ConstantOp(IntegerAttr(value, element))
-        splat = tensor.SplatOp(constant.result, [], TensorType(element, shape))
-        return [constant, splat], splat.result
-
-    def point(inputs, result_type, fn):
-        empty = tensor.EmptyOp([], result_type)
-        block = Block(arg_types=[v.type.element_type for v in inputs] + [result_type.element_type])
-
-        def emit(op):
-            block.add_op(op)
-            return op.results[0]
-
-        result = fn(block.args[:-1], emit)
-        block.add_op(L.YieldOp(result))
-        rank = len(result_type.get_shape())
-        identity = AffineMapAttr(AffineMap.identity(rank))
-        generic = L.GenericOp(
-            inputs=inputs,
-            outputs=[empty.tensor],
-            body=Region(block),
-            indexing_maps=ArrayAttr([identity] * (len(inputs) + 1)),
-            iterator_types=ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * rank),
-            result_types=[result_type],
-        )
-        return [empty, generic], generic.results[0]
-
-    def digit(source, index):
+    def digit(source, index, operations):
         if width(source) == 8 and index == 0:
-            return [], source
+            return source
         wide = IntegerType(max(16, 2 * width(source)))
 
         def scalar(args, emit):
@@ -121,7 +86,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
                 remaining = emit(arith.ShRSIOp(remaining, shift))
             return emit(arith.TruncIOp(remaining, i8))
 
-        return point([source], TensorType(i8, source.type.get_shape()), scalar)
+        return point([source], TensorType(i8, source.type.get_shape()), scalar, operations)
 
     def mark(producer, entries):
         from merlin.llvmlower.additive_regions import positive_zero_seed
@@ -159,9 +124,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
                 value = emit(arith.ShLIOp(value, shift))
             return emit(arith.AddiOp(args[0], value))
 
-        ops, result = point([result, component], result.type, scalar)
-        operations.extend(ops)
-        return result
+        return point([result, component], result.type, scalar, operations)
 
     def affine(op):
         if op.name != "linalg.generic" or any(it.data != L.IteratorType.PARALLEL for it in op.get_iterator_types()):
@@ -255,9 +218,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         for source, n in zip(op.operands[:2], counts, strict=True):
             values = {}
             for index in indices(n):
-                split_ops, limb = digit(source, index)
-                operations.extend(split_ops)
-                values[index] = limb
+                values[index] = digit(source, index, operations)
             digits.append(values)
         maps = list(op.get_indexing_maps())
         for j, lhs in digits[0].items():
@@ -265,22 +226,8 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
                 exponent = 8 * (j + k)
                 if exponent >= bits:
                     continue
-                seed_ops, seed = init(typ.get_shape(), i32)
-                operations.extend(seed_ops)
-                block = Block(arg_types=[i8, i8, i32])
-                a = arith.ExtSIOp(block.args[0], i32)
-                b = arith.ExtSIOp(block.args[1], i32)
-                product = arith.MuliOp(a.result, b.result)
-                addition = arith.AddiOp(product.result, block.args[2])
-                block.add_ops([a, b, product, addition, L.YieldOp(addition.result)])
-                producer = L.GenericOp(
-                    inputs=[lhs, rhs],
-                    outputs=[seed],
-                    body=Region(block),
-                    indexing_maps=ArrayAttr(maps),
-                    iterator_types=op.get_iterator_types(),
-                    result_types=[seed.type],
-                )
+                seed = splat(0, i32, typ.get_shape(), operations)
+                producer = mac([lhs, rhs], seed, maps, op.get_iterator_types())
                 mark(
                     producer,
                     [dict(operand=i, index=index, count=counts[i], exponent=0) for i, index in enumerate((j, k))],
@@ -321,30 +268,16 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         for index in indices(digits):
             if 8 * index >= bits:
                 continue
-            split_ops, limb = digit(source, index)
-            operations.extend(split_ops)
-            seed_ops, zero = init(result.type.get_shape(), i32)
-            operations.extend(seed_ops)
-            inputs = []
-            for j, original_input in enumerate(op.inputs):
-                if j == source_index:
-                    inputs.append(limb)
-                else:
-                    shape_ops, shape_only = init(original_input.type.get_shape(), i8)
-                    operations.extend(shape_ops)
-                    inputs.append(shape_only)
+            limb = digit(source, index, operations)
+            zero = splat(0, i32, result.type.get_shape(), operations)
+            inputs = [
+                limb if j == source_index else splat(0, i8, original_input.type.get_shape(), operations)
+                for j, original_input in enumerate(op.inputs)
+            ]
             body = Block(arg_types=[i8] * len(inputs) + [i32])
-            extended = arith.ExtSIOp(body.args[source_index], i32)
-            addition = arith.AddiOp(extended.result, body.args[-1])
-            body.add_ops([extended, addition, L.YieldOp(addition.result)])
-            producer = L.GenericOp(
-                inputs=inputs,
-                outputs=[zero],
-                body=Region(body),
-                indexing_maps=op.get_indexing_maps(),
-                iterator_types=op.get_iterator_types(),
-                result_types=[zero.type],
-            )
+            emit = emitter(body)
+            body.add_op(L.YieldOp(emit(arith.AddiOp(emit(arith.ExtSIOp(body.args[source_index], i32)), body.args[-1]))))
+            producer = generic(inputs, zero, body, op.get_indexing_maps(), op.get_iterator_types())
             mark(
                 producer,
                 [dict(operand=source_index, index=index, count=digits, exponent=0)],
@@ -371,18 +304,17 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
             if not sources:
                 continue
             digits = max(count(value, mathematical=True) for value in sources)
-            operations, result = init(op.results[0].type.get_shape(), op.results[0].type.element_type)
+            operations = []
+            result = splat(0, op.results[0].type.element_type, op.results[0].type.get_shape(), operations)
             for index in range(digits):
                 replacements, carriers = {}, []
                 for source in sources:
-                    split_ops, limb = digit(source, index)
-                    operations.extend(split_ops)
+                    limb = digit(source, index, operations)
 
                     def extend(args, emit):
                         return emit(arith.ExtSIOp(args[0], i32))
 
-                    carrier_ops, carrier = point([limb], TensorType(i32, source.type.get_shape()), extend)
-                    operations.extend(carrier_ops)
+                    carrier = point([limb], TensorType(i32, source.type.get_shape()), extend, operations)
                     replacements[source] = carrier
                     carriers.append(carrier)
                 lifted = retype_additive(op, replacements, i32, floating=False)
@@ -415,7 +347,8 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         # Constants are ring elements too. Large coefficients need their own
         # signed-byte planes; no coefficient or product is truncated to a byte.
         bias = (bias + (1 << (bits - 1))) % (1 << bits) - (1 << (bits - 1))
-        operations, result = init(typ.get_shape(), typ.element_type, bias)
+        operations = []
+        result = splat(bias, typ.element_type, typ.get_shape(), operations)
         for i, coefficient in terms.items():
             source = op.inputs[i]
             digits = count(source, mathematical=bits > width(source))
@@ -436,24 +369,14 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
                 exponent = 8 * (index + plane)
                 if exponent >= bits:
                     continue
-                split_ops, limb = digit(source, index)
-                operations.extend(split_ops)
-                seed_ops, seed = init(typ.get_shape(), i32)
-                operations.extend(seed_ops)
+                limb = digit(source, index, operations)
+                seed = splat(0, i32, typ.get_shape(), operations)
                 body = Block(arg_types=[i8, i32])
-                extended = arith.ExtSIOp(body.args[0], i32)
-                multiplier = arith.ConstantOp(IntegerAttr(factor, i32))
-                product = arith.MuliOp(extended.result, multiplier.result)
-                body.add_ops([extended, multiplier, product, L.YieldOp(product.result)])
+                emit = emitter(body)
+                extended = emit(arith.ExtSIOp(body.args[0], i32))
+                body.add_op(L.YieldOp(emit(arith.MuliOp(extended, emit(arith.ConstantOp(IntegerAttr(factor, i32)))))))
                 maps = list(op.get_indexing_maps())
-                producer = L.GenericOp(
-                    inputs=[limb],
-                    outputs=[seed],
-                    body=Region(body),
-                    indexing_maps=ArrayAttr([maps[i], maps[-1]]),
-                    iterator_types=op.get_iterator_types(),
-                    result_types=[seed.type],
-                )
+                producer = generic([limb], seed, body, [maps[i], maps[-1]], op.get_iterator_types())
                 mark(
                     producer,
                     [dict(operand=0, index=index, count=digits, exponent=0)],

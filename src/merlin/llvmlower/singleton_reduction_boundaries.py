@@ -6,13 +6,13 @@ replace a floating monoid by a byte copy or change its NaN/zero behavior.
 
 
 def expose_singleton_reduction_boundaries(module):
-    from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, DenseIntOrFPElementsAttr, TensorType, i64
-    from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
-    from xdsl.ir.affine import AffineMap
+    from xdsl.dialects import tensor
+    from xdsl.dialects.builtin import TensorType
+    from xdsl.ir import Block
     from xdsl.rewriter import Rewriter
     from xdsl.traits import Pure
+
+    from merlin.llvmlower._ir import PARALLEL, generic, identity, reshape
 
     changed = 0
     for op in list(module.walk()):
@@ -43,8 +43,8 @@ def expose_singleton_reduction_boundaries(module):
             for child in list(body.ops)[:-1]
         ):
             continue
-        sizes = arith.ConstantOp(DenseIntOrFPElementsAttr.from_list(TensorType(i64, [len(expected)]), list(expected)))
-        reshaped = tensor.ReshapeOp(source, sizes.result, result_type)
+        operations = []
+        reshaped = reshape(source, expected, operations)
         empty = tensor.EmptyOp([], result_type)
         parallel_body = Block(arg_types=[result_type.element_type] * 3)
         mapping = dict(zip(body.args, parallel_body.args[:2], strict=True))
@@ -52,17 +52,10 @@ def expose_singleton_reduction_boundaries(module):
             cloned = child.clone(value_mapper=mapping)
             parallel_body.add_op(cloned)
             mapping.update(zip(child.results, cloned.results, strict=True))
-        identity = AffineMapAttr(AffineMap.identity(len(expected)))
-        result = L.GenericOp(
-            inputs=[reshaped.result, seed],
-            outputs=[empty.tensor],
-            body=Region(parallel_body),
-            indexing_maps=ArrayAttr([identity] * 3),
-            iterator_types=ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * len(expected)),
-            result_types=[result_type],
-        )
+        rank = len(expected)
+        result = generic([reshaped, seed], empty.tensor, parallel_body, [identity(rank)] * 3, [PARALLEL] * rank)
         result.attributes.update(op.attributes)
-        Rewriter.replace_op(op, [sizes, reshaped, empty, result], [result.results[0]])
+        Rewriter.replace_op(op, [*operations, empty, result], [result.results[0]])
         changed += 1
     if changed:
         module.verify()

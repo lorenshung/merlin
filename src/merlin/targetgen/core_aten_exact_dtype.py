@@ -79,11 +79,10 @@ def _expose_literal_movement(module):
     from math import prod
 
     from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, DenseIntOrFPElementsAttr, IntegerType, TensorType
-    from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
-    from xdsl.ir.affine import AffineMap
+    from xdsl.dialects.builtin import DenseIntOrFPElementsAttr, IntegerType, TensorType
     from xdsl.rewriter import Rewriter
+
+    from merlin.llvmlower._ir import copy, point
 
     for op in list(module.walk()):
         if op.name != "arith.constant" or not isinstance(op.results[0].type, TensorType):
@@ -114,33 +113,10 @@ def _expose_literal_movement(module):
         integer_type = TensorType(element, typ.get_shape())
         bits = [int.from_bytes(raw[i : i + width], "little", signed=True) for i in range(0, len(raw), width)]
         literal = arith.ConstantOp(DenseIntOrFPElementsAttr.from_list(integer_type, bits))
-        empty = tensor.EmptyOp([], integer_type)
-        identity = AffineMapAttr(AffineMap.identity(len(typ.get_shape())))
-        iterators = ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * len(typ.get_shape()))
-        copy_body = Block(arg_types=[element, element])
-        copy_body.add_op(L.YieldOp(copy_body.args[0]))
-        copied = L.GenericOp(
-            inputs=[literal.result],
-            outputs=[empty.tensor],
-            body=Region(copy_body),
-            indexing_maps=ArrayAttr([identity, identity]),
-            iterator_types=iterators,
-            result_types=[integer_type],
-        )
-        destination = tensor.EmptyOp([], typ)
-        body = Block(arg_types=[element, typ.element_type])
-        cast = arith.BitcastOp(body.args[0], typ.element_type)
-        body.add_ops([cast, L.YieldOp(cast.result)])
-        identity = AffineMapAttr(AffineMap.identity(len(typ.get_shape())))
-        result = L.GenericOp(
-            inputs=[copied.results[0]],
-            outputs=[destination.tensor],
-            body=Region(body),
-            indexing_maps=ArrayAttr([identity, identity]),
-            iterator_types=ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * len(typ.get_shape())),
-            result_types=[typ],
-        )
-        Rewriter.replace_op(op, [literal, empty, copied, destination, result], [result.results[0]])
+        operations = [literal]
+        copied = copy(literal.result, operations)
+        result = point([copied], typ, lambda args, emit: emit(arith.BitcastOp(args[0], typ.element_type)), operations)
+        Rewriter.replace_op(op, operations, [result])
 
 
 def prepare_bitwise(directory, report, selection, provider, package, module):

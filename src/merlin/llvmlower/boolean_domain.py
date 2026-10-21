@@ -6,13 +6,11 @@ width boundary. An arbitrary two-entry result table is never emitted.
 
 
 def fold_boolean_domain(module):
-    from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, IntegerAttr, IntegerType
-    from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
-    from xdsl.ir.affine import AffineMap
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import IntegerAttr, IntegerType
     from xdsl.rewriter import Rewriter
 
+    from merlin.llvmlower._ir import identity, point, splat
     from merlin.targetgen.native_payload_carriers import UNKNOWN, LiteralPayloads
     from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
 
@@ -31,7 +29,7 @@ def fold_boolean_domain(module):
             continue
         maps = list(op.get_indexing_maps())
         rank = len(op.results[0].type.get_shape())
-        if maps[-1] != AffineMapAttr(AffineMap.identity(rank)):
+        if maps[-1] != identity(rank):
             continue
         if payloads.classify(op.inputs[runtime[0]]) & UNKNOWN:
             continue
@@ -172,31 +170,19 @@ def fold_boolean_domain(module):
                         break
         if not valid or len(answers) != 2 or not (answers[0] == answers[1] or answers == [0, 1]):
             continue
+        replacement = []
         if answers[0] == answers[1]:
-            constant = arith.ConstantOp(IntegerAttr(answers[0], element))
-            filled = tensor.SplatOp(constant.result, [], op.results[0].type)
-            Rewriter.replace_op(op, [constant, filled], [filled.result])
+            result = splat(answers[0], element, op.results[0].type.get_shape(), replacement)
         else:
             # Keep the original selector map; only the proved scalar body changes.
-            empty = tensor.EmptyOp([], op.results[0].type)
-            source = op.inputs[runtime[0]]
-            block = Block(arg_types=[source.type.element_type, element])
-            if element.width.data == 1:
-                value = block.args[0]
-            else:
-                extended = arith.ExtUIOp(block.args[0], element)
-                block.add_op(extended)
-                value = extended.result
-            block.add_op(L.YieldOp(value))
-            maps = list(op.get_indexing_maps())
-            selected = L.GenericOp(
-                inputs=[source],
-                outputs=[empty.tensor],
-                body=Region(block),
-                indexing_maps=ArrayAttr([maps[runtime[0]], maps[-1]]),
-                iterator_types=op.get_iterator_types(),
-                result_types=[op.results[0].type],
+            result = point(
+                [op.inputs[runtime[0]]],
+                op.results[0].type,
+                lambda args, emit: args[0] if element.width.data == 1 else emit(arith.ExtUIOp(args[0], element)),
+                replacement,
+                maps=[maps[runtime[0]], maps[-1]],
+                iterators=op.get_iterator_types(),
             )
-            Rewriter.replace_op(op, [empty, selected], [selected.results[0]])
+        Rewriter.replace_op(op, replacement, [result])
         count += 1
     return count

@@ -9,21 +9,12 @@ RNE readout. No exponent span or limb count is inferred from tensor data.
 def rewrite_significand_products(module):
     from math import prod
 
-    from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import (
-        AffineMapAttr,
-        ArrayAttr,
-        DenseIntOrFPElementsAttr,
-        IntegerAttr,
-        TensorType,
-        UnitAttr,
-        i64,
-    )
-    from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
-    from xdsl.ir.affine import AffineDimExpr, AffineMap
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import TensorType, i64
     from xdsl.rewriter import Rewriter
 
+    from merlin.llvmlower import _ir
+    from merlin.llvmlower._ir import BATCHED_ITERATORS, BATCHED_MAPS, identity, mac, reshape, splat
     from merlin.llvmlower.fixed_point_ir import FORMAT
     from merlin.llvmlower.floating_component_ir import point
     from merlin.llvmlower.ieee_dyadic_ir import decode, encode
@@ -49,8 +40,7 @@ def rewrite_significand_products(module):
             continue
         shape = op.results[0].type.get_shape()
         maps = list(op.get_indexing_maps())
-        identity = AffineMapAttr(AffineMap.identity(len(shape)))
-        if maps[-1] != identity:
+        if maps[-1] != identity(len(shape)):
             continue
         operations, expanded = [], []
         magnitude = (1 << (FORMAT[token][0] + 1)) - 1
@@ -79,10 +69,7 @@ def rewrite_significand_products(module):
                 if word >> (fraction + exponent):
                     coefficient = -coefficient
                 bound = abs(coefficient)
-                constant = arith.ConstantOp(IntegerAttr(coefficient, i64))
-                splat = tensor.SplatOp(constant.result, [], TensorType(i64, source.type.get_shape()))
-                operations.extend([constant, splat])
-                packed = splat.result
+                packed = splat(coefficient, i64, source.type.get_shape(), operations)
             else:
                 packed = point(
                     [source],
@@ -92,85 +79,51 @@ def rewrite_significand_products(module):
                 )
             bounds[packed] = bound
             operand_bounds.append(bound)
-            empty = tensor.EmptyOp([], TensorType(i64, shape))
-            block = Block(arg_types=[i64, i64])
-            block.add_op(L.YieldOp(block.args[0]))
-            broadcast = L.GenericOp(
-                inputs=[packed],
-                outputs=[empty.tensor],
-                body=Region(block),
-                indexing_maps=ArrayAttr([amap, identity]),
-                iterator_types=op.get_iterator_types(),
-                result_types=[empty.tensor.type],
+            broadcast = _ir.point(
+                [packed],
+                TensorType(i64, shape),
+                lambda args, emit: args[0],
+                operations,
+                maps=[amap, identity(len(shape))],
+                iterators=op.get_iterator_types(),
             )
-            operations.extend([empty, broadcast])
-            literal = arith.ConstantOp(DenseIntOrFPElementsAttr.from_list(TensorType(i64, [3]), [prod(shape), 1, 1]))
-            reshaped = tensor.ReshapeOp(broadcast.results[0], literal.result, TensorType(i64, [prod(shape), 1, 1]))
-            operations.extend([literal, reshaped])
-            bounds[broadcast.results[0]] = bounds[reshaped.result] = bound
-            expanded.append(reshaped.result)
-        constant = arith.ConstantOp(IntegerAttr(0, i64))
-        seed = tensor.SplatOp(constant.result, [], TensorType(i64, [prod(shape), 1, 1]))
-        block = Block(arg_types=[i64, i64, i64])
-        product = arith.MuliOp(block.args[0], block.args[1])
-        added = arith.AddiOp(product.result, block.args[2])
-        block.add_ops([product, added, L.YieldOp(added.result)])
-        product_maps = ArrayAttr(
-            [
-                AffineMapAttr(AffineMap(4, 0, tuple(AffineDimExpr(i) for i in axes)))
-                for axes in [(0, 1, 3), (0, 3, 2), (0, 1, 2)]
-            ]
-        )
-        integer = L.GenericOp(
-            inputs=expanded,
-            outputs=[seed.result],
-            body=Region(block),
-            indexing_maps=product_maps,
-            iterator_types=ArrayAttr(
-                [L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * 3 + [L.IteratorTypeAttr(L.IteratorType.REDUCTION)]
-            ),
-            result_types=[seed.result.type],
-        )
-        operations.extend([constant, seed, integer])
-        bounds[seed.result] = 0
+            reshaped = reshape(broadcast, [prod(shape), 1, 1], operations)
+            bounds[broadcast] = bounds[reshaped] = bound
+            expanded.append(reshaped)
+        seed = splat(0, i64, [prod(shape), 1, 1], operations)
+        integer = mac(expanded, seed, BATCHED_MAPS, BATCHED_ITERATORS)
+        operations.append(integer)
+        bounds[seed] = 0
         product_bound = prod(operand_bounds)
         bounds[integer.results[0]] = product_bound
-        literal = arith.ConstantOp(DenseIntOrFPElementsAttr.from_list(TensorType(i64, [len(shape)]), list(shape)))
-        reshaped = tensor.ReshapeOp(integer.results[0], literal.result, TensorType(i64, shape))
-        operations.extend([literal, reshaped])
-        bounds[reshaped.result] = product_bound
-        empty = tensor.EmptyOp([], op.results[0].type)
-        block = Block(arg_types=[i64, *[v.type.element_type for v in op.inputs], op.results[0].type.element_type])
+        reshaped = reshape(integer.results[0], shape, operations)
+        bounds[reshaped] = product_bound
 
-        def emit(child):
-            block.add_op(child)
-            return child.results[0]
+        def readout(args, emit):
+            a, b = [decode(v, emit) for v in args[1:3]]
+            exponent = emit(arith.AddiOp(a[1], b[1]))
+            negative_zero = emit(arith.XOrIOp(a[2], b[2]))
+            rounded = encode(args[0], exponent, op.results[0].type.element_type, emit, zero_negative=negative_zero)
+            rounded = overlay(op, list(args[1:3]), rounded, emit)
+            if token == "bf16" and "merlin.cpu_storage_profile" in op.attributes:
+                import json
 
-        a, b = [decode(v, emit) for v in block.args[1:3]]
-        exponent = emit(arith.AddiOp(a[1], b[1]))
-        negative_zero = emit(arith.XOrIOp(a[2], b[2]))
-        rounded = encode(block.args[0], exponent, op.results[0].type.element_type, emit, zero_negative=negative_zero)
-        rounded = overlay(op, list(block.args[1:3]), rounded, emit)
-        if token == "bf16" and "merlin.cpu_storage_profile" in op.attributes:
-            import json
+                from merlin.llvmlower.ieee_pointwise import canonical_bf16_storage
 
-            from merlin.llvmlower.ieee_pointwise import canonical_bf16_storage
+                rounded = canonical_bf16_storage(
+                    rounded, json.loads(op.attributes["merlin.cpu_storage_profile"].data), emit
+                )
+            return rounded
 
-            rounded = canonical_bf16_storage(
-                rounded, json.loads(op.attributes["merlin.cpu_storage_profile"].data), emit
-            )
-        block.add_op(L.YieldOp(rounded))
-        readout = L.GenericOp(
-            inputs=[reshaped.result, *op.inputs],
-            outputs=[empty.tensor],
-            body=Region(block),
-            indexing_maps=ArrayAttr([identity, *maps]),
-            iterator_types=op.get_iterator_types(),
-            result_types=[empty.tensor.type],
+        result = point(
+            [reshaped, *op.inputs],
+            op.results[0].type,
+            readout,
+            operations,
+            maps=[identity(len(shape)), *maps],
+            iterators=op.get_iterator_types(),
         )
-        readout.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
-        operations.extend([empty, readout])
-        Rewriter.replace_op(op, operations, [readout.results[0]])
+        Rewriter.replace_op(op, operations, [result])
         proofs.append(
             dict(
                 form="typed_ieee_significand_product",

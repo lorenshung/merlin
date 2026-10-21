@@ -12,9 +12,10 @@ def normalize(module):
     from xdsl.dialects import arith
     from xdsl.dialects.builtin import FloatAttr
     from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
+    from xdsl.ir import Block
     from xdsl.rewriter import Rewriter
 
+    from merlin.llvmlower._ir import generic
     from merlin.xdsl_dialects.lowering.contraction_coverage import is_compare_select_relu
 
     changed = 0
@@ -96,14 +97,7 @@ def normalize(module):
         negative = arith.CmpfOp(body.args[0], zero.result, "olt")
         value = arith.SelectOp(negative.result, zero.result, body.args[0])
         body.add_ops([zero, negative, value, L.YieldOp(value.result)])
-        replacement = L.GenericOp(
-            inputs=list(op.inputs),
-            outputs=list(op.outputs),
-            body=Region(body),
-            indexing_maps=op.indexing_maps,
-            iterator_types=op.iterator_types,
-            result_types=[op.results[0].type],
-        )
+        replacement = generic(list(op.inputs), op.outputs[0], body, op.indexing_maps, op.iterator_types)
         replacement.attributes.update(op.attributes)
         Rewriter.replace_op(op, replacement)
         changed += 1

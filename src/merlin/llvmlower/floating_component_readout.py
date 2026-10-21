@@ -3,12 +3,12 @@
 from fractions import Fraction
 
 from xdsl.dialects import arith, tensor
-from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, FloatAttr, IntegerAttr, UnitAttr
+from xdsl.dialects.builtin import FloatAttr, IntegerAttr
 from xdsl.dialects.linalg import ops as L
-from xdsl.ir import Block, Region
-from xdsl.ir.affine import AffineMap
+from xdsl.ir import Block
 from xdsl.rewriter import Rewriter
 
+from merlin.llvmlower._ir import emitter, generic, identity
 from merlin.llvmlower.fixed_point_ir import FORMAT, encode_fixed_integer
 from merlin.llvmlower.ieee_pointwise import dependence_proof
 
@@ -63,14 +63,10 @@ def component_readout(
         converted = point([integer], op.results[0].type, convert, operations)
         # Exact zero has a source-defined sign, independent of the discarded
         # floating computation. Underflow of a nonzero integer keeps the RNE sign.
-        identity = AffineMapAttr(AffineMap.identity(len(op.results[0].type.get_shape())))
         maps = list(op.get_indexing_maps())
         empty = tensor.EmptyOp([], op.results[0].type)
         block = Block(arg_types=[output_type, i128] + [v.type.element_type for v in op.inputs] + [output_type])
-
-        def emit(operation):
-            block.add_op(operation)
-            return operation.results[0]
+        emit = emitter(block)
 
         def sign(value):
             from xdsl.dialects.builtin import IntegerType
@@ -149,15 +145,15 @@ def component_readout(
 
                 result = aggregate_overlay(propagation, result, operations)
         else:
-            final = L.GenericOp(
-                inputs=[converted, integer, *op.inputs],
-                outputs=[empty.tensor],
-                body=Region(block),
-                indexing_maps=ArrayAttr([identity, identity, *maps[:-1], identity]),
-                iterator_types=op.get_iterator_types(),
-                result_types=[op.results[0].type],
+            rank = len(op.results[0].type.get_shape())
+            final = generic(
+                [converted, integer, *op.inputs],
+                empty.tensor,
+                block,
+                [identity(rank), identity(rank), *maps[:-1], identity(rank)],
+                op.get_iterator_types(),
+                host=True,
             )
-            final.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
             operations.extend([empty, final])
             result = final.results[0]
         max_exponent = (2 * integer_bound).bit_length() - 1 + exponent if integer_bound else 0

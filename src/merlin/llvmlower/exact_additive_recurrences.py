@@ -9,12 +9,12 @@ def expose_exact_additive_recurrences(module, *, quantized_contract=None):
     if quantized_contract is None:
         return 0
     from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, DenseIntOrFPElementsAttr, FloatAttr, TensorType
+    from xdsl.dialects.builtin import DenseIntOrFPElementsAttr, FloatAttr, TensorType
     from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
-    from xdsl.ir.affine import AffineDimExpr, AffineMap
+    from xdsl.ir import Block
     from xdsl.rewriter import Rewriter
 
+    from merlin.llvmlower._ir import PARALLEL, REDUCTION, dims, generic
     from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
 
     changed = 0
@@ -113,18 +113,8 @@ def expose_exact_additive_recurrences(module, *, quantized_contract=None):
         product = arith.MulfOp(scalar.args[0], scalar.args[1])
         total = arith.AddfOp(product.result, scalar.args[2])
         scalar.add_ops([product, total, L.YieldOp(total.result)])
-        contraction = L.GenericOp(
-            inputs=[source, coefficient.result],
-            outputs=[seed.result],
-            body=Region(scalar),
-            indexing_maps=ArrayAttr(
-                [AffineMapAttr(AffineMap(2, 0, tuple(AffineDimExpr(i) for i in axes))) for axes in [(1,), (1, 0), (0,)]]
-            ),
-            iterator_types=ArrayAttr(
-                [L.IteratorTypeAttr(L.IteratorType.PARALLEL), L.IteratorTypeAttr(L.IteratorType.REDUCTION)]
-            ),
-            result_types=[loop.results[0].type],
-        )
+        maps = [dims(2, axes) for axes in [(1,), (1, 0), (0,)]]
+        contraction = generic([source, coefficient.result], seed.result, scalar, maps, [PARALLEL, REDUCTION])
         contraction.attributes.update(loop.attributes)
         # The second result is proved dead; its original empty destination is
         # only a type-correct placeholder while replacing the two-result loop.

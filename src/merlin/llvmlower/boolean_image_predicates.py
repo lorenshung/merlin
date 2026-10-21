@@ -2,13 +2,11 @@
 
 
 def fold_boolean_image_predicates(module):
-    from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, IntegerAttr, i1
-    from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
+    from xdsl.dialects.builtin import AffineMapAttr, i1
     from xdsl.ir.affine import AffineMap
     from xdsl.rewriter import Rewriter
 
+    from merlin.llvmlower._ir import point, splat
     from merlin.llvmlower.singleton_selectors import _relation
     from merlin.targetgen.native_payload_carriers import UNKNOWN, LiteralPayloads
     from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
@@ -63,26 +61,22 @@ def fold_boolean_image_predicates(module):
                 answers.append(
                     _relation(body[0].predicate.value.data, (a > b) - (a < b), math.isnan(constant), floating=True)
                 )
+            replacement = []
             if answers[0] == answers[1]:
-                literal = arith.ConstantOp(IntegerAttr(int(answers[0]), i1))
-                fill = tensor.SplatOp(literal.result, [], op.results[0].type)
-                Rewriter.replace_op(op, [literal, fill], [fill.result])
+                result = splat(int(answers[0]), i1, op.results[0].type.get_shape(), replacement)
             elif answers == [False, True]:
-                destination = tensor.EmptyOp([], op.results[0].type)
-                block = Block(arg_types=[i1, i1])
-                block.add_op(L.YieldOp(block.args[0]))
                 indexing = maps[0].data.compose(list(op.get_indexing_maps())[slot].data)
-                selected = L.GenericOp(
-                    inputs=[source],
-                    outputs=[destination.tensor],
-                    body=Region(block),
-                    indexing_maps=ArrayAttr([AffineMapAttr(indexing), list(op.get_indexing_maps())[-1]]),
-                    iterator_types=op.get_iterator_types(),
-                    result_types=[op.results[0].type],
+                result = point(
+                    [source],
+                    op.results[0].type,
+                    lambda args, emit: args[0],
+                    replacement,
+                    maps=[AffineMapAttr(indexing), list(op.get_indexing_maps())[-1]],
+                    iterators=op.get_iterator_types(),
                 )
-                Rewriter.replace_op(op, [destination, selected], [selected.results[0]])
             else:
                 continue
+            Rewriter.replace_op(op, replacement, [result])
             changed += 1
             break
     if changed:

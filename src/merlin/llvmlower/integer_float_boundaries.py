@@ -7,12 +7,13 @@ subsequent floating operations. No division is moved across that boundary.
 
 
 def rewrite_integer_float_boundaries(module, input_bounds, *, output_grids=None):
-    from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import ArrayAttr, IntegerAttr, TensorType, UnitAttr, i128
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import i128
     from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
+    from xdsl.ir import Block
     from xdsl.rewriter import Rewriter
 
+    from merlin.llvmlower._ir import emitter, generic, point, splat
     from merlin.llvmlower.fixed_point_ir import FORMAT, encode_fixed_integer
     from merlin.llvmlower.pointwise_primitives import expose_pointwise_primitives
 
@@ -47,49 +48,32 @@ def rewrite_integer_float_boundaries(module, input_bounds, *, output_grids=None)
                 magnitude = abs(literal)
         if magnitude is None:
             magnitude = 1 << (source.type.element_type.width.data - 1)
-        shape = op.results[0].type.get_shape()
-        integer_type = TensorType(i128, shape)
-        constant = arith.ConstantOp(IntegerAttr(0, i128))
-        seed = tensor.SplatOp(constant.result, [], integer_type)
-        block = Block(arg_types=[source.type.element_type, i128])
         unsigned = body[0].name == "arith.uitofp"
         if unsigned and str(source.type.element_type) != "i1":
             continue
+        operations = []
+        seed = splat(0, i128, op.results[0].type.get_shape(), operations)
+        block = Block(arg_types=[source.type.element_type, i128])
         extend = (arith.ExtUIOp if unsigned else arith.ExtSIOp)(block.args[0], i128)
-        block.add_ops([extend, L.YieldOp(extend.result)])
-        integer = L.GenericOp(
-            inputs=[source],
-            outputs=[seed.result],
-            body=Region(block),
-            indexing_maps=op.get_indexing_maps(),
-            iterator_types=op.get_iterator_types(),
-            result_types=[integer_type],
-        )
+        block.add_op(L.YieldOp(emitter(block)(extend)))
+        integer = generic([source], seed, block, op.get_indexing_maps(), op.get_iterator_types())
+        operations.append(integer)
         added[integer.results[0]] = magnitude
-        empty = tensor.EmptyOp([], op.results[0].type)
-        block = Block(arg_types=[i128, op.results[0].type.element_type])
-
-        def emit(child):
-            block.add_op(child)
-            return child.results[0]
-
-        result = encode_fixed_integer(block.args[0], 0, op.results[0].type.element_type, emit)
-        block.add_op(L.YieldOp(result))
         identity = list(op.get_indexing_maps())[-1]
-        converted = L.GenericOp(
-            inputs=[integer.results[0]],
-            outputs=[empty.tensor],
-            body=Region(block),
-            indexing_maps=ArrayAttr([identity, identity]),
-            iterator_types=op.get_iterator_types(),
-            result_types=[op.results[0].type],
+        converted = point(
+            [integer.results[0]],
+            op.results[0].type,
+            lambda args, emit: encode_fixed_integer(args[0], 0, op.results[0].type.element_type, emit),
+            operations,
+            maps=[identity, identity],
+            iterators=op.get_iterator_types(),
+            host=True,
         )
-        converted.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
         if output_grids is not None:
             # Integer-to-float rounding preserves integrality. The rounded
             # magnitude is bounded by twice the original integer magnitude.
-            output_grids[converted.results[0]] = (0, 2 * magnitude)
-        Rewriter.replace_op(op, [constant, seed, integer, empty, converted], [converted.results[0]])
+            output_grids[converted] = (0, 2 * magnitude)
+        Rewriter.replace_op(op, operations, [converted])
         count += 1
     module.verify()
     return added, count

@@ -2,12 +2,11 @@
 
 
 def rewrite_ieee_conversions(module, *, copy_profiles=None):
-    from xdsl.dialects import arith, tensor
+    from xdsl.dialects import arith
     from xdsl.dialects.builtin import IntegerAttr, IntegerType, TensorType
-    from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
     from xdsl.rewriter import Rewriter
 
+    from merlin.llvmlower import _ir
     from merlin.llvmlower.floating_component_ir import point
     from merlin.llvmlower.ieee_dyadic_ir import decode, encode
     from merlin.llvmlower.ieee_pointwise import special_conversion
@@ -36,21 +35,15 @@ def rewrite_ieee_conversions(module, *, copy_profiles=None):
             operations,
         )
         bounds[packed] = 1 << (storage.width.data - 1)
-        empty = tensor.EmptyOp([], TensorType(storage, op.results[0].type.get_shape()))
-        block = Block(arg_types=[storage, storage])
-        zero = arith.ConstantOp(IntegerAttr(0, storage))
-        copied = arith.AddiOp(block.args[0], zero.result)
-        block.add_ops([zero, copied, L.YieldOp(copied.result)])
-        integer = L.GenericOp(
-            inputs=[packed],
-            outputs=[empty.tensor],
-            body=Region(block),
-            indexing_maps=op.get_indexing_maps(),
-            iterator_types=op.get_iterator_types(),
-            result_types=[empty.tensor.type],
+        integer = _ir.point(
+            [packed],
+            TensorType(storage, op.results[0].type.get_shape()),
+            lambda args, emit: emit(arith.AddiOp(args[0], emit(arith.ConstantOp(IntegerAttr(0, storage))))),
+            operations,
+            maps=op.get_indexing_maps(),
+            iterators=op.get_iterator_types(),
         )
-        operations.extend([empty, integer])
-        bounds[integer.results[0]] = 1 << (storage.width.data - 1)
+        bounds[integer] = 1 << (storage.width.data - 1)
 
         def readout(args, emit):
             original = emit(arith.BitcastOp(args[0], source.type.element_type))
@@ -103,7 +96,7 @@ def rewrite_ieee_conversions(module, *, copy_profiles=None):
                 )
             return result
 
-        result = point([integer.results[0]], op.results[0].type, readout, operations)
+        result = point([integer], op.results[0].type, readout, operations)
         Rewriter.replace_op(op, operations, [result])
         proofs.append(
             dict(

@@ -8,10 +8,9 @@ from merlin.llvmlower.static_polynomials import PolynomialRefusal, analyze_stati
 def lift_static_polynomial(op, grid, pack, bounds, *, operand_type=None, result_type=None, rational_denominators=None):
     """Build a width-proved exact contraction, or refuse before changing source."""
     from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, IndexType, IntegerAttr, TensorType, i64, i128
-    from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
-    from xdsl.ir.affine import AffineDimExpr, AffineMap
+    from xdsl.dialects.builtin import IndexType, IntegerAttr, TensorType, i64, i128
+
+    from merlin.llvmlower._ir import BATCHED_ITERATORS, BATCHED_MAPS, mac, splat
 
     i64, i128 = operand_type or i64, result_type or i128
     operand_limit = i64.width.data - 2
@@ -100,11 +99,9 @@ def lift_static_polynomial(op, grid, pack, bounds, *, operand_type=None, result_
     if not count:
         if rational_denominators is None:
             raise PolynomialRefusal("empty polynomial")
-        zero = arith.ConstantOp(IntegerAttr(0, i128))
-        splat = tensor.SplatOp(zero.result, [], TensorType(i128, [len(rows), 1, 1]))
-        operations.extend([zero, splat])
-        bounds[splat.result] = 0
-        return operations, splat.result, exponent, 0, denominator
+        seed = splat(0, i128, [len(rows), 1, 1], operations)
+        bounds[seed] = 0
+        return operations, seed, exponent, 0, denominator
     left_type, right_type = TensorType(i64, [len(rows), 1, count]), TensorType(i64, [len(rows), count, 1])
     left_empty, right_empty = tensor.EmptyOp([], left_type), tensor.EmptyOp([], right_type)
     operations.extend([left_empty, right_empty])
@@ -128,30 +125,9 @@ def lift_static_polynomial(op, grid, pack, bounds, *, operand_type=None, result_
             left, right = li.result, ri.result
             left_bound, right_bound = max(left_bound, ab), max(right_bound, abs(weight) * bb)
     bounds[left], bounds[right] = left_bound, right_bound
-    zero = arith.ConstantOp(IntegerAttr(0, i128))
-    seed = tensor.SplatOp(zero.result, [], TensorType(i128, [len(rows), 1, 1]))
-    operations.extend([zero, seed])
-    bounds[seed.result] = 0
-    block = Block(arg_types=[i64, i64, i128])
-    a, b = arith.ExtSIOp(block.args[0], i128), arith.ExtSIOp(block.args[1], i128)
-    product = arith.MuliOp(a.result, b.result)
-    addition = arith.AddiOp(product.result, block.args[2])
-    block.add_ops([a, b, product, addition, L.YieldOp(addition.result)])
-    contraction = L.GenericOp(
-        inputs=[left, right],
-        outputs=[seed.result],
-        body=Region(block),
-        indexing_maps=ArrayAttr(
-            [
-                AffineMapAttr(AffineMap(4, 0, tuple(AffineDimExpr(d) for d in axes)))
-                for axes in [(0, 1, 3), (0, 3, 2), (0, 1, 2)]
-            ]
-        ),
-        iterator_types=ArrayAttr(
-            [L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * 3 + [L.IteratorTypeAttr(L.IteratorType.REDUCTION)]
-        ),
-        result_types=[seed.result.type],
-    )
+    seed = splat(0, i128, [len(rows), 1, 1], operations)
+    bounds[seed] = 0
+    contraction = mac([left, right], seed, BATCHED_MAPS, BATCHED_ITERATORS)
     operations.append(contraction)
     bounds[contraction.results[0]] = bound
     result = (operations, contraction.results[0], exponent, bound)

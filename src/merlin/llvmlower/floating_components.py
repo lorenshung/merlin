@@ -3,6 +3,8 @@
 from fractions import Fraction
 from math import prod
 
+from merlin.llvmlower import _ir
+from merlin.llvmlower._ir import BATCHED_ITERATORS, BATCHED_MAPS, emitter, generic, mac, splat
 from merlin.llvmlower.fixed_point_ir import FORMAT, finite_grid
 from merlin.llvmlower.floating_component_ir import pack_ieee_integer, point
 from merlin.llvmlower.floating_component_readout import component_readout
@@ -23,22 +25,10 @@ def rewrite_floating_components(
     Packing uses a proved binary64 product or integer IEEE bit fields.
     Host recombination and RNE retain the complete exact integer numerator.
     """
-    from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import (
-        AffineMapAttr,
-        ArrayAttr,
-        DenseIntOrFPElementsAttr,
-        FloatAttr,
-        IntegerAttr,
-        IntegerType,
-        TensorType,
-        f64,
-        i64,
-        i128,
-    )
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import FloatAttr, IntegerAttr, IntegerType, TensorType, f64, i64, i128
     from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
-    from xdsl.ir.affine import AffineDimExpr, AffineMap
+    from xdsl.ir import Block
 
     from merlin.llvmlower.additive_regions import expose_reduce_domains
     from merlin.llvmlower.pointwise_primitives import expose_pointwise_primitives
@@ -256,21 +246,15 @@ def rewrite_floating_components(
         return result, aligned
 
     def zero(shape, operations):
-        constant = arith.ConstantOp(IntegerAttr(0, i128))
-        seed = tensor.SplatOp(constant.result, [], TensorType(i128, shape))
-        operations.extend([constant, seed])
-        bounds[seed.result] = 0
-        return seed.result
+        seed = splat(0, i128, shape, operations)
+        bounds[seed] = 0
+        return seed
 
     def reshape(value, shape, operations):
-        literal = arith.ConstantOp(
-            DenseIntOrFPElementsAttr.from_list(TensorType(IntegerType(64), [len(shape)]), list(shape))
-        )
-        changed = tensor.ReshapeOp(value, literal.result, TensorType(value.type.element_type, shape))
-        operations.extend([literal, changed])
+        changed = _ir.reshape(value, shape, operations)
         if value in bounds:
-            bounds[changed.result] = bounds[value]
-        return changed.result
+            bounds[changed] = bounds[value]
+        return changed
 
     from merlin.kernels.shapes import observe_contractions
 
@@ -468,19 +452,7 @@ def rewrite_floating_components(
             if bound.bit_length() >= reconstruction_limit:
                 continue
             seed = zero(op.results[0].type.get_shape(), operations)
-            body = Block(arg_types=[i64, i64, i128])
-            a, b = arith.ExtSIOp(body.args[0], i128), arith.ExtSIOp(body.args[1], i128)
-            product = arith.MuliOp(a.result, b.result)
-            addition = arith.AddiOp(product.result, body.args[2])
-            body.add_ops([a, b, product, addition, L.YieldOp(addition.result)])
-            integer = L.GenericOp(
-                inputs=[v for v, b in packed],
-                outputs=[seed],
-                body=Region(body),
-                indexing_maps=op.get_indexing_maps(),
-                iterator_types=op.get_iterator_types(),
-                result_types=[seed.type],
-            )
+            integer = mac([v for v, b in packed], seed, op.get_indexing_maps(), op.get_iterator_types())
             operations.append(integer)
             bounds[integer.results[0]] = bound
             publish(op, integer.results[0], exponent, bound, operations)
@@ -592,105 +564,68 @@ def rewrite_floating_components(
         if arithmetic.name in {"arith.mulf", "math.fma"}:
             # A K=1 batched contraction represents general pointwise products.
             # Broadcast the source operands into the original output map first.
+            maps = list(op.get_indexing_maps())
             expanded = []
             for (value, bound), arg in zip(packed[:2], args[:2], strict=True):
-                empty = tensor.EmptyOp([], TensorType(i64, shape))
-                body = Block(arg_types=[i64, i64])
-                body.add_op(L.YieldOp(body.args[0]))
-                carrier = L.GenericOp(
-                    inputs=[value],
-                    outputs=[empty.tensor],
-                    body=Region(body),
-                    indexing_maps=ArrayAttr([list(op.get_indexing_maps())[arg], list(op.get_indexing_maps())[-1]]),
-                    iterator_types=op.get_iterator_types(),
-                    result_types=[empty.tensor.type],
+                carrier = _ir.point(
+                    [value],
+                    TensorType(i64, shape),
+                    lambda args, emit: args[0],
+                    operations,
+                    maps=[maps[arg], maps[-1]],
+                    iterators=op.get_iterator_types(),
                 )
-                operations.extend([empty, carrier])
-                expanded.append(carrier.results[0])
-                bounds[carrier.results[0]] = bound
+                expanded.append(carrier)
+                bounds[carrier] = bound
             batch_shape = [prod(shape), 1, 1]
             expanded = [reshape(v, batch_shape, operations) for v in expanded]
             batch_seed = zero(batch_shape, operations)
-            body = Block(arg_types=[i64, i64, i128])
-            a, b = arith.ExtSIOp(body.args[0], i128), arith.ExtSIOp(body.args[1], i128)
-            product = arith.MuliOp(a.result, b.result)
-            addition = arith.AddiOp(product.result, body.args[2])
-            body.add_ops([a, b, product, addition, L.YieldOp(addition.result)])
-            maps = ArrayAttr(
-                [
-                    AffineMapAttr(AffineMap(4, 0, tuple(AffineDimExpr(i) for i in axes)))
-                    for axes in [(0, 1, 3), (0, 3, 2), (0, 1, 2)]
-                ]
-            )
-            integer = L.GenericOp(
-                inputs=expanded,
-                outputs=[batch_seed],
-                body=Region(body),
-                indexing_maps=maps,
-                iterator_types=ArrayAttr(
-                    [L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * 3 + [L.IteratorTypeAttr(L.IteratorType.REDUCTION)]
-                ),
-                result_types=[batch_seed.type],
-            )
+            integer = mac(expanded, batch_seed, BATCHED_MAPS, BATCHED_ITERATORS)
             operations.append(integer)
             bounds[integer.results[0]] = integer_bound
             result = reshape(integer.results[0], shape, operations)
             if arithmetic.name == "math.fma":
-                empty = tensor.EmptyOp([], TensorType(i128, shape))
-                body = Block(arg_types=[i128, i64, i128])
-                product = body.args[0]
-                if product_exponent != exponent:
-                    shift = arith.ConstantOp(IntegerAttr(product_exponent - exponent, i128))
-                    shifted = arith.ShLIOp(product, shift.result)
-                    body.add_ops([shift, shifted])
-                    product = shifted.result
-                extended = arith.ExtSIOp(body.args[1], i128)
-                added = arith.AddiOp(product, extended.result)
-                body.add_ops([extended, added, L.YieldOp(added.result)])
-                maps = list(op.get_indexing_maps())
-                final = L.GenericOp(
-                    inputs=[result, packed[2][0]],
-                    outputs=[empty.tensor],
-                    body=Region(body),
-                    indexing_maps=ArrayAttr([maps[-1], maps[args[2]], maps[-1]]),
-                    iterator_types=op.get_iterator_types(),
-                    result_types=[empty.tensor.type],
+
+                def fused(values, emit):
+                    product = values[0]
+                    if product_exponent != exponent:
+                        shift = emit(arith.ConstantOp(IntegerAttr(product_exponent - exponent, i128)))
+                        product = emit(arith.ShLIOp(product, shift))
+                    return emit(arith.AddiOp(product, emit(arith.ExtSIOp(values[1], i128))))
+
+                result = _ir.point(
+                    [result, packed[2][0]],
+                    TensorType(i128, shape),
+                    fused,
+                    operations,
+                    maps=[maps[-1], maps[args[2]], maps[-1]],
+                    iterators=op.get_iterator_types(),
                 )
-                operations.extend([empty, final])
-                result = final.results[0]
                 bounds[result] = integer_bound
             publish(op, result, exponent, integer_bound, operations, arithmetic.results[0].type)
             continue
         body = Block(arg_types=[i64] * len(packed) + [i128])
-        values = []
-        for value in body.args[:-1]:
-            extended = arith.ExtSIOp(value, i128)
-            body.add_op(extended)
-            values.append(extended.result)
+        emit = emitter(body)
+        values = [emit(arith.ExtSIOp(value, i128)) for value in body.args[:-1]]
         if arithmetic.name == "arith.divf" and division_weight != 1:
-            weight = arith.ConstantOp(IntegerAttr(-division_weight if divisor_negative else division_weight, i128))
-            body.add_op(weight)
-            computed = arith.MuliOp(values[0], weight.result)
+            weight = emit(
+                arith.ConstantOp(IntegerAttr(-division_weight if divisor_negative else division_weight, i128))
+            )
+            computed = emit(arith.MuliOp(values[0], weight))
         elif arithmetic.name == "arith.negf" or (arithmetic.name == "arith.divf" and divisor_negative):
-            constant = arith.ConstantOp(IntegerAttr(0, i128))
-            body.add_op(constant)
-            computed = arith.SubiOp(constant.result, values[0])
+            computed = emit(arith.SubiOp(emit(arith.ConstantOp(IntegerAttr(0, i128))), values[0]))
         elif arithmetic.name in {"arith.extf", "arith.truncf", "arith.divf"}:
-            computed = None
+            computed = values[0]
         else:
-            cls = arith.AddiOp if arithmetic.name == "arith.addf" else arith.SubiOp
-            computed = cls(*values)
-        if computed is not None:
-            body.add_op(computed)
-        body.add_op(L.YieldOp(computed.result if computed is not None else values[0]))
+            computed = emit((arith.AddiOp if arithmetic.name == "arith.addf" else arith.SubiOp)(*values))
+        body.add_op(L.YieldOp(computed))
         maps = list(op.get_indexing_maps())
-        integer = L.GenericOp(
-            inputs=[value for value, bound in packed],
-            outputs=[seed],
-            body=Region(body),
-            indexing_maps=ArrayAttr([maps[i] for i in args] + [maps[-1]]),
-            iterator_types=op.get_iterator_types(),
-            result_types=[seed.type],
+        integer = generic(
+            [value for value, bound in packed],
+            seed,
+            body,
+            [maps[i] for i in args] + [maps[-1]],
+            op.get_iterator_types(),
         )
         operations.append(integer)
         bounds[integer.results[0]] = integer_bound

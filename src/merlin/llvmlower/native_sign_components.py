@@ -9,12 +9,12 @@ explicit modular host recombination. No floating conversion is involved.
 def rewrite_native_sign_components(
     module, *, canonical_bf16_nan=False, defer_floating_negation=False, cpu_profiles=None
 ):
-    from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, IntegerAttr, IntegerType, TensorType, UnitAttr
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import IntegerAttr, IntegerType, TensorType, UnitAttr
     from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
-    from xdsl.ir.affine import AffineMap
     from xdsl.rewriter import Rewriter
+
+    from merlin.llvmlower._ir import constants, point
 
     widths = {"f16": 16, "bf16": 16, "f32": 32, "f64": 64}
     bounds = {}
@@ -73,99 +73,72 @@ def rewrite_native_sign_components(
                 continue
         element = IntegerType(bits)
         shape = source.type.get_shape() if clamp else op.results[0].type.get_shape()
-        identity = AffineMapAttr(AffineMap.identity(len(source.type.get_shape())))
-        iterators = ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * len(source.type.get_shape()))
-        empty = tensor.EmptyOp([], TensorType(element, source.type.get_shape()))
-        block = Block(arg_types=[source.type.element_type, element])
-        if floating:
-            cast = arith.BitcastOp(block.args[0], element)
-            block.add_ops([cast, L.YieldOp(cast.result)])
-        else:
-            block.add_op(L.YieldOp(block.args[0]))
-        packed = L.GenericOp(
-            inputs=[source],
-            outputs=[empty.tensor],
-            body=Region(block),
-            indexing_maps=ArrayAttr([identity, identity]),
-            iterator_types=iterators,
-            result_types=[empty.tensor.type],
+        operations = []
+        packed = point(
+            [source],
+            TensorType(element, source.type.get_shape()),
+            lambda args, emit: emit(arith.BitcastOp(args[0], element)) if floating else args[0],
+            operations,
         )
-        bounds[packed.results[0]] = 1 << (bits - 1)
-        destination = tensor.EmptyOp([], TensorType(element, shape))
-        block = Block(arg_types=[element, element])
-        offset = arith.ConstantOp(IntegerAttr(-(1 << (bits - 1)) if negate else 0, element))
-        addition = arith.AddiOp(block.args[0], offset.result)
-        block.add_ops([offset, addition, L.YieldOp(addition.result)])
-        changed = L.GenericOp(
-            inputs=[packed.results[0]],
-            outputs=[destination.tensor],
-            body=Region(block),
-            indexing_maps=ArrayAttr([identity, identity]) if clamp else op.get_indexing_maps(),
-            iterator_types=iterators if clamp else op.get_iterator_types(),
-            result_types=[destination.tensor.type],
+        bounds[packed] = 1 << (bits - 1)
+        offset = -(1 << (bits - 1)) if negate else 0
+        changed = point(
+            [packed],
+            TensorType(element, shape),
+            lambda args, emit: emit(arith.AddiOp(args[0], emit(arith.ConstantOp(IntegerAttr(offset, element))))),
+            operations,
+            maps=None if clamp else op.get_indexing_maps(),
+            iterators=None if clamp else op.get_iterator_types(),
         )
-        bounds[changed.results[0]] = 1 << (bits - 1)
-        out = tensor.EmptyOp([], TensorType(source.type.element_type, shape))
-        block = Block(arg_types=[element, source.type.element_type])
-        if floating:
-            raw = block.args[0]
+        bounds[changed] = 1 << (bits - 1)
+
+        def readout(args, emit):
+            if not floating:
+                return args[0]
+            raw = args[0]
             if cpu_profile is not None and str(source.type.element_type) in {"f16", "bf16"}:
                 from merlin.llvmlower.native_cpu_layout import vector_predicate
 
-                def put(child):
-                    block.add_op(child)
-                    return child.results[0]
-
-                def c(v):
-                    return put(arith.ConstantOp(IntegerAttr(v, element)))
-
+                c = constants(emit, element)
                 fraction = 7 if str(source.type.element_type) == "bf16" else 10
                 infinity = 0x7F80 if fraction == 7 else 0x7C00
-                magnitude = put(arith.AndIOp(raw, c(0x7FFF)))
-                nan = put(arith.CmpiOp(magnitude, c(infinity), "ugt"))
-                vector = vector_predicate(cpu_profile, put)
+                magnitude = emit(arith.AndIOp(raw, c(0x7FFF)))
+                nan = emit(arith.CmpiOp(magnitude, c(infinity), "ugt"))
+                vector = vector_predicate(cpu_profile, emit)
                 corrected = (
-                    c(0x7FC0 if negate else 0xFFFF) if fraction == 7 else put(arith.OrIOp(raw, c(1 << (fraction - 1))))
+                    c(0x7FC0 if negate else 0xFFFF) if fraction == 7 else emit(arith.OrIOp(raw, c(1 << (fraction - 1))))
                 )
                 # Sign change's scalar C10 path converts; threshold's vector
                 # path converts. The other path retains the original word.
                 if negate:
                     from xdsl.dialects.builtin import i1
 
-                    vector = put(arith.XOrIOp(vector, put(arith.ConstantOp(IntegerAttr(1, i1)))))
-                flag = put(arith.AndIOp(nan, vector))
-                raw = put(arith.SelectOp(flag, corrected, raw))
+                    vector = emit(arith.XOrIOp(vector, emit(arith.ConstantOp(IntegerAttr(1, i1)))))
+                flag = emit(arith.AndIOp(nan, vector))
+                raw = emit(arith.SelectOp(flag, corrected, raw))
             if negate and canonical_bf16_nan and str(source.type.element_type) == "bf16":
-                mask = arith.ConstantOp(IntegerAttr(0x7FFF, element))
-                infinity = arith.ConstantOp(IntegerAttr(0x7F80, element))
-                canonical = arith.ConstantOp(IntegerAttr(0x7FC0, element))
-                magnitude = arith.AndIOp(raw, mask.result)
-                nan = arith.CmpiOp(magnitude.result, infinity.result, "ugt")
-                selected = arith.SelectOp(nan.result, canonical.result, raw)
-                block.add_ops([mask, infinity, canonical, magnitude, nan, selected])
-                raw = selected.result
-            cast = arith.BitcastOp(raw, source.type.element_type)
-            block.add_ops([cast, L.YieldOp(cast.result)])
-        else:
-            block.add_op(L.YieldOp(block.args[0]))
-        out_map = AffineMapAttr(AffineMap.identity(len(shape)))
-        result = L.GenericOp(
-            inputs=[changed.results[0]],
-            outputs=[out.tensor],
-            body=Region(block),
-            indexing_maps=ArrayAttr([out_map, out_map]),
-            iterator_types=iterators if clamp else op.get_iterator_types(),
-            result_types=[out.tensor.type],
-        )
-        operations = [empty, packed, destination, changed, out, result]
-        if clamp:
-            retained = op.clone(value_mapper={source: result.results[0]})
-            operations.append(retained)
-            result = retained
+                c = constants(emit, element)
+                mask, infinity, canonical = c(0x7FFF), c(0x7F80), c(0x7FC0)
+                nan = emit(arith.CmpiOp(emit(arith.AndIOp(raw, mask)), infinity, "ugt"))
+                raw = emit(arith.SelectOp(nan, canonical, raw))
+            return emit(arith.BitcastOp(raw, source.type.element_type))
+
         # The closed sign/clamp proof licenses this host readout, including
         # BF16 NaN canonicalization and the original literal compare/select.
-        result.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
-        Rewriter.replace_op(op, operations, [result.results[0]])
+        result = point(
+            [changed],
+            TensorType(source.type.element_type, shape),
+            readout,
+            operations,
+            iterators=None if clamp else op.get_iterator_types(),
+            host=not clamp,
+        )
+        if clamp:
+            retained = op.clone(value_mapper={source: result})
+            retained.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
+            operations.append(retained)
+            result = retained.results[0]
+        Rewriter.replace_op(op, operations, [result])
         proofs.append(
             dict(
                 source="arith.negf" if negate else "closed_constant_compare_select",

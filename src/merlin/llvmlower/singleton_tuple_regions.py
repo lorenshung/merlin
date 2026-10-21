@@ -8,12 +8,14 @@ Repeated reductions and unknown/effectful region bodies remain untouched.
 
 def expose_singleton_tuple_regions(module):
     from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, IndexType, IntegerAttr
+    from xdsl.dialects.builtin import AffineMapAttr, IndexType, IntegerAttr
     from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
+    from xdsl.ir import Block
     from xdsl.ir.affine import AffineConstantExpr, AffineDimExpr
     from xdsl.rewriter import Rewriter
     from xdsl.traits import Pure
+
+    from merlin.llvmlower._ir import PARALLEL, generic
 
     changed = 0
     for op in list(module.walk()):
@@ -64,13 +66,8 @@ def expose_singleton_tuple_regions(module):
                 mapping.update(zip(child.results, clone.results, strict=True))
             else:
                 scalar.add_op(L.YieldOp(mapping[body.last_op.operands[index]]))
-                result = L.GenericOp(
-                    inputs=inputs,
-                    outputs=[empty.tensor],
-                    body=Region(scalar),
-                    indexing_maps=ArrayAttr([*maps, maps[len(op.inputs) + index]]),
-                    iterator_types=ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * len(kept)),
-                    result_types=[typ],
+                result = generic(
+                    inputs, empty.tensor, scalar, [*maps, maps[len(op.inputs) + index]], [PARALLEL] * len(kept)
                 )
                 result.attributes.update(op.attributes)
                 operations.extend([empty, result])

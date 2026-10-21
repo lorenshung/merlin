@@ -51,12 +51,12 @@ def cpu_floor_wrap(proof, width):
 
 
 def rewrite_integer_divisions(module, *, wrapping_floor_widths=()):
-    from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import ArrayAttr, IntegerAttr, IntegerType, TensorType
-    from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import IntegerAttr, IntegerType, TensorType
     from xdsl.rewriter import Rewriter
 
+    from merlin.llvmlower import _ir
+    from merlin.llvmlower._ir import constants
     from merlin.llvmlower.floating_component_ir import point
 
     bounds, proofs = {}, []
@@ -80,7 +80,8 @@ def rewrite_integer_divisions(module, *, wrapping_floor_widths=()):
         if arg not in op.body.block.args[: len(op.inputs)]:
             continue
         index = op.body.block.args.index(arg)
-        source, amap = op.inputs[index], list(op.get_indexing_maps())[index]
+        maps = list(op.get_indexing_maps())
+        source, amap = op.inputs[index], maps[index]
         wide = IntegerType(256)
         multiplier, shift = reciprocal(dtype.width.data, divisor)
         operations = []
@@ -92,64 +93,47 @@ def rewrite_integer_divisions(module, *, wrapping_floor_widths=()):
 
         packed = point([source], TensorType(wide, source.type.get_shape()), magnitude, operations)
         bounds[packed] = 1 << (dtype.width.data - 1)
-        empty = tensor.EmptyOp([], TensorType(wide, op.results[0].type.get_shape()))
-        block = Block(arg_types=[wide, wide])
-        constant = arith.ConstantOp(IntegerAttr(multiplier, wide))
-        product = arith.MuliOp(block.args[0], constant.result)
-        block.add_ops([constant, product, L.YieldOp(product.result)])
-        integer = L.GenericOp(
-            inputs=[packed],
-            outputs=[empty.tensor],
-            body=Region(block),
-            indexing_maps=ArrayAttr([amap, list(op.get_indexing_maps())[-1]]),
-            iterator_types=op.get_iterator_types(),
-            result_types=[empty.tensor.type],
+        integer = _ir.point(
+            [packed],
+            TensorType(wide, op.results[0].type.get_shape()),
+            lambda args, emit: emit(arith.MuliOp(args[0], emit(arith.ConstantOp(IntegerAttr(multiplier, wide))))),
+            operations,
+            maps=[amap, maps[-1]],
+            iterators=op.get_iterator_types(),
         )
-        operations.extend([empty, integer])
-        bounds[integer.results[0]] = (1 << (dtype.width.data - 1)) * multiplier
-        output = tensor.EmptyOp([], op.results[0].type)
-        block = Block(arg_types=[wide, dtype, dtype])
+        bounds[integer] = (1 << (dtype.width.data - 1)) * multiplier
 
-        def emit(child):
-            block.add_op(child)
-            return child.results[0]
+        def quotient(args, emit):
+            c = constants(emit, wide)
+            original = emit(arith.ExtSIOp(args[1], wide))
+            negative = emit(arith.CmpiOp(original, c(0), "slt"))
+            n = emit(arith.SelectOp(negative, emit(arith.SubiOp(c(0), original)), original))
+            q = emit(arith.ShRUIOp(args[0], c(shift)))
+            excess = emit(arith.CmpiOp(emit(arith.MuliOp(q, c(abs(divisor)))), n, "ugt"))
+            q = emit(arith.SubiOp(q, emit(arith.SelectOp(excess, c(1), c(0)))))
+            signed = emit(arith.SelectOp(negative, emit(arith.SubiOp(c(0), q)), q))
+            if divisor < 0:
+                signed = emit(arith.SubiOp(c(0), signed))
+            remainder = emit(arith.SubiOp(original, emit(arith.MuliOp(signed, c(divisor)))))
+            result = signed
+            if scalar.name == "arith.remsi":
+                result = remainder
+            elif scalar.name == "arith.floordivsi":
+                residual = emit(arith.CmpiOp(remainder, c(0), "ne"))
+                sign_differs = emit(arith.CmpiOp(original, c(0), "sge" if divisor < 0 else "slt"))
+                adjust = emit(arith.AndIOp(residual, sign_differs))
+                result = emit(arith.SubiOp(signed, emit(arith.SelectOp(adjust, c(1), c(0)))))
+            return emit(arith.TruncIOp(result, dtype))
 
-        def c(value):
-            return emit(arith.ConstantOp(IntegerAttr(value, wide)))
-
-        original = emit(arith.ExtSIOp(block.args[1], wide))
-        negative = emit(arith.CmpiOp(original, c(0), "slt"))
-        n = emit(arith.SelectOp(negative, emit(arith.SubiOp(c(0), original)), original))
-        q = emit(arith.ShRUIOp(block.args[0], c(shift)))
-        excess = emit(arith.CmpiOp(emit(arith.MuliOp(q, c(abs(divisor)))), n, "ugt"))
-        q = emit(arith.SubiOp(q, emit(arith.SelectOp(excess, c(1), c(0)))))
-        signed = emit(arith.SelectOp(negative, emit(arith.SubiOp(c(0), q)), q))
-        if divisor < 0:
-            signed = emit(arith.SubiOp(c(0), signed))
-        remainder = emit(arith.SubiOp(original, emit(arith.MuliOp(signed, c(divisor)))))
-        result = signed
-        if scalar.name == "arith.remsi":
-            result = remainder
-        elif scalar.name == "arith.floordivsi":
-            residual = emit(arith.CmpiOp(remainder, c(0), "ne"))
-            sign_differs = emit(arith.CmpiOp(original, c(0), "sge" if divisor < 0 else "slt"))
-            adjust = emit(arith.AndIOp(residual, sign_differs))
-            result = emit(arith.SubiOp(signed, emit(arith.SelectOp(adjust, c(1), c(0)))))
-        result = emit(arith.TruncIOp(result, dtype))
-        block.add_op(L.YieldOp(result))
-        readout = L.GenericOp(
-            inputs=[integer.results[0], source],
-            outputs=[output.tensor],
-            body=Region(block),
-            indexing_maps=ArrayAttr([list(op.get_indexing_maps())[-1], amap, list(op.get_indexing_maps())[-1]]),
-            iterator_types=op.get_iterator_types(),
-            result_types=[output.tensor.type],
+        result = point(
+            [integer, source],
+            op.results[0].type,
+            quotient,
+            operations,
+            maps=[maps[-1], amap, maps[-1]],
+            iterators=op.get_iterator_types(),
         )
-        from xdsl.dialects.builtin import UnitAttr
-
-        readout.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
-        operations.extend([output, readout])
-        Rewriter.replace_op(op, operations, [readout.results[0]])
+        Rewriter.replace_op(op, operations, [result])
         proofs.append(
             dict(
                 form="full_dtype_literal_quotient",

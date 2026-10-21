@@ -156,34 +156,14 @@ def propagation_source(op, source_grid):
 
 def aggregate_overlay(propagation, fallback, operations):
     """Select special words only; every finite output retains its device result."""
-    from xdsl.dialects import arith, tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr
-    from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
-    from xdsl.ir.affine import AffineMap
+    from xdsl.dialects import arith
 
+    from merlin.llvmlower._ir import point
     from merlin.llvmlower.ieee_pointwise import special
 
     operations.append(propagation)
-    empty = tensor.EmptyOp([], fallback.type)
-    block = Block(arg_types=[fallback.type.element_type] * 3)
 
-    def emit(operation):
-        block.add_op(operation)
-        return operation.results[0]
+    def select(args, emit):
+        return emit(arith.SelectOp(special(args[0], emit), args[0], args[1]))
 
-    affected = special(block.args[0], emit)
-    selected = emit(arith.SelectOp(affected, block.args[0], block.args[1]))
-    block.add_op(L.YieldOp(selected))
-    rank = len(fallback.type.get_shape())
-    identity = AffineMapAttr(AffineMap.identity(rank))
-    final = L.GenericOp(
-        inputs=[propagation.results[0], fallback],
-        outputs=[empty.tensor],
-        body=Region(block),
-        indexing_maps=ArrayAttr([identity] * 3),
-        iterator_types=ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * rank),
-        result_types=[fallback.type],
-    )
-    operations.extend([empty, final])
-    return final.results[0]
+    return point([propagation.results[0], fallback], fallback.type, select, operations)

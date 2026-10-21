@@ -22,9 +22,7 @@ CONVERSIONS = {"arith.sitofp", "arith.uitofp", "arith.extui", "arith.extsi", "ar
 
 def _elementwise_root(function, source):
     """The single all-parallel identity-map generic reading only the source (plus literal inputs)."""
-    from xdsl.dialects.builtin import AffineMapAttr
-    from xdsl.ir.affine import AffineMap
-
+    from merlin.llvmlower._ir import identity
     from merlin.targetgen.closed_scalar import literal
 
     generics = [op for op in function.body.block.ops if op.name == "linalg.generic"]
@@ -34,7 +32,7 @@ def _elementwise_root(function, source):
     if len(root.results) != 1 or any(it.data.value != "parallel" for it in root.get_iterator_types()):
         return None
     rank = len(root.results[0].type.get_shape())
-    if any(m != AffineMapAttr(AffineMap.identity(rank)) for m in root.get_indexing_maps()):
+    if any(m != identity(rank) for m in root.get_indexing_maps()):
         return None
     runtime = [i for i, _ in enumerate(root.inputs) if literal(root.body.block.args[i]) is None]
     if len(runtime) != 1 or root.inputs[runtime[0]] is not source:
@@ -174,8 +172,9 @@ def classify_complex(function, result):
     first = body.args.index(select.operands[1 if predicate == 0 else 2])
     components = [final.inputs[first], final.inputs[1 - first]]  # real, imaginary
     values = []
-    from xdsl.dialects.builtin import AffineMapAttr
-    from xdsl.ir.affine import AffineDimExpr, AffineMap
+    from xdsl.ir.affine import AffineDimExpr
+
+    from merlin.llvmlower._ir import identity
 
     rank = len(shape) - 1
     leading = [AffineDimExpr(i) for i in range(rank)]
@@ -186,7 +185,7 @@ def classify_complex(function, result):
         owner = component.owner
         if op_name(owner) != "linalg.generic" or any(it.data.value != "parallel" for it in owner.get_iterator_types()):
             return None
-        if any(m != AffineMapAttr(AffineMap.identity(rank)) for m in owner.get_indexing_maps()):
+        if any(m != identity(rank) for m in owner.get_indexing_maps()):
             return None  # An elementwise component map; a reversal or gather is not a copy.
         projections = [_projection(v, argument) for v in owner.inputs]
         if any(p is None for p in projections):
@@ -211,20 +210,12 @@ def classify_complex(function, result):
 
 def specialize(directory, report):
     from xdsl.dialects import arith, func, tensor
-    from xdsl.dialects.builtin import (
-        AffineMapAttr,
-        ArrayAttr,
-        FloatAttr,
-        IntegerAttr,
-        IntegerType,
-        TensorType,
-    )
-    from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
-    from xdsl.ir.affine import AffineMap
+    from xdsl.dialects.builtin import FloatAttr, IntegerAttr, IntegerType, TensorType
+    from xdsl.ir import Block
     from xdsl.rewriter import Rewriter
 
     from merlin.frontends.linalg_mlir import parse_mlir_file
+    from merlin.llvmlower._ir import point
 
     records = [r for r in report.get("cases", ()) if r.get("status") == "bundled"]
     if len(records) != 1:
@@ -284,7 +275,9 @@ def specialize(directory, report):
     elif family == "fill":
         if isinstance(value, float) and not math.isfinite(value):
             return None
-        attr = IntegerAttr(int(value), element) if isinstance(element, IntegerType) else FloatAttr(float(value), element)
+        attr = (
+            IntegerAttr(int(value), element) if isinstance(element, IntegerType) else FloatAttr(float(value), element)
+        )
         literal_op = arith.ConstantOp(attr)
         filled = tensor.SplatOp(literal_op.result, [], result_type)
         operations.extend([literal_op, filled])
@@ -292,36 +285,29 @@ def specialize(directory, report):
         family_name = "uniform_literal_fill"
     else:
         source_element = source_type.element_type
-        destination = tensor.EmptyOp([], result_type)
-        scalar = Block(arg_types=[source_element, element])
-        converted = scalar.args[0]
+        cast = None
         if value is not None:
             # Re-emit the program's own conversion chain unchanged.
-            for op in value:
-                conversion = op.clone({op.operands[0]: converted})
-                scalar.add_op(conversion)
-                converted = conversion.results[0]
+            if (value[-1].results[0].type if value else source_element) != element:
+                return None
         elif source_element != element:
             # Boolean-domain copy: the evaluated table is exactly 0 -> +0 and 1 -> 1.
             if not boolean or not isinstance(source_element, IntegerType):
                 return None
-            conversion = (arith.ExtUIOp if isinstance(element, IntegerType) else arith.UIToFPOp)(converted, element)
-            scalar.add_op(conversion)
-            converted = conversion.result
-        if converted.type != element:
-            return None
-        scalar.add_op(L.YieldOp(converted))
-        identity = AffineMapAttr(AffineMap.identity(len(result_type.get_shape())))
-        copied = L.GenericOp(
-            inputs=[block.args[0]],
-            outputs=[destination.tensor],
-            body=Region(scalar),
-            indexing_maps=ArrayAttr([identity, identity]),
-            iterator_types=ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * len(result_type.get_shape())),
-            result_types=[result_type],
+            cast = arith.ExtUIOp if isinstance(element, IntegerType) else arith.UIToFPOp
+
+        def convert(args, emit):
+            converted = args[0]
+            for op in value or ():
+                converted = emit(op.clone({op.operands[0]: converted}))
+            return emit(cast(converted, element)) if cast else converted
+
+        result = point(
+            [block.args[0]],
+            result_type,
+            convert,
+            operations,
         )
-        operations.extend([destination, copied])
-        result = copied.results[0]
         family_name = "storage_copy_or_declared_conversion"
     returned = [None] * len(outputs)
     returned[indices[0]] = result

@@ -1,36 +1,14 @@
 """Exact host preparation for finite IEEE component producers."""
 
-from xdsl.dialects import arith, tensor
-from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, IntegerAttr, IntegerType, UnitAttr
-from xdsl.dialects.linalg import ops as L
-from xdsl.ir import Block, Region
-from xdsl.ir.affine import AffineMap
+from functools import partial
 
+from xdsl.dialects import arith
+from xdsl.dialects.builtin import IntegerAttr, IntegerType
+
+from merlin.llvmlower import _ir
 from merlin.llvmlower.fixed_point_ir import FORMAT
 
-
-def point(inputs, typ, fn, operations):
-    empty = tensor.EmptyOp([], typ)
-    block = Block(arg_types=[v.type.element_type for v in inputs] + [typ.element_type])
-
-    def emit(op):
-        block.add_op(op)
-        return op.results[0]
-
-    value = fn(block.args[:-1], emit)
-    block.add_op(L.YieldOp(value))
-    identity = AffineMapAttr(AffineMap.identity(len(typ.get_shape())))
-    generic = L.GenericOp(
-        inputs=inputs,
-        outputs=[empty.tensor],
-        body=Region(block),
-        indexing_maps=ArrayAttr([identity] * (len(inputs) + 1)),
-        iterator_types=ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * len(typ.get_shape())),
-        result_types=[typ],
-    )
-    generic.attributes["merlin.exact_host_arithmetic"] = UnitAttr()
-    operations.extend([empty, generic])
-    return generic.results[0]
+point = partial(_ir.point, host=True)
 
 
 def pack_ieee_integer(value, exponent, integer_type, emit):

@@ -131,33 +131,17 @@ def prove(op):
 
 def expose_device_transport(module):
     """Make every proved word boundary consume real native byte movement."""
-    from xdsl.dialects import tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr
-    from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
-    from xdsl.ir.affine import AffineMap
+    from merlin.llvmlower._ir import copy
 
     proofs = []
     for op in list(module.walk()):
         proof = prove(op)
         if proof is None:
             continue
-        source = op.inputs[proof["runtime_input"]]
-        empty = tensor.EmptyOp([], source.type)
-        body = Block(arg_types=[source.type.element_type] * 2)
-        body.add_op(L.YieldOp(body.args[0]))
-        identity = AffineMapAttr(AffineMap.identity(len(source.type.get_shape())))
-        copied = L.GenericOp(
-            inputs=[source],
-            outputs=[empty.tensor],
-            body=Region(body),
-            indexing_maps=ArrayAttr([identity, identity]),
-            result_types=[source.type],
-            iterator_types=ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * len(source.type.get_shape())),
-        )
-        op.parent_block().insert_ops_before([empty, copied], op)
+        operations = []
         operands = list(op.operands)
-        operands[proof["runtime_input"]] = copied.results[0]
+        operands[proof["runtime_input"]] = copy(op.inputs[proof["runtime_input"]], operations)
+        op.parent_block().insert_ops_before(operations, op)
         op.operands = operands
         proofs.append(proof)
     return proofs

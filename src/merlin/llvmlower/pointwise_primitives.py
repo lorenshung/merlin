@@ -3,11 +3,11 @@
 
 def expose_pointwise_primitives(module, *, integer_boundaries=False):
     from xdsl.dialects import tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, TensorType
+    from xdsl.dialects.builtin import TensorType
     from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
-    from xdsl.ir.affine import AffineMap
     from xdsl.rewriter import Rewriter
+
+    from merlin.llvmlower._ir import identity, point
 
     allowed = {
         "arith.constant",
@@ -66,7 +66,8 @@ def expose_pointwise_primitives(module, *, integer_boundaries=False):
             and "merlin.exact_host_arithmetic" not in op.attributes
             and any(child.name in integer_casts for child in body.ops)
             and all(
-                child.name in integer_casts | {"arith.constant", "arith.addi", "arith.subi", "arith.muli", "linalg.yield"}
+                child.name
+                in integer_casts | {"arith.constant", "arith.addi", "arith.subi", "arith.muli", "linalg.yield"}
                 for child in body.ops
             )
         )
@@ -74,27 +75,30 @@ def expose_pointwise_primitives(module, *, integer_boundaries=False):
             # This late pass must not expose generated IEEE integer RNE or
             # quotient plumbing as new data arithmetic/device producers.
             continue
-        if not any(
-            child.name
-            in {
-                "arith.addf",
-                "arith.subf",
-                "arith.mulf",
-                "arith.divf",
-                "arith.negf",
-                "arith.extf",
-                "arith.truncf",
-                "arith.sitofp",
-                "arith.uitofp",
-                "math.fma",
-                "arith.divsi",
-                "arith.divui",
-                "arith.remsi",
-                "arith.remui",
-                "arith.floordivsi",
-            }
-            for child in body.ops
-        ) and not closed_integer:
+        if (
+            not any(
+                child.name
+                in {
+                    "arith.addf",
+                    "arith.subf",
+                    "arith.mulf",
+                    "arith.divf",
+                    "arith.negf",
+                    "arith.extf",
+                    "arith.truncf",
+                    "arith.sitofp",
+                    "arith.uitofp",
+                    "math.fma",
+                    "arith.divsi",
+                    "arith.divui",
+                    "arith.remsi",
+                    "arith.remui",
+                    "arith.floordivsi",
+                }
+                for child in body.ops
+            )
+            and not closed_integer
+        ):
             # Keep generated integer RNE/bit plumbing intact, including its
             # SSA-bound finite grid. Only source floating boundaries split.
             continue
@@ -136,9 +140,9 @@ def expose_pointwise_primitives(module, *, integer_boundaries=False):
         if not has_numeric_data and not closed_integer:
             continue
         shape = op.results[0].type.get_shape()
-        identity = AffineMapAttr(AffineMap.identity(len(shape)))
+        out_map = identity(len(shape))
         maps = list(op.get_indexing_maps())
-        if maps[-1] != identity:
+        if maps[-1] != out_map:
             continue
         values = {arg: (value, maps[i]) for i, (arg, value) in enumerate(zip(body.args, op.inputs))}
         operations = []
@@ -150,32 +154,26 @@ def expose_pointwise_primitives(module, *, integer_boundaries=False):
                 literal = child.clone()
                 splat = tensor.SplatOp(literal.results[0], [], TensorType(literal.results[0].type, shape))
                 operations.extend([literal, splat])
-                values[child.results[0]] = splat.result, identity
+                values[child.results[0]] = splat.result, out_map
                 continue
             if any(value not in values for value in child.operands):
                 valid = False
                 break
             inputs = [values[value][0] for value in child.operands]
-            typ = TensorType(child.results[0].type, shape)
-            empty = tensor.EmptyOp([], typ)
-            block = Block(arg_types=[value.type.element_type for value in inputs] + [typ.element_type])
-            scalar = child.clone(value_mapper=dict(zip(child.operands, block.args)))
-            block.add_ops([scalar, L.YieldOp(scalar.results[0])])
-            generic = L.GenericOp(
-                inputs=inputs,
-                outputs=[empty.tensor],
-                body=Region(block),
-                indexing_maps=ArrayAttr([values[value][1] for value in child.operands] + [identity]),
-                iterator_types=op.get_iterator_types(),
-                result_types=[typ],
+            result = point(
+                inputs,
+                TensorType(child.results[0].type, shape),
+                lambda args, emit: emit(child.clone(value_mapper=dict(zip(child.operands, args)))),
+                operations,
+                maps=[values[value][1] for value in child.operands] + [out_map],
+                iterators=op.get_iterator_types(),
             )
-            generic.attributes.update(op.attributes)
-            operations.extend([empty, generic])
-            values[child.results[0]] = generic.results[0], identity
+            result.owner.attributes.update(op.attributes)
+            values[child.results[0]] = result, out_map
         if not valid or body.last_op.operands[0] not in values:
             continue
         result, result_map = values[body.last_op.operands[0]]
-        if result_map != identity or result.type != op.results[0].type:
+        if result_map != out_map or result.type != op.results[0].type:
             continue
         Rewriter.replace_op(op, operations, [result])
         changed += 1

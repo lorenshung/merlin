@@ -4,12 +4,11 @@
 def expose_static_reshape_movement(module):
     from math import prod
 
-    from xdsl.dialects import tensor
-    from xdsl.dialects.builtin import AffineMapAttr, ArrayAttr, DenseIntOrFPElementsAttr, TensorType
-    from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block, Region
+    from xdsl.dialects.builtin import AffineMapAttr, DenseIntOrFPElementsAttr, TensorType
     from xdsl.ir.affine import AffineConstantExpr, AffineDimExpr, AffineMap
     from xdsl.rewriter import Rewriter
+
+    from merlin.llvmlower._ir import identity, point
 
     changed = 0
     for op in list(module.walk()):
@@ -36,20 +35,15 @@ def expose_static_reshape_movement(module):
         for axis in range(len(after)):
             flat = flat + AffineDimExpr(axis) * prod(after[axis + 1 :])
         indices = tuple((flat // prod(before[axis + 1 :])) % extent for axis, extent in enumerate(before))
-        destination = tensor.EmptyOp([], result.type)
-        block = Block(arg_types=[source.type.element_type, result.type.element_type])
-        block.add_op(L.YieldOp(block.args[0]))
-        selected = L.GenericOp(
-            inputs=[source],
-            outputs=[destination.tensor],
-            body=Region(block),
-            indexing_maps=ArrayAttr(
-                [AffineMapAttr(AffineMap(len(after), 0, indices)), AffineMapAttr(AffineMap.identity(len(after)))]
-            ),
-            iterator_types=ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)] * len(after)),
-            result_types=[result.type],
+        operations = []
+        selected = point(
+            [source],
+            result.type,
+            lambda args, emit: args[0],
+            operations,
+            maps=[AffineMapAttr(AffineMap(len(after), 0, indices)), identity(len(after))],
         )
-        selected.attributes.update(op.attributes)
-        Rewriter.replace_op(op, [destination, selected], [selected.results[0]])
+        selected.owner.attributes.update(op.attributes)
+        Rewriter.replace_op(op, operations, [selected])
         changed += 1
     return changed

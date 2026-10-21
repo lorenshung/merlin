@@ -9,12 +9,10 @@ opaque. Pure value clients need only the selected element's storage bits.
 def lower_captured_bitcast_views(module, metadata):
     import hashlib,json
     from pathlib import Path
-    from xdsl.dialects import arith,tensor
-    from xdsl.dialects.builtin import AffineMapAttr,ArrayAttr,TensorType,IntegerType,Float16Type,BFloat16Type,Float32Type,Float64Type
-    from xdsl.dialects.linalg import ops as L
-    from xdsl.ir import Block,Region
-    from xdsl.ir.affine import AffineMap
+    from xdsl.dialects import arith
+    from xdsl.dialects.builtin import TensorType,IntegerType,Float16Type,BFloat16Type,Float32Type,Float64Type
     from xdsl.rewriter import Rewriter
+    from merlin.llvmlower._ir import point
     # This normalization is for immutable tensor-level capture, before any
     # memory bridge can expose storage aliases or writes behind an SSA value.
     if any(op.name.startswith(('memref.','bufferization.')) for op in module.walk()):return 0
@@ -62,12 +60,9 @@ def lower_captured_bitcast_views(module, metadata):
         callee=call.callee.string_value()
         decl=next((o for o in module.body.block.ops if o.name=='func.func' and o.sym_name.data==callee),None)
         if decl is None or decl.body.blocks:continue
-        shape=src.get_shape();identity=AffineMapAttr(AffineMap.identity(len(shape)))
-        empty=tensor.EmptyOp([],dst);block=Block(arg_types=[src.element_type,dst.element_type]);cast=arith.BitcastOp(block.args[0],dst.element_type)
-        block.add_ops([cast,L.YieldOp(cast.result)])
-        generic=L.GenericOp(inputs=[call.operands[0]],outputs=[empty.tensor],body=Region(block),indexing_maps=ArrayAttr([identity,identity]),iterator_types=ArrayAttr([L.IteratorTypeAttr(L.IteratorType.PARALLEL)]*len(shape)),result_types=[dst])
-        generic.attributes.update(call.attributes)
-        Rewriter.replace_op(call,[empty,generic],list(generic.results));lowered.add(callee);count+=1
+        ops=[];result=point([call.operands[0]],dst,lambda args,emit:emit(arith.BitcastOp(args[0],dst.element_type)),ops)
+        result.owner.attributes.update(call.attributes)
+        Rewriter.replace_op(call,ops,[result]);lowered.add(callee);count+=1
     remaining={o.callee.string_value() for o in module.walk() if o.name=='func.call'}
     for op in list(module.body.block.ops):
         if op.name=='func.func' and op.sym_name.data in lowered-remaining and not op.body.blocks:Rewriter.erase_op(op)
