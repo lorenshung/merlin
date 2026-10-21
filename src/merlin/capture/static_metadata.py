@@ -1,18 +1,15 @@
 """Specialize pure metadata queries under the static capture input ABI."""
 
-STATIC_METADATA_QUERIES = frozenset(
-    f"aten.{name}" for name in (
-        "sym_numel.default", "sym_size.int", "sym_stride.int",
-        "sym_storage_offset.default", "sym_is_contiguous.default",
-    )
-)
-
 
 def specialize_static_metadata(model, inputs):
     """Fold a metadata-only FX graph from input descriptors, never tensor values.
 
-    Capture fixes shapes, strides and offsets. Keep every original input in the
-    graph so normal boundary observations and alias checks still apply. Mixed
+    Capture fixes shapes, strides and offsets. A call that reads only graph
+    inputs is a descriptor query when it evaluates to an int or bool on meta
+    tensors with the same descriptors: a meta tensor has no data, so a
+    data-dependent call cannot evaluate. After folding, no call may read an
+    input or draw seeded randomness. Keep every original input in the graph so
+    normal boundary observations and alias checks still apply. Mixed
     data/metadata programs retain the ordinary frontend path.
     """
     import copy
@@ -20,35 +17,35 @@ def specialize_static_metadata(model, inputs):
     import torch
     from torch.fx.node import map_arg
 
-    queries = {getattr(getattr(torch.ops.aten, name.split(".")[1]), name.split(".")[2])
-               for name in STATIC_METADATA_QUERIES}
     try:
         graph = torch.fx.symbolic_trace(copy.deepcopy(model))
     except (RuntimeError, TypeError, ValueError, torch.fx.proxy.TraceError):
         return model, None
     nodes = list(graph.graph.nodes)
-    calls = [node for node in nodes if node.op == "call_function"]
+    placeholders = [node for node in nodes if node.op == "placeholder"]
     if (
-        not any(node.target in queries for node in calls)
-        or any(node.op not in {"placeholder", "call_function", "output"} for node in nodes)
-        or any(node.target not in queries | {torch.ops.aten.scalar_tensor.default} for node in calls)
+        any(node.op not in {"placeholder", "call_function", "output"} for node in nodes)
+        or len(placeholders) != len(inputs)
+        or not all(isinstance(value, torch.Tensor) for value in inputs)
     ):
         return model, None
-    placeholders = [node for node in nodes if node.op == "placeholder"]
-    if len(placeholders) != len(inputs) or not all(isinstance(value, torch.Tensor) for value in inputs):
-        return model, None
-    arguments = dict(zip(placeholders, inputs, strict=True))
+
+    def descriptor(value):
+        shape, stride, offset = value.shape, value.stride(), value.storage_offset()
+        span = offset + (1 + sum((n - 1) * s for n, s in zip(shape, stride)) if value.numel() else 0)
+        return torch.empty(span, dtype=value.dtype, device="meta").as_strided(shape, stride, offset)
+
+    meta = {node: descriptor(value) for node, value in zip(placeholders, inputs, strict=True)}
     folded = []
-    for node in calls:
-        if node.target not in queries:
+    for node in [node for node in nodes if node.op == "call_function"]:
+        if not any(source in meta for source in node.all_input_nodes):
             continue
-        # Only direct input descriptors have authority here. No tensor producer
-        # is evaluated or inferred from its sealed expected result.
-        if not node.args or node.args[0] not in arguments:
+        if not set(node.all_input_nodes) <= meta.keys():
             return model, None
-        args = map_arg(node.args, arguments.__getitem__)
-        kwargs = map_arg(node.kwargs, arguments.__getitem__)
-        value = node.target(*args, **kwargs)
+        try:
+            value = node.target(*map_arg(node.args, meta.__getitem__), **map_arg(node.kwargs, meta.__getitem__))
+        except (RuntimeError, NotImplementedError, TypeError, ValueError):
+            return model, None
         if type(value) not in {int, bool}:
             return model, None
         folded.append({"operator": str(node.target), "value": value})
@@ -56,6 +53,13 @@ def specialize_static_metadata(model, inputs):
             user.args = map_arg(user.args, lambda arg: value if arg is node else arg)
             user.kwargs = map_arg(user.kwargs, lambda arg: value if arg is node else arg)
         graph.graph.erase_node(node)
+    seeded = torch.Tag.nondeterministic_seeded
+    if (
+        not folded
+        or any(node.users for node in placeholders)
+        or any(seeded in getattr(node.target, "tags", ()) for node in graph.graph.nodes if node.op == "call_function")
+    ):
+        return model, None
     graph.graph.lint()
     graph.recompile()
     return graph, {

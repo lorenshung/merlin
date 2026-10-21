@@ -42,9 +42,6 @@ def loader_source(case: dict[str, Any], *, rng_seed: int | None = None) -> str:
     """
 
     storage_plan = native_input_storage_plan(case["overload"], case["arguments"])
-    from merlin.capture.static_metadata import STATIC_METADATA_QUERIES
-
-    static_metadata_only = case["overload"] in STATIC_METADATA_QUERIES
     seed_statement = "" if rng_seed is None else f"torch.manual_seed({int(rng_seed)})"
     tensors: list[dict[str, Any]] = []
     arguments = _split_tensor_documents(case["arguments"], tensors)
@@ -83,7 +80,6 @@ import torch
 from torch import nn
 
 _DOCUMENT = json.loads({document!r})
-STATIC_METADATA_ONLY = {static_metadata_only!r}
 
 
 def _decode(value, inputs=()):
@@ -136,6 +132,14 @@ def _op(name):
     namespace, packet, overload = name.split(".", 2)
     assert namespace == "aten"
     return getattr(getattr(torch.ops.aten, packet), overload)
+
+
+# A program whose schema results are all int/bool may be a descriptor query;
+# the capture worker folds it only if it evaluates on data-free meta tensors.
+STATIC_METADATA_ONLY = all(
+    isinstance(result.type, (torch._C.IntType, torch._C.BoolType, torch._C.SymIntType, torch._C.SymBoolType))
+    for result in _op(_DOCUMENT["overload"])._schema.returns
+)
 
 
 class Model(nn.Module):

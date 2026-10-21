@@ -42,3 +42,36 @@ class Mixed(torch.nn.Module):
 original=Mixed()
 assert specialize_static_metadata(original,(sources[0],)) == (original,None)
 ''')
+
+
+def test_descriptor_queries_are_recognized_by_meta_evaluation_not_by_name():
+    _torch('''
+import torch
+from merlin.capture.static_metadata import specialize_static_metadata
+from merlin.targetgen.core_aten_capture import loader_source
+x=torch.arange(24.).reshape(3,8)[:,1::2]
+def model(call):
+ class Model(torch.nn.Module):
+  def forward(self,x): return torch.ops.aten.scalar_tensor.default(call(x))
+ return Model()
+# Descriptor-only results fold whatever the operator is called.
+for call in (torch.ops.aten.dim.default, torch.ops.aten.numel.default, torch.ops.aten.is_contiguous.default,
+             lambda x: torch.ops.aten.size.int(x,1)):
+ folded,receipt=specialize_static_metadata(model(call),(x,))
+ assert receipt and len(receipt["queries"])==1 and torch.equal(folded(x),model(call)(x)), call
+# A data-dependent scalar, seeded randomness or a data result never folds.
+for call in (torch.ops.aten._local_scalar_dense.default, torch.ops.aten.is_nonzero.default):
+ m=model(call) if call is not torch.ops.aten.is_nonzero.default else model(lambda x: call(x[0,0]))
+ assert specialize_static_metadata(m,(x,))[1] is None, call
+class Seeded(torch.nn.Module):
+ def forward(self,x): return torch.ops.aten.sym_numel.default(x)+torch.rand(())
+assert specialize_static_metadata(Seeded(),(x,))[1] is None
+# The capture loader selects the fold from the operator schema, not a roster.
+def flag(overload):
+ tensor=dict(kind="tensor",dtype="float32",shape=[2],stride=[1],storage_offset=0,values=[1.,2.],requires_grad=False)
+ namespace={}
+ exec(loader_source(dict(overload=overload,arguments=dict(args=dict(kind="tuple",items=[tensor]),kwargs={}),expected=1)),namespace)
+ return namespace["STATIC_METADATA_ONLY"]
+assert flag("aten.dim.default") and flag("aten.sym_numel.default") and flag("aten.is_contiguous.default")
+assert not flag("aten._local_scalar_dense.default") and not flag("aten.abs.default")
+''')
