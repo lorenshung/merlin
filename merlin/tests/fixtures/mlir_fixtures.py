@@ -166,3 +166,24 @@ def emitter(block):
     """An ``emit`` callback that appends each op to ``block`` and returns its result."""
     return lambda op: (block.add_op(op), op.results[0])[1]
 
+
+def native_library(module, tmp_path):
+    """Lower an xDSL module with the normal host pipeline, build it, and load its entry point."""
+    import hashlib
+    import subprocess
+
+    from merlin.llvmlower.abi import HostModel
+    from merlin.llvmlower.codegen import mlir_runtime_c
+    from merlin.llvmlower.pipeline import lower_to_llvm_ir
+    from merlin.llvmlower.toolchain import clang
+    from merlin.xdsl_dialects._common import text
+
+    llvm = lower_to_llvm_ir(text(module, generic=True), workdir=tmp_path / "lower", vectorize=False)
+    src = tmp_path / "model.ll"
+    src.write_text(llvm)
+    obj, lib = src.with_suffix(".o"), tmp_path / f"model_{hashlib.sha256(llvm.encode()).hexdigest()}.so"
+    subprocess.run([str(clang()), "-O2", "-fPIC", "-c", str(src), "-o", str(obj)], check=True, capture_output=True)
+    runtime = ["cc", "-fPIC", "-shared", str(obj), str(mlir_runtime_c()), "-lm", "-o", str(lib)]
+    subprocess.run(runtime, check=True, capture_output=True)
+    model = HostModel.load(str(lib))
+    return lambda *arrays: model([(a.ctypes.data, a.shape) for a in arrays])

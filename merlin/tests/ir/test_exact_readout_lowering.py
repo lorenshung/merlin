@@ -6,7 +6,7 @@ from fractions import Fraction
 import numpy as np
 import pytest
 from exact_readout_source import build_readout
-from mlir_fixtures import run_block
+from mlir_fixtures import native_library, run_block
 
 
 def fixture(scales, *, size=513, floating=False, bias=False, **kwargs):
@@ -133,15 +133,7 @@ def test_float_readout_bits(scale, bias):
 
 @pytest.mark.parametrize("floating,bias", [(False, False), (True, False), (True, True)])
 def test_native_readout_against_rational_reference(tmp_path, floating, bias):
-    import hashlib
-    import subprocess
-
-    from merlin.llvmlower.abi import HostModel
-    from merlin.llvmlower.codegen import mlir_runtime_c
-    from merlin.llvmlower.pipeline import lower_to_llvm_ir
-    from merlin.llvmlower.toolchain import clang
     from merlin.targetgen.exact_arithmetic import round_binary
-    from merlin.xdsl_dialects._common import text
 
     scales = [
         Fraction(float(np.float32(0.03))) * Fraction(float(np.float32(0.02))),
@@ -151,17 +143,7 @@ def test_native_readout_against_rational_reference(tmp_path, floating, bias):
     if not floating:
         scales = [s / Fraction(0.01) for s in scales]
     module, reader = fixture(scales, floating=floating, bias=bias)
-    llvm = lower_to_llvm_ir(text(module, generic=True), workdir=tmp_path / "lower", vectorize=False)
-    src = tmp_path / "readout.ll"
-    src.write_text(llvm)
-    obj = tmp_path / "readout.o"
-    lib = tmp_path / f"readout_{hashlib.sha256(llvm.encode()).hexdigest()}.so"
-    subprocess.run([str(clang()), "-O2", "-fPIC", "-c", str(src), "-o", str(obj)], check=True, capture_output=True)
-    subprocess.run(
-        ["cc", "-fPIC", "-shared", str(obj), str(mlir_runtime_c()), "-lm", "-o", str(lib)],
-        check=True,
-        capture_output=True,
-    )
+    run = native_library(module, tmp_path)
     rng = np.random.default_rng(141)
     data = rng.integers(-(1 << 31), 1 << 31, (513, 3), dtype=np.int32)
     data[:7] = np.array([-(1 << 31), (1 << 31) - 1, -1, 0, 1, 2, 3], dtype=np.int32)[:, None]
@@ -171,8 +153,7 @@ def test_native_readout_against_rational_reference(tmp_path, floating, bias):
         exact = int(data[ix]) * scales[ix[-1]] + (Fraction(float(biases[ix[-1]])) if bias else 0)
         expected[ix] = round_binary(exact) if floating else min(127, max(-128, round(exact)))
     actual = np.zeros_like(expected)
-    arrays = [data, *([biases] if bias else []), actual]
-    HostModel.load(str(lib))([(x.ctypes.data, x.shape) for x in arrays])
+    run(data, *([biases] if bias else []), actual)
     assert actual.tobytes() == expected.tobytes()
 
 

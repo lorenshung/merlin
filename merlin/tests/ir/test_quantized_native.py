@@ -1,13 +1,12 @@
 # ruff: noqa: E501 -- MLIR fixture operations keep one source line
 """General quantized fallback: one entry rounding and exact rational readout."""
 
-import subprocess
 from fractions import Fraction
 from pathlib import Path
 
 import numpy as np
 import pytest
-from mlir_fixtures import pointwise
+from mlir_fixtures import native_library, pointwise
 
 from merlin.common.yaml import load_yaml
 from merlin.frontends.linalg_mlir import parse_mlir_text
@@ -59,11 +58,6 @@ def test_quantized_grading_checks_oracle_bytes_and_retains_eager_diagnostic():
 
 
 def test_full_entry_domain_and_posts_unchanged(tmp_path):
-    from merlin.llvmlower.abi import HostModel
-    from merlin.llvmlower.codegen import mlir_runtime_c
-    from merlin.llvmlower.pipeline import lower_to_llvm_ir
-    from merlin.llvmlower.toolchain import clang
-
     n = 520
     module = parse_mlir_text(f"""module {{ func.func @forward(%x:tensor<{n}xf32>) -> (tensor<{n}xf32>,tensor<{n}xf32>) attributes {{llvm.emit_c_interface}} {{
       %e=tensor.empty() : tensor<{n}xf32>
@@ -78,24 +72,12 @@ def test_full_entry_domain_and_posts_unchanged(tmp_path):
     function = next(op for op in module.walk() if op.name == "func.func")
     ret = function.body.block.last_op
     assert ret.operands[1] is function.body.block.args[0]
-    from merlin.xdsl_dialects._common import text
-
-    llvm = lower_to_llvm_ir(text(module, generic=True), workdir=tmp_path / "lower", vectorize=False)
-    ll = tmp_path / "model.ll"
-    ll.write_text(llvm)
-    obj = ll.with_suffix(".o")
-    lib = tmp_path / "model.so"
-    subprocess.run([str(clang()), "-fPIC", "-O2", "-c", str(ll), "-o", str(obj)], check=True, capture_output=True)
-    subprocess.run(
-        ["cc", "-fPIC", "-shared", str(obj), str(mlir_runtime_c()), "-lm", "-o", str(lib)],
-        check=True,
-        capture_output=True,
-    )
+    run = native_library(module, tmp_path)
     x = (np.arange(n, dtype=np.float32) - 260) / 128
     x[:8] = [np.nan, np.inf, -np.inf, -0.0, np.finfo(np.float32).max, np.finfo(np.float32).tiny, 0.5 / 64, 1.5 / 64]
     y = np.zeros(n, np.float32)
     post = np.zeros(n, np.float32)
-    HostModel.load(str(lib))([(a.ctypes.data, a.shape) for a in (x, y, post)])
+    run(x, y, post)
     from merlin.targetgen.exact_arithmetic import quantize
 
     expected = np.asarray(
@@ -331,11 +313,7 @@ def test_nan_word_overlay_is_removed_but_live_nan_is_refused():
 
 
 def test_rational_divisors_survive_layouts_until_exported_quantize(tmp_path):
-    from merlin.llvmlower.abi import HostModel
-    from merlin.llvmlower.codegen import mlir_runtime_c
     from merlin.llvmlower.floating_components import rewrite_floating_components
-    from merlin.llvmlower.pipeline import lower_to_llvm_ir
-    from merlin.llvmlower.toolchain import clang
 
     module = parse_mlir_text("""module {
       func.func @forward(%x:tensor<256xf32>) -> tensor<16x16xf32> attributes {llvm.emit_c_interface} {
@@ -381,22 +359,9 @@ def test_rational_divisors_survive_layouts_until_exported_quantize(tmp_path):
         weights.append(product.operands[1].owner.value.value.data)
         value = value.owner.operands[1]
     assert weights and set(weights) == {64}
-    from merlin.xdsl_dialects._common import text
-
-    llvm = lower_to_llvm_ir(text(module, generic=True), workdir=tmp_path / "lower", vectorize=False)
-    ll = tmp_path / "rational.ll"
-    ll.write_text(llvm)
-    obj = ll.with_suffix(".o")
-    lib = tmp_path / "rational.so"
-    subprocess.run([str(clang()), "-fPIC", "-O2", "-c", str(ll), "-o", str(obj)], check=True, capture_output=True)
-    subprocess.run(
-        ["cc", "-fPIC", "-shared", str(obj), str(mlir_runtime_c()), "-lm", "-o", str(lib)],
-        check=True,
-        capture_output=True,
-    )
     x = np.arange(-128, 128, dtype=np.float32) / 64
     y = np.zeros((16, 16), np.float32)
-    HostModel.load(str(lib))([(a.ctypes.data, a.shape) for a in (x, y)])
+    native_library(module, tmp_path)(x, y)
     expected = np.asarray(
         [min(127, max(-128, round(Fraction(2 * i, 3)))) / 64 for i in range(-128, 128)], np.float32
     ).reshape(16, 16)
