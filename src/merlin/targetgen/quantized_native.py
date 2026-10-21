@@ -48,7 +48,7 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
     ):
         return None
     module = parse_mlir_file(directory / "model.mlir")
-    from merlin.llvmlower.empty_reductions import fold_empty_reductions
+    from merlin.llvmlower.structural_folds import fold_empty_reductions
 
     fold_empty_reductions(module)
     from merlin.targetgen.entry_output_movement import expose_argument_results
@@ -56,7 +56,7 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
     # User results carry the requested output quantization even when their
     # source is an argument. Post-call observations retain original storage.
     expose_argument_results(module, report)
-    from merlin.llvmlower.singleton_folds import expose_singleton_tuple_regions
+    from merlin.llvmlower.structural_folds import expose_singleton_tuple_regions
 
     expose_singleton_tuple_regions(module)
     function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")

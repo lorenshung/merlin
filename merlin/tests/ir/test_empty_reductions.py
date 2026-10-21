@@ -3,7 +3,7 @@
 import pytest
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.empty_reductions import fold_empty_reductions
+from merlin.llvmlower.structural_folds import fold_empty_reductions
 
 
 @pytest.mark.parametrize(

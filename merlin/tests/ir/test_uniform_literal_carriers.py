@@ -4,7 +4,7 @@ import pytest
 from mlir_fixtures import assert_unchanged, returned
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.uniform_literal_carriers import expose_uniform_literal_carriers
+from merlin.llvmlower.structural_folds import expose_uniform_literal_carriers
 
 
 @pytest.mark.parametrize("element,value", [("i64", "0"), ("i1", "1"), ("f32", "-0.0"), ("f32", "0xFFC00001")])

@@ -86,7 +86,7 @@ def test_boolean_storage_carriers_remain_pure_movement():
 
 @pytest.mark.parametrize("dtype,shape,dimensions", [("i1", "", ""), ("i1", "1x", "0"), ("i64", "", "")])
 def test_single_contribution_zero_seed_reduction_is_storage_movement(dtype, shape, dimensions):
-    from merlin.llvmlower.singleton_folds import fold_singleton_reductions
+    from merlin.llvmlower.structural_folds import fold_singleton_reductions
 
     operator = "ori" if dtype == "i1" else "addi"
     literal = "false" if dtype == "i1" else "0:i64"

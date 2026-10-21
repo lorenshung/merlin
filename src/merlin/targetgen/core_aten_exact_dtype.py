@@ -129,7 +129,7 @@ def prepare_bitwise(directory, report, selection, provider, package, module):
     if any(k.startswith("prov.quant.") for op in module.walk() for k in op.attributes):
         return None
     from merlin.llvmlower.image_folds import fold_boolean_domain, fold_boolean_image_predicates, fold_boolean_unit_image
-    from merlin.llvmlower.singleton_folds import (
+    from merlin.llvmlower.structural_folds import (
         fold_singleton_carriers,
         fold_singleton_reductions,
         fold_singleton_selectors,
@@ -141,7 +141,7 @@ def prepare_bitwise(directory, report, selection, provider, package, module):
     fold_singleton_reductions(module)
     fold_singleton_selectors(module)
     fold_singleton_carriers(module)
-    from merlin.llvmlower.uniform_literal_carriers import expose_uniform_literal_carriers
+    from merlin.llvmlower.structural_folds import expose_uniform_literal_carriers
 
     expose_uniform_literal_carriers(module)
     from merlin.llvmlower.static_reshape_movement import expose_static_reshape_movement

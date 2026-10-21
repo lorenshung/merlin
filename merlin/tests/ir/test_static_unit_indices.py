@@ -4,7 +4,7 @@ import pytest
 from mlir_fixtures import assert_unchanged, returned
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.static_unit_indices import fold_static_unit_indices
+from merlin.llvmlower.structural_folds import fold_static_unit_indices
 
 
 def source(axis):

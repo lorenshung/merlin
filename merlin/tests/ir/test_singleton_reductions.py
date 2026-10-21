@@ -4,7 +4,7 @@ import pytest
 from mlir_fixtures import assert_unchanged
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.singleton_folds import fold_singleton_reductions
+from merlin.llvmlower.structural_folds import fold_singleton_reductions
 
 
 def source(element, arithmetic, seed, *, extent=1, flags=""):
@@ -57,7 +57,7 @@ def test_overflow_promises_do_not_gain_a_modular_identity_proof():
 
 @pytest.mark.parametrize("element,bits", [("i1", 1), ("i8", 8), ("i32", 32), ("i64", 64)])
 def test_boundary_normalization_preserves_the_closed_integer_identity(element, bits):
-    from merlin.llvmlower.singleton_folds import normalize_singleton_boundaries
+    from merlin.llvmlower.structural_folds import normalize_singleton_boundaries
 
     module = source(element, "maxui", 0)
     assert normalize_singleton_boundaries(module) == 1
@@ -65,7 +65,7 @@ def test_boundary_normalization_preserves_the_closed_integer_identity(element, b
 
 
 def test_boundary_normalization_retains_a_nonidentity_integer_computation():
-    from merlin.llvmlower.singleton_folds import normalize_singleton_boundaries
+    from merlin.llvmlower.structural_folds import normalize_singleton_boundaries
 
     module = source("i8", "maxsi", 0)
     assert normalize_singleton_boundaries(module) == 1

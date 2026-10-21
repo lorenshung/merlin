@@ -238,7 +238,6 @@ def normalize_closed_identities(module):
     Returns the number of folds. Shared by native preparation and by the
     floating-contract decision, which must see the same normalized program.
     """
-    from merlin.llvmlower.empty_reductions import fold_empty_reductions
     from merlin.llvmlower.image_folds import (
         fold_boolean_domain,
         fold_boolean_image_predicates,
@@ -246,13 +245,14 @@ def normalize_closed_identities(module):
         fold_integer_image_predicates,
         fold_integral_float_rounding,
     )
-    from merlin.llvmlower.singleton_folds import (
+    from merlin.llvmlower.static_masked_sums import expose_static_masked_sums
+    from merlin.llvmlower.structural_folds import (
+        fold_empty_reductions,
         fold_singleton_carriers,
         fold_singleton_reductions,
         fold_singleton_selectors,
+        fold_static_unit_indices,
     )
-    from merlin.llvmlower.static_masked_sums import expose_static_masked_sums
-    from merlin.llvmlower.static_unit_indices import fold_static_unit_indices
 
     folds = expose_static_masked_sums(module)
     folds += fold_static_unit_indices(module)
@@ -262,7 +262,7 @@ def normalize_closed_identities(module):
     folds += fold_empty_reductions(module)
     folds += fold_boolean_image_predicates(module)
     folds += fold_boolean_domain(module)
-    from merlin.llvmlower.singleton_folds import normalize_singleton_boundaries
+    from merlin.llvmlower.structural_folds import normalize_singleton_boundaries
 
     folds += normalize_singleton_boundaries(module)
     from merlin.llvmlower.image_folds import fold_nan_guarded_neutral
@@ -275,7 +275,7 @@ def normalize_closed_identities(module):
     folds += fold_singleton_selectors(module)
     folds += expose_static_masked_sums(module)
     folds += fold_singleton_carriers(module)
-    from merlin.llvmlower.unused_tensor_operands import prune_unused_tensor_inputs
+    from merlin.llvmlower.structural_folds import prune_unused_tensor_inputs
 
     folds += prune_unused_tensor_inputs(module)
     from merlin.llvmlower.image_folds import fold_ieee_identity_selectors
@@ -608,7 +608,7 @@ def _prepare_spec_int8(
                 for operation in prepared_module.walk():
                     if getattr(operation.attributes.get("prov.aten"), "data", None) == "m2m_q.quantize.default":
                         operation.attributes["merlin.quantizer_nan_storage_zero"] = UnitAttr()
-            from merlin.llvmlower.singleton_folds import fold_scalar_tensor_roundtrips
+            from merlin.llvmlower.structural_folds import fold_scalar_tensor_roundtrips
 
             scalar_carriers = fold_scalar_tensor_roundtrips(prepared_module)
             from merlin.llvmlower.quantized_guard_domain import canonicalize_quantized_affine

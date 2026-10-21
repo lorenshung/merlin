@@ -194,7 +194,7 @@ def specialize(directory, report):
     from xdsl.dialects.builtin import IntegerAttr, i1
     from xdsl.rewriter import InsertPoint, Rewriter
 
-    from merlin.llvmlower.unused_tensor_operands import prune_unused_tensor_inputs
+    from merlin.llvmlower.structural_folds import prune_unused_tensor_inputs
     from merlin.targetgen.source_primitive_effects import pure_tensor_source, single_forward
 
     found = single_forward(directory, report)

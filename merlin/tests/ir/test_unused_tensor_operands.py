@@ -3,7 +3,7 @@
 from mlir_fixtures import assert_unchanged, forward, generic, pointwise
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.unused_tensor_operands import prune_unused_tensor_inputs
+from merlin.llvmlower.structural_folds import prune_unused_tensor_inputs
 
 
 def test_unused_input_is_removed_with_its_map_and_argument():

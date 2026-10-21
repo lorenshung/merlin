@@ -1,8 +1,9 @@
-"""Closed, payload-independent folds of unit-extent (singleton) regions and carriers.
+"""Closed, payload-independent structural folds: unit extents, empty loops and carriers.
 
-Each fold proves its rewrite from the IR alone: unit loop extents, literal
-seeds and complete typed comparison cells. No tensor values are consulted.
-Unknown arithmetic, multiple runtime inputs and non-singleton reductions refuse.
+Each fold proves its rewrite from the IR alone: unit or zero loop extents,
+literal seeds, unused operands and complete typed comparison cells. No tensor
+values are consulted. Unknown arithmetic, multiple runtime inputs and
+non-singleton reductions refuse.
 """
 
 import math
@@ -12,6 +13,8 @@ from math import prod
 from xdsl.dialects import arith, tensor
 from xdsl.dialects.builtin import (
     AffineMapAttr,
+    ArrayAttr,
+    DenseArrayBase,
     DenseIntOrFPElementsAttr,
     FloatAttr,
     IndexType,
@@ -19,13 +22,15 @@ from xdsl.dialects.builtin import (
     IntegerType,
     TensorType,
     i1,
+    i32,
     i64,
 )
 from xdsl.dialects.linalg import ops as L
 from xdsl.ir import Block
-from xdsl.ir.affine import AffineConstantExpr, AffineDimExpr
+from xdsl.ir.affine import AffineConstantExpr, AffineDimExpr, AffineMap
 from xdsl.rewriter import Rewriter
 from xdsl.traits import Pure
+from xdsl.transforms.dead_code_elimination import region_dce
 
 from merlin.llvmlower._ir import PARALLEL, generic, identity, reshape
 from merlin.targetgen.closed_scalar import predicate_holds
@@ -540,4 +545,174 @@ def expose_singleton_tuple_regions(module):
         changed += 1
     if changed:
         module.verify()
+    return changed
+
+
+def fold_static_unit_indices(module):
+    """An iteration dimension of extent one has a compile-time zero coordinate."""
+    from merlin.llvmlower.uniform_numeric_literals import fold_uniform_numeric_literals
+
+    changed = 0
+    for op in list(module.walk()):
+        if op.name == "linalg.index":
+            parent = op.parent_op()
+            if getattr(parent, "name", None) != "linalg.generic":
+                continue
+            try:
+                ranges = parent.get_static_loop_ranges()
+            except (ValueError, AttributeError):
+                continue
+            axis = op.dim.value.data
+            if not 0 <= axis < len(ranges) or ranges[axis] != 1:
+                continue
+            constant = arith.ConstantOp(IntegerAttr(0, IndexType()))
+        elif op.name in {"arith.index_cast", "arith.index_castui"}:
+            source = op.operands[0].owner
+            attr = source.properties.get("value") if getattr(source, "name", None) == "arith.constant" else None
+            if (
+                not isinstance(attr, IntegerAttr)
+                or attr.value.data != 0
+                or not isinstance(op.results[0].type, IntegerType)
+            ):
+                continue
+            constant = arith.ConstantOp(IntegerAttr(0, op.results[0].type))
+        else:
+            continue
+        Rewriter.replace_op(op, [constant], [constant.result])
+        changed += 1
+    if changed:
+        region_dce(module.body)
+        changed += fold_uniform_numeric_literals(module)
+    return changed
+
+
+def fold_empty_reductions(module):
+    """Shape-only canonicalization of zero-iteration additive reductions."""
+    count = 0
+    for op in list(module.walk()):
+        if op.name not in {"linalg.generic", "linalg.reduce"} or not op.results:
+            continue
+        if op.name == "linalg.reduce":
+            seeds = [op.init]
+            empty = prod(op.input.type.get_shape()) == 0
+        else:
+            seeds = list(op.outputs)
+            try:
+                empty = any(
+                    iterator.data.value == "reduction" and extent == 0
+                    for iterator, extent in zip(op.get_iterator_types(), op.get_static_loop_ranges(), strict=True)
+                )
+            except (AttributeError, ValueError):
+                continue
+        if not empty or len(seeds) != len(op.results):
+            continue
+        if any(a.type != b.type for a, b in zip(seeds, op.results)):
+            continue
+        # No body iteration executes: the result is precisely the original
+        # seed, regardless of its dtype. No tensor payload is inspected.
+        Rewriter.replace_op(op, [], seeds)
+        count += 1
+    if count:
+        for op in list(module.walk()):
+            if op.name == "tensor.extract" and not op.indices:
+                source = op.tensor.owner
+                if getattr(source, "name", None) == "tensor.splat":
+                    Rewriter.replace_op(op, [], [source.operands[0]])
+            elif (
+                op.name == "tensor.from_elements"
+                and op.operands
+                and all(value is op.operands[0] for value in op.operands)
+            ):
+                filled = tensor.SplatOp(op.operands[0], [], op.results[0].type)
+                Rewriter.replace_op(op, [filled], [filled.result])
+    return count
+
+
+def prune_unused_tensor_inputs(module):
+    """Remove tensor operands whose scalar argument is unused by a generic region."""
+    changed = 0
+    for op in list(module.walk()):
+        if op.name != "linalg.generic" or len(op.body.blocks) != 1:
+            continue
+        n = len(op.inputs)
+        if len(op.body.block.args) != n + len(op.outputs):
+            continue
+        unused = [i for i in range(n) if not op.body.block.args[i].uses]
+        if not unused:
+            continue
+        kept = [i for i in range(n) if i not in unused]
+        maps = list(op.get_indexing_maps())
+        retained_maps = [maps[i].data for i in kept] + [m.data for m in maps[n:]]
+        if not retained_maps or any(m.num_symbols for m in retained_maps):
+            continue
+        combined = AffineMap(retained_maps[0].num_dims, 0, tuple(e for m in retained_maps for e in m.results))
+        if combined.inverse_permutation() is None:
+            continue  # An unused scalar may still define a reduction's loop domain.
+        extents = {}
+        consistent = True
+        for i in kept + list(range(n, len(op.operands))):
+            for extent, expression in zip(op.operands[i].type.get_shape(), maps[i].data.results, strict=True):
+                if isinstance(expression, AffineDimExpr):
+                    if extent < 0 or extents.get(expression.position, extent) != extent:
+                        consistent = False
+                    extents[expression.position] = extent
+        for i in unused:
+            for extent, expression in zip(op.operands[i].type.get_shape(), maps[i].data.results, strict=True):
+                if isinstance(expression, AffineDimExpr):
+                    consistent &= extent >= 0 and extents.get(expression.position) == extent
+                elif isinstance(expression, AffineConstantExpr):
+                    consistent &= 0 <= expression.value < extent
+                else:
+                    consistent = False  # No proof that the eliminated load was in bounds.
+        if not consistent:
+            continue
+        clone = op.clone()
+        for index in reversed(unused):
+            clone.body.block.erase_arg(clone.body.block.args[index])
+        clone.operands = [op.inputs[i] for i in kept] + list(op.outputs)
+        maps = list(op.get_indexing_maps())
+        clone.properties["indexing_maps"] = ArrayAttr([maps[i] for i in kept] + maps[n:])
+        clone.properties["operandSegmentSizes"] = DenseArrayBase.from_list(i32, [len(kept), len(op.outputs)])
+        Rewriter.replace_op(op, clone)
+        changed += 1
+    module.verify()
+    return changed
+
+
+def expose_uniform_literal_carriers(module):
+    """Expose shape-only carriers of uniform literal storage as uniform fills."""
+
+    def scalar(value):
+        owner = value.owner
+        if getattr(owner, "name", None) == "tensor.splat":
+            literal = owner.operands[0].owner
+            if getattr(literal, "name", None) == "arith.constant":
+                attr = literal.properties.get("value")
+                return attr if isinstance(attr, (FloatAttr, IntegerAttr)) else None
+        if getattr(owner, "name", None) == "arith.constant":
+            attr = owner.properties.get("value")
+            if isinstance(attr, DenseIntOrFPElementsAttr) and attr.is_splat():
+                return attr.get_attrs()[0]
+        return None
+
+    changed = 0
+    for op in list(module.walk()):
+        if op.name not in {"tensor.reshape", "tensor.cast"} or len(op.results) != 1:
+            continue
+        source, result = op.operands[0], op.results[0]
+        if not isinstance(source.type, TensorType) or not isinstance(result.type, TensorType):
+            continue
+        shapes = source.type.get_shape(), result.type.get_shape()
+        if any(n < 0 for shape in shapes for n in shape) or prod(shapes[0]) != prod(shapes[1]):
+            continue
+        if source.type.element_type != result.type.element_type:
+            continue
+        attr = scalar(source)
+        if attr is None:
+            continue
+        constant = arith.ConstantOp(attr)
+        filled = tensor.SplatOp(constant.result, [], result.type)
+        Rewriter.replace_op(op, [constant, filled], [filled.result])
+        changed += 1
+    module.verify()
     return changed

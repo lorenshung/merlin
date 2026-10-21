@@ -4,7 +4,7 @@ import pytest
 from mlir_fixtures import assert_unchanged, pointwise, returned
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.singleton_folds import fold_singleton_selectors
+from merlin.llvmlower.structural_folds import fold_singleton_selectors
 from merlin.targetgen.native_unit_policy import construction_evidence
 
 
@@ -127,7 +127,7 @@ def test_a_real_parallel_clamp_is_not_a_storage_selector():
 
 @pytest.mark.parametrize("floating", [False, True])
 def test_boundary_exposure_proves_a_closed_index_fill_before_splitting_its_tuple(floating):
-    from merlin.llvmlower.singleton_folds import normalize_singleton_boundaries
+    from merlin.llvmlower.structural_folds import normalize_singleton_boundaries
 
     module = source("f32", "0xFF800000", "cmpf ogt", "cmpf oeq", nan=True) if floating else source()
     assert normalize_singleton_boundaries(module) == 1
@@ -137,6 +137,6 @@ def test_boundary_exposure_proves_a_closed_index_fill_before_splitting_its_tuple
 
 
 def test_boundary_exposure_does_not_erase_repeated_index_arithmetic():
-    from merlin.llvmlower.singleton_folds import normalize_singleton_boundaries
+    from merlin.llvmlower.structural_folds import normalize_singleton_boundaries
 
     assert_unchanged(source(extent=2), normalize_singleton_boundaries)

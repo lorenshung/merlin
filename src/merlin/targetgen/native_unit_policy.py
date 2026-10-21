@@ -14,12 +14,12 @@ def construction_evidence(module, *, excluded=None, result_abi=None):
         fold_boolean_unit_image,
         fold_integer_image_predicates,
     )
-    from merlin.llvmlower.singleton_folds import (
+    from merlin.llvmlower.structural_folds import (
         fold_singleton_carriers,
         fold_singleton_reductions,
         fold_singleton_selectors,
+        fold_static_unit_indices,
     )
-    from merlin.llvmlower.static_unit_indices import fold_static_unit_indices
     from merlin.targetgen.native_construction_patterns import Payloads, dataflow
 
     # Classify the canonical arithmetic role, without mutating source bytes.
@@ -44,13 +44,12 @@ def construction_evidence(module, *, excluded=None, result_abi=None):
     )
     if candidates:
         canonical = module.clone()
-        from merlin.llvmlower.empty_reductions import fold_empty_reductions
         from merlin.llvmlower.image_folds import (
             fold_ieee_identity_selectors,
             fold_integral_image_identities,
             fold_nan_guarded_neutral,
         )
-        from merlin.llvmlower.singleton_folds import normalize_singleton_boundaries
+        from merlin.llvmlower.structural_folds import fold_empty_reductions, normalize_singleton_boundaries
 
         image_folds = (
             fold_static_unit_indices(canonical)
