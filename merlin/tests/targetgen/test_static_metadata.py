@@ -75,3 +75,18 @@ def flag(overload):
 assert flag("aten.dim.default") and flag("aten.sym_numel.default") and flag("aten.is_contiguous.default")
 assert not flag("aten._local_scalar_dense.default") and not flag("aten.abs.default")
 ''')
+
+
+def test_a_query_that_meta_tensors_answer_differently_does_not_fold():
+    _torch('''
+import torch
+from merlin.capture.static_metadata import specialize_static_metadata
+x=torch.ones(3); x.add_(1); x.add_(1)
+assert torch.ops.aten._version.default(x)==2
+class Model(torch.nn.Module):
+ def forward(self,x):
+  return torch.ops.aten.scalar_tensor.default(torch.ops.aten._version.default(x))
+model=Model()
+graph,proof=specialize_static_metadata(model,(x,))
+assert graph is model and proof is None, proof
+''')
