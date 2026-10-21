@@ -1,12 +1,15 @@
 """A comparison over Boolean conversions proves all possible source words."""
 
 import math
+import operator
 
 import pytest
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.boolean_image_predicates import fold_boolean_image_predicates
-from merlin.llvmlower.singleton_selectors import _relation
+
+# Independent of the production predicate table: IEEE cmpf on ordered operands.
+ORDERED = {"oeq": operator.eq, "one": operator.ne, "ogt": operator.gt, "olt": operator.lt, "uge": operator.ge}
 
 
 def source(predicate, threshold, *, typ="f32", conversion="uitofp", element="i1", unknown=False):
@@ -38,14 +41,11 @@ def source(predicate, threshold, *, typ="f32", conversion="uitofp", element="i1"
 
 
 @pytest.mark.parametrize("typ", ["f16", "bf16", "f32", "f64"])
-@pytest.mark.parametrize("predicate,number", [("oeq", 1), ("one", 6), ("ogt", 2), ("olt", 4), ("uge", 10)])
+@pytest.mark.parametrize("predicate", sorted(ORDERED))
 @pytest.mark.parametrize("threshold", [-1, 0, 0.5, 1, 2])
 @pytest.mark.parametrize("conversion", ["uitofp", "sitofp"])
-def test_only_identity_or_uniform_images_are_emitted(typ, predicate, number, threshold, conversion):
-    answers = [
-        _relation(number, (v > threshold) - (v < threshold), floating=True)
-        for v in (0, -1 if conversion == "sitofp" else 1)
-    ]
+def test_only_identity_or_uniform_images_are_emitted(typ, predicate, threshold, conversion):
+    answers = [ORDERED[predicate](v, threshold) for v in (0, -1 if conversion == "sitofp" else 1)]
     module = source(predicate, threshold, typ=typ, conversion=conversion)
     expected = answers[0] == answers[1] or answers == [False, True]
     assert fold_boolean_image_predicates(module) == int(expected)
