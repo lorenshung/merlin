@@ -55,6 +55,9 @@ def test_width_correct_logical_shifts_and_bits(width):
     assert run(module, [value]).item() == (1 << (width - 1)) - 1
 
 
+INTEGER_PREDICATES = ["slt", "sle", "sgt", "sge", "ult", "ule", "ugt", "uge"]
+
+
 @pytest.mark.parametrize("predicate,expected", [("ult", False), ("ule", False), ("ugt", True), ("uge", True)])
 def test_unsigned_i64_predicates(predicate, expected):
     module = source(["i64", "i64"], "i1", f"%v=arith.cmpi {predicate},%a0,%a1 : i64")
@@ -63,19 +66,7 @@ def test_unsigned_i64_predicates(predicate, expected):
 
 @pytest.mark.parametrize(
     "predicate,expected",
-    [
-        ("false", False),
-        ("oeq", False),
-        ("ord", False),
-        ("ueq", True),
-        ("ugt", True),
-        ("uge", True),
-        ("ult", True),
-        ("ule", True),
-        ("une", True),
-        ("uno", True),
-        ("true", True),
-    ],
+    [(p, False) for p in ("false", "oeq", "ord")] + [(p, True) for p in ("ueq ugt uge ult ule une uno true".split())],
 )
 def test_unordered_float_predicates(predicate, expected):
     module = source(["f32", "f32"], "i1", f"%v=arith.cmpf {predicate},%a0,%a1 : f32")
@@ -90,7 +81,8 @@ def test_fma_has_one_rounding_and_preserves_negative_zero(token, p):
     expected = -(2.0 ** (2 - 2 * p))
     assert run(module, [np.array([v], dtype) for v in [a, b, c]]).item() == expected
     actual = run(module, [np.array([v], dtype) for v in [-0.0, 1.0, -0.0]])
-    assert actual.view(__import__("torch").int32 if token == "f32" else __import__("torch").int64).item() < 0
+    torch = pytest.importorskip("torch")
+    assert actual.view(torch.int32 if token == "f32" else torch.int64).item() < 0
 
 
 @pytest.mark.parametrize("token,p", [("f32", 24), ("f64", 53)])
@@ -195,19 +187,7 @@ def test_i1_integer_arithmetic_wraps(operation):
     assert run(module, [np.array([True], np.bool_)] * 2).item() is False
 
 
-@pytest.mark.parametrize(
-    "predicate,expected",
-    [
-        ("slt", True),
-        ("sle", True),
-        ("sgt", False),
-        ("sge", False),
-        ("ult", False),
-        ("ule", False),
-        ("ugt", True),
-        ("uge", True),
-    ],
-)
+@pytest.mark.parametrize("predicate,expected", [(p, p in {"slt", "sle", "ugt", "uge"}) for p in INTEGER_PREDICATES])
 def test_i1_ordering_uses_the_predicate_signedness(predicate, expected):
     module = source(["i1", "i1"], "i1", f"%v=arith.cmpi {predicate},%a0,%a1 : i1")
     assert run(module, [np.array([True], np.bool_), np.array([False], np.bool_)]).item() is expected

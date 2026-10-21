@@ -120,23 +120,33 @@ def test_legacy_model_requires_declared_calibration_and_independent_rational_eng
     assert not proves_quantized_model(dict(exact_dtype_sites=10), spec)
 
 
-def test_wrong_model_rolls_back_source_abi_and_retained_record_identity(tmp_path, monkeypatch):
+IDENTITY = "module { func.func @forward(%x: tensor<2xf32>) -> tensor<2xf32> { return %x : tensor<2xf32> } }"
+
+
+def quantized_admission(tmp_path, monkeypatch, accepted):
+    """A spec file for an identity source whose IR is declared quantized and review ``accepted``."""
     import yaml
 
     from merlin.targetgen import native_precision_contract, operator_review
-    from merlin.targetgen.core_aten_admission import prepare
 
-    original = "module { func.func @forward(%x: tensor<2xf32>) -> tensor<2xf32> { return %x : tensor<2xf32> } }"
-    (tmp_path / "model.mlir").write_text(original)
-    (tmp_path / "inputs.npz").write_bytes(b"original input storage")
+    (tmp_path / "model.mlir").write_text(IDENTITY)
     spec = software()
     spec["numerical_semantics"]["native_unit_contract"] = dict(excluded_constructions=[])
     path = tmp_path / "spec.yaml"
     path.write_text(yaml.safe_dump(spec))
+    monkeypatch.setattr(native_precision_contract, "requires_quantized_model", lambda _: True)
+    monkeypatch.setattr(operator_review, "review_record", lambda _: dict(operator_accepted=accepted))
+    return path
+
+
+def test_wrong_model_rolls_back_source_abi_and_retained_record_identity(tmp_path, monkeypatch):
+    from merlin.targetgen.core_aten_admission import prepare
+
+    original = IDENTITY
+    path = quantized_admission(tmp_path, monkeypatch, True)
+    (tmp_path / "inputs.npz").write_bytes(b"original input storage")
     record = dict(status="bundled", input_abi=[dict(dtype="f32", shape=[2])])
     report = dict(cases=[record], output_count=1)
-    monkeypatch.setattr(native_precision_contract, "requires_quantized_model", lambda _: True)
-    monkeypatch.setattr(operator_review, "review_record", lambda _: dict(operator_accepted=True))
 
     def candidate(directory, report, **kwargs):
         (directory / "model.mlir").write_text(original + "\n// prepared eager candidate")
@@ -156,21 +166,10 @@ def test_wrong_model_rolls_back_source_abi_and_retained_record_identity(tmp_path
 
 def test_first_native_refusal_keeps_its_reason(tmp_path, monkeypatch):
     # A later precision check does not overwrite the reason of an earlier refusal.
-    import yaml
-
-    from merlin.targetgen import native_precision_contract, operator_review
     from merlin.targetgen.core_aten_admission import prepare
 
-    (tmp_path / "model.mlir").write_text(
-        "module { func.func @forward(%x: tensor<2xf32>) -> tensor<2xf32> { return %x : tensor<2xf32> } }"
-    )
-    spec = software()
-    spec["numerical_semantics"]["native_unit_contract"] = dict(excluded_constructions=[])
-    path = tmp_path / "spec.yaml"
-    path.write_text(yaml.safe_dump(spec))
+    path = quantized_admission(tmp_path, monkeypatch, False)
     report = dict(cases=[dict(status="bundled", input_abi=[dict(dtype="f32", shape=[2])])], output_count=1)
-    monkeypatch.setattr(native_precision_contract, "requires_quantized_model", lambda _: True)
-    monkeypatch.setattr(operator_review, "review_record", lambda _: dict(operator_accepted=False))
     plan = prepare(tmp_path, report, lambda *a, **k: dict(selection=dict(identities={}), exact_dtype_sites=1),
                    software_spec=path)
     assert plan["refusal_code"] == "native_unit_operator_acceptance_required"

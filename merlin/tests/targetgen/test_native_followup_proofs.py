@@ -50,19 +50,8 @@ def test_wrong_nan_operand_priority_is_distinct(operation):
 
 
 def test_binary32_widening_is_exact_and_quiets_nan_payloads():
-    words = [
-        0,
-        0x80000000,
-        1,
-        0x007FFFFF,
-        0x00800000,
-        0x7F7FFFFF,
-        0xFF7FFFFF,
-        0x7F800000,
-        0xFF800000,
-        0x7F800001,
-        0xFFBABCDE,
-    ]
+    words = [0, 0x80000000, 1, 0x007FFFFF, 0x00800000, 0x7F7FFFFF, 0xFF7FFFFF]
+    words += [0x7F800000, 0xFF800000, 0x7F800001, 0xFFBABCDE]
     actual = conversion_function("f32", "f64", "payload_quiet")(words)
     verify_outputs(words, actual, "f32", "f64", "payload_quiet")
     assert convert_word(1, "f32", "f64") == 0x36A0000000000000
