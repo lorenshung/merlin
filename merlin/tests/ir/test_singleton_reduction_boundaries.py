@@ -4,7 +4,7 @@ import pytest
 from mlir_fixtures import assert_unchanged
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.singleton_reduction_boundaries import expose_singleton_reduction_boundaries
+from merlin.llvmlower.singleton_folds import expose_singleton_reduction_boundaries
 
 
 def source(extent=1, *, unknown=False):

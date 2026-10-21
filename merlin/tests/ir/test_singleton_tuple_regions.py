@@ -4,7 +4,7 @@ import pytest
 from mlir_fixtures import assert_unchanged
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.singleton_tuple_regions import expose_singleton_tuple_regions
+from merlin.llvmlower.singleton_folds import expose_singleton_tuple_regions
 
 
 def source(size=1, *, unknown=False):

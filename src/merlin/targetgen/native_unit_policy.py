@@ -12,9 +12,11 @@ def construction_evidence(module, *, excluded=None, result_abi=None):
     from merlin.llvmlower.boolean_image_predicates import fold_boolean_image_predicates
     from merlin.llvmlower.boolean_unit_image import fold_boolean_unit_image
     from merlin.llvmlower.integer_image_predicates import fold_integer_image_predicates
-    from merlin.llvmlower.singleton_carriers import fold_singleton_carriers
-    from merlin.llvmlower.singleton_reductions import fold_singleton_reductions
-    from merlin.llvmlower.singleton_selectors import fold_singleton_selectors
+    from merlin.llvmlower.singleton_folds import (
+        fold_singleton_carriers,
+        fold_singleton_reductions,
+        fold_singleton_selectors,
+    )
     from merlin.llvmlower.static_unit_indices import fold_static_unit_indices
     from merlin.targetgen.native_construction_patterns import Payloads, dataflow
 
@@ -44,7 +46,7 @@ def construction_evidence(module, *, excluded=None, result_abi=None):
         from merlin.llvmlower.ieee_identity_selectors import fold_ieee_identity_selectors
         from merlin.llvmlower.integral_float_rounding import fold_integral_image_identities
         from merlin.llvmlower.nan_guarded_neutral import fold_nan_guarded_neutral
-        from merlin.llvmlower.singleton_boundaries import normalize_singleton_boundaries
+        from merlin.llvmlower.singleton_folds import normalize_singleton_boundaries
 
         image_folds = (
             fold_static_unit_indices(canonical)

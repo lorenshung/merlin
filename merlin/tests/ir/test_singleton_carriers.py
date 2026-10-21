@@ -4,7 +4,7 @@ import pytest
 from mlir_fixtures import assert_unchanged, returned
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.singleton_carriers import fold_singleton_carriers
+from merlin.llvmlower.singleton_folds import fold_singleton_carriers
 
 
 @pytest.mark.parametrize("dtype", ["i1", "i8", "i32", "i64", "f16", "bf16", "f32", "complex<f32>"])

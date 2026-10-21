@@ -5,7 +5,7 @@ import pytest
 from mlir_fixtures import assert_unchanged
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.scalar_tensor_carriers import fold_scalar_tensor_roundtrips
+from merlin.llvmlower.singleton_folds import fold_scalar_tensor_roundtrips
 from merlin.targetgen.core_aten_spec_int8 import quantized_islands
 
 _SOURCE = """

@@ -56,7 +56,7 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
     # User results carry the requested output quantization even when their
     # source is an argument. Post-call observations retain original storage.
     expose_argument_results(module, report)
-    from merlin.llvmlower.singleton_tuple_regions import expose_singleton_tuple_regions
+    from merlin.llvmlower.singleton_folds import expose_singleton_tuple_regions
 
     expose_singleton_tuple_regions(module)
     function = next(op for op in module.walk() if op.name == "func.func" and op.sym_name.data == "forward")

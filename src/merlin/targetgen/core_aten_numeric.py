@@ -200,7 +200,6 @@ def _prepare_spec_int8_candidates(
     **kwargs,
 ):
     from merlin.targetgen.core_aten_admission import prepare
-
     from merlin.targetgen.source_power_specialization import specialize
 
     specialize(directory, report)
@@ -245,9 +244,11 @@ def normalize_closed_identities(module):
     from merlin.llvmlower.empty_reductions import fold_empty_reductions
     from merlin.llvmlower.integer_image_predicates import fold_integer_image_predicates
     from merlin.llvmlower.integral_float_rounding import fold_integral_float_rounding
-    from merlin.llvmlower.singleton_carriers import fold_singleton_carriers
-    from merlin.llvmlower.singleton_reductions import fold_singleton_reductions
-    from merlin.llvmlower.singleton_selectors import fold_singleton_selectors
+    from merlin.llvmlower.singleton_folds import (
+        fold_singleton_carriers,
+        fold_singleton_reductions,
+        fold_singleton_selectors,
+    )
     from merlin.llvmlower.static_masked_sums import expose_static_masked_sums
     from merlin.llvmlower.static_unit_indices import fold_static_unit_indices
 
@@ -259,7 +260,7 @@ def normalize_closed_identities(module):
     folds += fold_empty_reductions(module)
     folds += fold_boolean_image_predicates(module)
     folds += fold_boolean_domain(module)
-    from merlin.llvmlower.singleton_boundaries import normalize_singleton_boundaries
+    from merlin.llvmlower.singleton_folds import normalize_singleton_boundaries
 
     folds += normalize_singleton_boundaries(module)
     from merlin.llvmlower.nan_guarded_neutral import fold_nan_guarded_neutral
@@ -605,7 +606,7 @@ def _prepare_spec_int8(
                 for operation in prepared_module.walk():
                     if getattr(operation.attributes.get("prov.aten"), "data", None) == "m2m_q.quantize.default":
                         operation.attributes["merlin.quantizer_nan_storage_zero"] = UnitAttr()
-            from merlin.llvmlower.scalar_tensor_carriers import fold_scalar_tensor_roundtrips
+            from merlin.llvmlower.singleton_folds import fold_scalar_tensor_roundtrips
 
             scalar_carriers = fold_scalar_tensor_roundtrips(prepared_module)
             from merlin.llvmlower.quantized_guard_domain import canonicalize_quantized_affine
