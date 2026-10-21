@@ -252,3 +252,33 @@ def test_native_selector_proof_also_requires_the_whole_call_alias_contract(tmp_p
         assert (tmp_path / "model.mlir").read_text() == original_text
     else:
         assert (tmp_path / "inputs.npz").read_bytes() == b"materialized candidate"
+
+
+def test_a_declined_candidate_cannot_leak_its_rewrites_into_the_next(tmp_path, monkeypatch):
+    from xdsl.dialects.builtin import UnitAttr
+
+    import merlin.targetgen.core_aten_components as components
+    import merlin.targetgen.core_aten_exact_dtype as exact
+    import merlin.targetgen.core_aten_spec_int8 as spec
+    import merlin.targetgen.native_byte_activation as byte
+    import merlin.targetgen.native_quantized_activation as quantized
+    import merlin.targetgen.native_wide_activation as wide
+    from merlin.targetgen.core_aten_numeric import _prepare_spec_int8
+
+    (tmp_path / "model.mlir").write_text(str(source(2)))
+    monkeypatch.setattr(spec, "select_spec", lambda *a: dict(spec={}))
+    monkeypatch.setattr(exact, "prepare_bitwise", lambda *a: None)
+    seen = []
+
+    def declines_after_rewriting(directory, report, selection, provider, package, module, **kw):
+        seen.append(str(module))
+        for op in module.walk():
+            op.attributes["test.declined_rewrite"] = UnitAttr()
+
+    for owner, name in [(byte, "prepare"), (wide, "prepare"), (components, "prepare_integer_components")]:
+        monkeypatch.setattr(owner, name, declines_after_rewriting)
+    accepted = dict(status="admitted")
+    monkeypatch.setattr(quantized, "prepare", lambda *a: seen.append(str(a[-1])) or accepted)
+    kwargs = dict(target="t", facts={}, software_spec=None, host_capabilities=None)
+    assert _prepare_spec_int8(tmp_path, dict(cases=[]), **kwargs) is accepted
+    assert len(seen) == 4 and len(set(seen)) == 1 and "test.declined_rewrite" not in seen[0]

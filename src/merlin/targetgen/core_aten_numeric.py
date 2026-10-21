@@ -327,39 +327,22 @@ def _prepare_spec_int8(
     bitwise = prepare_bitwise(directory, report, selection, provider, package, module)
     if bitwise is not None:
         return bitwise
-    # An unsuccessful candidate must not change the original source or its ordinals.
-    module = parse_mlir_file(directory / "model.mlir")
-    from merlin.targetgen.native_byte_activation import prepare as prepare_activation
+    import functools
 
-    activation = prepare_activation(directory, report, selection, provider, package, module)
-    if activation is not None:
-        return activation
+    from merlin.targetgen.core_aten_components import prepare_integer_components
+    from merlin.targetgen.native_byte_activation import prepare as prepare_activation
+    from merlin.targetgen.native_quantized_activation import prepare as prepare_quantized_activation
     from merlin.targetgen.native_wide_activation import prepare as prepare_wide_activation
 
-    activation = prepare_wide_activation(directory, report, selection, provider, package, module)
-    if activation is not None:
-        return activation
-    from merlin.targetgen.core_aten_components import prepare_integer_components
-
-    components = prepare_integer_components(
-        directory,
-        report,
-        selection,
-        provider,
-        package,
-        module,
-        limb_attribute=f"{target}.limb",
-        construction_observer=construction_observer,
+    components = functools.partial(
+        prepare_integer_components, limb_attribute=f"{target}.limb", construction_observer=construction_observer
     )
-    if components is not None:
-        return components
-    from merlin.targetgen.native_quantized_activation import prepare as prepare_quantized_activation
-
-    activation = prepare_quantized_activation(
-        directory, report, selection, provider, package, parse_mlir_file(directory / "model.mlir")
-    )
-    if activation is not None:
-        return activation
+    # Each candidate parses its own copy: a declined candidate's in-place
+    # rewrites cannot change the next candidate's source or its ordinals.
+    for candidate in (prepare_activation, prepare_wide_activation, components, prepare_quantized_activation):
+        plan = candidate(directory, report, selection, provider, package, parse_mlir_file(directory / "model.mlir"))
+        if plan is not None:
+            return plan
     from merlin.targetgen.core_aten_exact_dtype import native_dtype_request, retain_native_host
 
     if native_dtype_request(report):
