@@ -9,6 +9,8 @@ from merlin.common.yaml import load_yaml
 from merlin.targetgen.operator_review import ACCEPT_ENV, PENDING, review_record
 from merlin.targetgen.software_spec import admit_operation, load_software_spec
 
+HOST_QUANTIZERS = ["host_quantize_exact", "host_dequantize_per_tensor"]
+
 
 def specification(status=PENDING):
     return dict(
@@ -97,22 +99,20 @@ def test_authored_native_family_rows_are_honestly_labeled():
     root = repo_root() / "examples/gemmini/target"
     software = load_software_spec(root / "software-spec.yaml")
     rows = {row["id"]: row for row in software["operations"]}
-    for name in [
-        "movement_bitwise",
-        "component_linear",
-        "component_bilinear",
-        "host_quantize_exact",
-        "host_dequantize_per_tensor",
-    ]:
+    authored = "authored, pending operator review"
+    for name in ["movement_bitwise", "component_linear", "component_bilinear"] + HOST_QUANTIZERS:
         assert rows[name]["status"] == PENDING
-    for key in ["quantization_contract"]:
-        assert software[key]["status"] == PENDING
+        assert rows[name]["evidence"]["review_status"] == authored
+    assert software["quantization_contract"]["status"] == PENDING
     assert software["numerical_semantics"]["native_unit_contract"]["status"] == PENDING
     host = load_yaml(root / "host-capabilities.yaml")
     for row in host["operations"]:
         contract = row.get("numerical_contract", {})
         if "pending operator review" in contract.get("evidence", {}).get("review_status", ""):
             assert row["status"] == contract["status"] == PENDING
+    host_rows = {row["id"]: row for row in host["operations"]}
+    for name in ["host_exact_native_boundary"] + HOST_QUANTIZERS:
+        assert host_rows[name]["numerical_contract"]["evidence"]["review_status"] == authored
 
 
 def test_pending_numerical_claim_does_not_review_a_host_placement(monkeypatch):
