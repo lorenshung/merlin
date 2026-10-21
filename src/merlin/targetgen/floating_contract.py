@@ -227,7 +227,7 @@ def requires_quantized_model(module):
     clone = module.clone()
     try:
         normalize_closed_identities(clone)
-    except Exception:  # noqa: BLE001 - an unnormalizable program keeps its raw arithmetic
+    except ValueError:  # a fold that refuses the program keeps its raw arithmetic
         clone = module.clone()
     for function in clone.walk():
         if function.name == "func.func":

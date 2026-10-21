@@ -182,3 +182,19 @@ def test_first_native_refusal_keeps_its_reason(tmp_path, monkeypatch):
     plan = prepare(tmp_path, report, lambda *a, **k: dict(selection=dict(identities={}), exact_dtype_sites=1),
                    software_spec=path)
     assert plan["refusal_code"] == "native_unit_operator_acceptance_required"
+
+
+@pytest.mark.parametrize("error,refused", [(ValueError, True), (TypeError, False)])
+def test_only_a_fold_refusal_keeps_the_raw_arithmetic(monkeypatch, error, refused):
+    import merlin.targetgen.core_aten_numeric as numeric
+
+    def fold(module):
+        raise error("fold")
+
+    monkeypatch.setattr(numeric, "normalize_closed_identities", fold)
+    module = elementwise("f32", "f32", "%k=arith.constant 0.5 : f32\n%v=arith.addf %a,%k : f32\nlinalg.yield %v : f32")
+    if refused:
+        assert requires_quantized_model(module)
+    else:
+        with pytest.raises(TypeError):
+            requires_quantized_model(module)
