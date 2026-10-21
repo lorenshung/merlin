@@ -85,13 +85,14 @@ def test_ordered_float_cells_and_nan_cell_are_all_covered(dtype):
     module.verify()
 
 
-@pytest.mark.parametrize("extent,tie,seed", [(2, True, "-128"), (1, False, "-128"), (1, True, "0")])
-def test_unproved_predicate_or_larger_reduction_is_not_folded(extent, tie, seed):
-    assert_unchanged(source(extent=extent, tie=tie, seed=seed), fold_singleton_selectors)
-
-
-def test_float_nan_cell_prevents_an_ordered_only_identity_proof():
-    assert_unchanged(source("f32", "0xFF800000", "cmpf ogt", "cmpf oeq", nan=False), fold_singleton_selectors)
+# A float NaN cell prevents an ordered-only identity proof.
+@pytest.mark.parametrize(
+    "options",
+    [dict(extent=2), dict(tie=False), dict(seed="0")]
+    + [dict(dtype="f32", seed="0xFF800000", cmp="cmpf ogt", eq="cmpf oeq")],
+)
+def test_unproved_predicate_or_larger_reduction_is_not_folded(options):
+    assert_unchanged(source(**options), fold_singleton_selectors)
 
 
 def test_unknown_data_arithmetic_cannot_be_licensed_by_singleton_shape():

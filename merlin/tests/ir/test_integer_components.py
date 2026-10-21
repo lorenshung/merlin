@@ -161,7 +161,8 @@ def test_clamp_epilogue_preserves_source_comparison_and_payloads(dtype, predicat
 
 
 def test_window_reduction_ignores_unread_shape_operand():
-    prelude = "%shape = tensor.empty() : tensor<2xi64>\n%z = arith.constant 0 : i64\n%seed = tensor.splat %z : tensor<2xi64>\n"
+    prelude = "%shape = tensor.empty() : tensor<2xi64>\n%z = arith.constant 0 : i64\n"
+    prelude += "%seed = tensor.splat %z : tensor<2xi64>\n"
     maps = [f"affine_map<(d0,d1)->({m})>" for m in ("d0*2+d1", "d1", "d0")]
     ins = [("%x", "tensor<4xi64>"), ("%shape", "tensor<2xi64>")]
     window = generic(
@@ -239,10 +240,7 @@ def test_width_changes_observe_the_source_ring(bits, cast, wrap):
 
 @pytest.mark.parametrize("bits", [8, 16, 32])
 def test_truncation_before_signed_extension_keeps_its_modular_boundary(bits):
-    text = str(module("i64", f"%t=arith.trunci %a : i64 to i{bits}\n%v=arith.extsi %t : i{bits} to i64")).replace(
-        "iBITS", f"i{bits}"
-    )
-    source = parse_mlir_text(text)
+    source = module("i64", f"%t=arith.trunci %a : i64 to i{bits}\n%v=arith.extsi %t : i{bits} to i64")
     values = [-(1 << 63), (1 << bits) - 1, (1 << (bits - 1)), (1 << (bits - 1)) - 1]
     expected = evaluate(source, [values, [0] * 4])
     assert rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[1 << 63, 0])

@@ -35,13 +35,12 @@ def test_every_use_observes_only_the_non_nan_word_or_nan_class(operation, litera
     module.verify()
 
 
-@pytest.mark.parametrize("options", [dict(escape=True), dict(bits=True), dict(predicate="ord"), dict(reverse=True)])
-def test_a_nan_payload_escape_or_nan_word_selection_refuses(options):
-    assert_unchanged(source("maximumf", "0xff800000", **options), fold_nan_guarded_neutral)
-
-
+# A NaN payload escape or NaN word selection refuses; non-neutral numeric work is retained.
 @pytest.mark.parametrize(
-    "operation,literal", [("maximumf", "0.0"), ("minimumf", "0.0"), ("mulf", "2.0"), ("divf", "0.5")]
+    "operation,literal,options",
+    [("maximumf", "0xff800000", o) for o in (dict(escape=True), dict(bits=True), dict(reverse=True))]
+    + [("maximumf", "0xff800000", dict(predicate="ord"))]
+    + [("maximumf", "0.0", {}), ("minimumf", "0.0", {}), ("mulf", "2.0", {}), ("divf", "0.5", {})],
 )
-def test_non_neutral_numeric_work_is_retained(operation, literal):
-    assert fold_nan_guarded_neutral(source(operation, literal)) == 0
+def test_a_nan_payload_escape_nan_word_selection_or_numeric_work_refuses(operation, literal, options):
+    assert_unchanged(source(operation, literal, **options), fold_nan_guarded_neutral)

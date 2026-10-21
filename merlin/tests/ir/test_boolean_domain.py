@@ -37,8 +37,10 @@ def test_literal_integer_operations_fold_to_identity_widening_or_uniform_fill(op
     assert fold_boolean_domain(module) == 0
 
 
+# A literal zero divisor keeps its undefined operation.
 @pytest.mark.parametrize(
-    "operator,constant,extension", [("xori", 1, "extui"), ("andi", 3, "extsi"), ("ori", 2, "extui")]
+    "operator,constant,extension",
+    [("xori", 1, "extui"), ("andi", 3, "extsi"), ("ori", 2, "extui"), ("floordivsi", 0, "extui")],
 )
 def test_nonuniform_nonidentity_table_is_not_synthesized(operator, constant, extension):
     assert_unchanged(source(operator, constant, extension), fold_boolean_domain)
@@ -73,10 +75,6 @@ def test_complete_boolean_integer_quotient_is_a_shape_only_zero_fill(operator, d
     module = source(operator, divisor)
     assert fold_boolean_domain(module) == 1
     module.verify()
-
-
-def test_literal_zero_divisor_keeps_its_undefined_operation():
-    assert_unchanged(source("floordivsi", 0), fold_boolean_domain)
 
 
 @pytest.mark.parametrize("condition,folded", [(0, False), (1, True)])

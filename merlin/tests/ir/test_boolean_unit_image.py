@@ -44,13 +44,14 @@ def test_every_boolean_word_has_the_proved_ieee_result(element, operation, liter
     assert not any(op.name == operation for op in module.walk())
 
 
-@pytest.mark.parametrize("options", [dict(integer="i8"), dict(unknown=True)])
-def test_other_or_unknown_integer_images_are_not_boolean(options):
-    assert_unchanged(source("math.sqrt", **options), fold_boolean_unit_image)
-
-
-def test_a_rounded_reciprocal_is_not_an_exact_remainder_proof():
-    assert_unchanged(source("arith.remf", element="f64", literal="0.3333333333333333"), fold_boolean_unit_image)
+# A rounded reciprocal is not an exact remainder proof.
+@pytest.mark.parametrize(
+    "operation,options",
+    [("math.sqrt", dict(integer="i8")), ("math.sqrt", dict(unknown=True))]
+    + [("arith.remf", dict(element="f64", literal="0.3333333333333333"))],
+)
+def test_other_or_unknown_integer_images_are_not_boolean(operation, options):
+    assert_unchanged(source(operation, **options), fold_boolean_unit_image)
 
 
 @pytest.mark.parametrize(

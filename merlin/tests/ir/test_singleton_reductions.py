@@ -39,20 +39,15 @@ def test_singleton_integer_monoid_becomes_exact_indexed_movement(element, bits, 
     assert not any(op.name == "linalg.reduce" or op.name == "arith." + arithmetic for op in module.walk())
 
 
-@pytest.mark.parametrize("extent,seed", [(2, -128), (0, -128), (1, 0)])
-def test_non_singleton_or_non_identity_seed_is_retained(extent, seed):
-    assert_unchanged(source("i8", "maxsi", seed, extent=extent), fold_singleton_reductions)
-
-
-@pytest.mark.parametrize("arithmetic,seed", [("maximumf", "-0x7F800000"), ("addf", "0.0")])
-def test_float_singleton_does_not_erase_nan_or_signed_zero_semantics(arithmetic, seed):
-    # Float extrema can change NaN payloads; adding +0 can change a -0 word.
-    assert_unchanged(source("f32", arithmetic, seed), fold_singleton_reductions)
-
-
-def test_overflow_promises_do_not_gain_a_modular_identity_proof():
-    module = source("i8", "addi", 0, flags="overflow<nsw>")
-    assert fold_singleton_reductions(module) == 0
+# Float extrema can change NaN payloads, adding +0 can change a -0 word, and overflow promises
+# have no modular identity proof.
+@pytest.mark.parametrize(
+    "element,arithmetic,seed,extent,flags",
+    [("i8", "maxsi", -128, 2, ""), ("i8", "maxsi", -128, 0, ""), ("i8", "maxsi", 0, 1, "")]
+    + [("i8", "addi", 0, 1, "overflow<nsw>"), ("f32", "maximumf", "-0x7F800000", 1, ""), ("f32", "addf", "0.0", 1, "")],
+)
+def test_non_singleton_non_identity_float_or_promised_reduction_is_retained(element, arithmetic, seed, extent, flags):
+    assert_unchanged(source(element, arithmetic, seed, extent=extent, flags=flags), fold_singleton_reductions)
 
 
 @pytest.mark.parametrize("element,bits", [("i1", 1), ("i8", 8), ("i32", 32), ("i64", 64)])

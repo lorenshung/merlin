@@ -37,15 +37,12 @@ def test_typed_endpoint_bound_closes_only_unattainable_integer_values(threshold,
     assert bool(returned(module).owner.operands[0].owner.value.value.data) == value
 
 
-@pytest.mark.parametrize("threshold,predicate", [("127.0", "oeq"), ("127.0", "olt"), ("0.0", "one")])
-def test_attainable_threshold_does_not_become_a_fill(threshold, predicate):
-    assert_unchanged(source("i8", threshold=threshold, predicate=predicate), fold_integer_image_predicates)
-
-
-def test_real_floating_input_is_not_assumed_integral():
-    assert_unchanged(source("f16", "f32", conversion="extf"), fold_integer_image_predicates)
-
-
-def test_promoted_rounded_endpoint_is_still_attainable():
-    # INT_MAX rounds upward to 2**31 when compared in binary32.
-    assert_unchanged(source("i32", threshold="2147483648.0"), fold_integer_image_predicates)
+# A real floating input is not assumed integral; INT_MAX rounds upward to 2**31 in binary32.
+@pytest.mark.parametrize(
+    "integer,threshold,predicate,conversion",
+    [("i8", "127.0", "oeq", "sitofp"), ("i8", "127.0", "olt", "sitofp"), ("i8", "0.0", "one", "sitofp")]
+    + [("f16", "0.5", "oeq", "extf"), ("i32", "2147483648.0", "oeq", "sitofp")],
+)
+def test_attainable_threshold_or_real_input_does_not_become_a_fill(integer, threshold, predicate, conversion):
+    module = source(integer, threshold=threshold, predicate=predicate, conversion=conversion)
+    assert_unchanged(module, fold_integer_image_predicates)
