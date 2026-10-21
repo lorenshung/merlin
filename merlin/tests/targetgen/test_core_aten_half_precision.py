@@ -1,10 +1,10 @@
 """The half ABI preserves storage, mixed result types, and the suite's policy."""
 
 import copy
-import json
 
 import numpy as np
 import pytest
+from targetgen_fixtures import capture
 
 from merlin.llvmlower.c_runtime import _bf16_bits, generate
 from merlin.targetgen.core_aten_batch import build_core_aten_batch
@@ -15,38 +15,22 @@ from merlin.targetgen.core_aten_semantics import validate_full
 @pytest.mark.parametrize("dtype,logical", [("bf16", "bfloat16"), ("f16", "float16")])
 def test_half_bundle_packs_real_16_bit_storage_and_keeps_f32_result(tmp_path, dtype, logical):
     captures = tmp_path / "captures"
-    directory = captures / "fixture"
-    directory.mkdir(parents=True)
     half = dict(dtype=dtype, shape=[4])
     full = dict(dtype="f32", shape=[4])
     layouts = [
         dict(dtype=dt, shape=[4], stride=[1], storage_offset=0, requires_grad=False) for dt in (logical, "float32")
     ]
-    (directory / "capsule.linalg.mlir").write_text(
+    source = (
         f"builtin.module {{ func.func @forward(%a: tensor<4x{dtype}>, %b: tensor<4xf32>) "
         f"-> (tensor<4x{dtype}>, tensor<4xf32>) {{\n"
         f"func.return %a, %b : tensor<4x{dtype}>, tensor<4xf32>\n}} }}"
     )
-    (directory / "capture.json").write_text(
-        json.dumps(
-            dict(
-                capture_meta=dict(
-                    ok=True,
-                    opaque=0,
-                    input_abi=[half, full],
-                    output_abi=[half, full],
-                    result_contract=dict(
-                        authority="fixture",
-                        inputs=layouts,
-                        results=[{**layout, "role": "user_output"} for layout in layouts],
-                    ),
-                )
-            )
-        )
+    contract = dict(
+        authority="fixture", inputs=layouts, results=[{**layout, "role": "user_output"} for layout in layouts]
     )
     values = [-0.0, 1.5, 2**-24, 2**-14]
-    (directory / "inputs.json").write_text(json.dumps([values, values]))
-    (directory / "golden.json").write_text(json.dumps([values, values]))
+    abi = [half, full]
+    capture(captures / "fixture", source, [values, values], [values, values], abi, abi, result_contract=contract)
     arguments = dict(
         args=dict(kind="tuple", items=[dict(kind="tensor", **layout, values=values) for layout in layouts]), kwargs={}
     )

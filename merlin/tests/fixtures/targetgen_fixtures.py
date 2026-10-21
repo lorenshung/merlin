@@ -100,3 +100,14 @@ def measured_routing(case_id, target="gemmini", instructions=1, operations=({},)
     evidence["executed_instructions"] = instructions
     routing = dict(lane="device", routed=True, target=target, routed_operations=list(operations))
     return dict(routing, execution_evidence=evidence)
+
+
+def capture(directory, source, inputs, golden, input_abi=(), output_abi=(), status=None, **meta):
+    """Write one capture directory: the capsule source, capture.json, inputs.json and golden.json."""
+    directory.mkdir(parents=True)
+    (directory / "capsule.linalg.mlir").write_text(source, encoding="utf-8")
+    meta = dict(ok=True, opaque=0, input_abi=list(input_abi), output_abi=list(output_abi), **meta)
+    document = dict(capture_meta=meta) if status is None else dict(status=status, capture_meta=meta)
+    (directory / "capture.json").write_text(json.dumps(document), encoding="utf-8")
+    (directory / "inputs.json").write_text(json.dumps(inputs), encoding="utf-8")
+    (directory / "golden.json").write_text(json.dumps(golden), encoding="utf-8")

@@ -6,21 +6,11 @@ import json
 
 import numpy as np
 import pytest
+from targetgen_fixtures import capture
 
 from merlin.frontends.linalg_mlir import parse_mlir_file
 from merlin.targetgen.core_aten_batch import build_core_aten_batch
 from merlin.targetgen.core_aten_batch_grade import grade_core_aten_batch
-
-
-def capture(directory, source, inputs, golden, input_abi=(), output_abi=(), status=None, **meta):
-    """Write one capture directory: the capsule source, capture.json, inputs.json and golden.json."""
-    directory.mkdir(parents=True)
-    (directory / "capsule.linalg.mlir").write_text(source, encoding="utf-8")
-    meta = dict(ok=True, opaque=0, input_abi=list(input_abi), output_abi=list(output_abi), **meta)
-    document = dict(capture_meta=meta) if status is None else dict(status=status, capture_meta=meta)
-    (directory / "capture.json").write_text(json.dumps(document), encoding="utf-8")
-    (directory / "inputs.json").write_text(json.dumps(inputs), encoding="utf-8")
-    (directory / "golden.json").write_text(json.dumps(golden), encoding="utf-8")
 
 
 def unary(op, declarations=""):
