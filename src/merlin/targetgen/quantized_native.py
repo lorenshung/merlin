@@ -3,7 +3,10 @@
 import copy
 import json
 
+from merlin.targetgen.core_aten_components import Refusal, refusing
 
+
+@refusing("quantized-native-refusal.json")
 def prepare(directory, report, *, target, facts, software_spec, host_capabilities, provider=None, package=None, **_):
     from merlin.frontends.linalg_mlir import parse_mlir_file as _parse
     from merlin.targetgen.floating_contract import requires_quantized_model
@@ -15,17 +18,11 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
     # from floating storage takes the declared quantized model.
     contract = requires_quantized_model(_parse(directory / "model.mlir"))
     if not contract["quantized"]:
-        (directory / "quantized-native-refusal.json").write_text(
-            json.dumps(
-                dict(
-                    code="precision_class_requires_native_eager_bits",
-                    reason="quantized arithmetic cannot discharge a storage or identity eager-bit obligation",
-                    floating_contract=contract,
-                )
-            )
-            + "\n"
+        raise Refusal(
+            code="precision_class_requires_native_eager_bits",
+            reason="quantized arithmetic cannot discharge a storage or identity eager-bit obligation",
+            floating_contract=contract,
         )
-        return None
 
     from merlin.frontends.linalg_mlir import parse_mlir_file
     from merlin.llvmlower.quantized_native import parameters
@@ -75,10 +72,7 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
     if complex_inputs and any(
         all(not compile_time_operand(v) for v in op.operands[:2]) for op, _ in observe_contractions(module)
     ):
-        (directory / "quantized-native-refusal.json").write_text(
-            json.dumps(dict(reason="runtime complex products require a composition")) + "\n"
-        )
-        return None
+        raise Refusal(reason="runtime complex products require a composition")
     if not function.body.block.args or any(
         str(v.type.element_type) not in {"f16", "bf16", "f32"} for v in function.body.block.args
     ):
@@ -99,8 +93,7 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
     try:
         finite_source(module)
     except ValueError as exc:
-        (directory / "quantized-native-refusal.json").write_text(json.dumps(dict(reason=str(exc))) + "\n")
-        return None
+        raise Refusal(reason=str(exc)) from exc
     payloads = Payloads(module)
     for primitive in module.walk():
         if primitive.name not in {"arith.mulf", "math.fma"}:
@@ -115,10 +108,7 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
         ):
             # Reduction-dependent operands do not change a parallel product's
             # mathematical role: it is still a composition of native units.
-            (directory / "quantized-native-refusal.json").write_text(
-                json.dumps(dict(reason="parallel runtime product requires a composition")) + "\n"
-            )
-            return None
+            raise Refusal(reason="parallel runtime product requires a composition")
     from merlin.llvmlower.exact_additive_recurrences import expose_exact_additive_recurrences
 
     recurrence_source = str(module)
@@ -207,8 +197,7 @@ def prepare(directory, report, *, target, facts, software_spec, host_capabilitie
         (directory / "spec-int8-admission.json").write_text(json.dumps(plan, indent=2) + "\n")
         return plan
     except (ValueError, RuntimeError) as exc:
-        (directory / "quantized-native-refusal.json").write_text(json.dumps(dict(reason=str(exc))) + "\n")
-        return None
+        raise Refusal(reason=str(exc)) from exc
     finally:
         # A candidate cannot strand a changed source or ABI when it declines.
         if "plan" not in locals() or plan is None or not plan.get("integer_reference"):

@@ -1,7 +1,32 @@
 """Qualify exact native component sources against the selected provider."""
 
+import functools
 import hashlib
 import json
+
+
+class Refusal(Exception):
+    """A declined candidate; its keyword fields become the refusal JSON."""
+
+    def __init__(self, **fields):
+        super().__init__(fields)
+
+
+def refusing(name, **defaults):
+    """Write a candidate's Refusal to directory/name (defaults first) and return None."""
+
+    def wrap(prepare):
+        @functools.wraps(prepare)
+        def run(directory, *args, **kwargs):
+            try:
+                return prepare(directory, *args, **kwargs)
+            except Refusal as refusal:
+                (directory / name).write_text(json.dumps(dict(defaults, **refusal.args[0])) + "\n")
+                return None
+
+        return run
+
+    return wrap
 
 
 def require_component_identity(directory, plan):
@@ -90,6 +115,7 @@ def unlowered_data_reductions(module, limb_attribute):
     return result
 
 
+@refusing("exact-dtype-refusal.json", family="F2")
 def prepare_integer_components(
     directory,
     report,
@@ -152,8 +178,7 @@ def prepare_integer_components(
         literal_folds = fold_uniform_numeric_literals(module)
         semantics = component_semantics(module)
         if semantics["status"] != "proven":
-            (directory / "exact-dtype-refusal.json").write_text(json.dumps(dict(family="F2", **semantics)) + "\n")
-            return None
+            raise Refusal(**semantics)
         from merlin.llvmlower.boolean_components import rewrite_boolean_components
 
         known_bounds, boolean_count = rewrite_boolean_components(module)
@@ -180,56 +205,26 @@ def prepare_integer_components(
         }
         floating_storage = set(native_types) & {"f16", "bf16", "f32", "f64"}
         if len(floating_storage) > 1 and not pure_float_copy:
-            (directory / "exact-dtype-refusal.json").write_text(
-                json.dumps(
-                    dict(
-                        family="F2",
-                        code="native_mixed_storage_promotion_unproved",
-                        reason=(
-                            "mixed-storage TensorIterator temporary conversion needs "
-                            "a complete scalar/vector copy profile"
-                        ),
-                    )
-                )
-                + "\n"
+            raise Refusal(
+                code="native_mixed_storage_promotion_unproved",
+                reason="mixed-storage TensorIterator temporary conversion needs a complete scalar/vector copy profile",
             )
-            return None
         copy_profiles = None
         one_tensor_storage_context = bool(records) and all(
             len(record.get("input_indices", ())) == 1 for record in records
         )
         if pure_float_copy:
             if not one_tensor_storage_context:
-                (directory / "exact-dtype-refusal.json").write_text(
-                    json.dumps(
-                        dict(
-                            family="F2",
-                            code="native_copy_layout_context_unproved",
-                            reason=(
-                                "CPU copy profile requires one original tensor; "
-                                "additional destination layouts are unproved"
-                            ),
-                        )
-                    )
-                    + "\n"
+                raise Refusal(
+                    code="native_copy_layout_context_unproved",
+                    reason="CPU copy profile requires one original tensor; additional destination layouts are unproved",
                 )
-                return None
             copy_profiles = {
                 value: profile(layout, block=loop["float_copy_vector_elements"], grain=loop["parallel_grain"])
                 for value, layout in input_layouts(report, functions[0].body.block.args).items()
             }
             if any(copy_profiles.get(value) is None for value in functions[0].body.block.args):
-                (directory / "exact-dtype-refusal.json").write_text(
-                    json.dumps(
-                        dict(
-                            family="F2",
-                            code="native_copy_layout_unproved",
-                            reason="copy CPU loop layout has no certified form",
-                        )
-                    )
-                    + "\n"
-                )
-                return None
+                raise Refusal(code="native_copy_layout_unproved", reason="copy CPU loop layout has no certified form")
         if semantics.get("cpu_reduced_storage_profile_required"):
             candidates = [p for p in profiles.values() if p is not None]
             output_shape = (
@@ -270,20 +265,13 @@ def prepare_integer_components(
                     else None
                 )
                 if selected_profile is None:
-                    (directory / "exact-dtype-refusal.json").write_text(
-                        json.dumps(
-                            dict(
-                                family="F2",
-                                code="native_reduced_binary_layout_unproved",
-                                reason=(
-                                    "reduced-storage scalar/vector readout needs equal dense/rank-one input"
-                                    " profiles or one scalar"
-                                ),
-                            )
-                        )
-                        + "\n"
+                    raise Refusal(
+                        code="native_reduced_binary_layout_unproved",
+                        reason=(
+                            "reduced-storage scalar/vector readout needs equal dense/rank-one input"
+                            " profiles or one scalar"
+                        ),
                     )
-                    return None
             scalars = sum(
                 prod(p["shape"]) == 1 or all(s == 0 for s, n in zip(p["stride"], p["shape"]) if n > 1)
                 for p in profiles.values()
@@ -312,20 +300,13 @@ def prepare_integer_components(
                 for child in operation.body.block.ops
             ):
                 if profiles.get(source) is None or not one_tensor_storage_context:
-                    (directory / "exact-dtype-refusal.json").write_text(
-                        json.dumps(
-                            dict(
-                                family="F2",
-                                code="native_cpu_word_layout_unproved",
-                                reason=(
-                                    "reduced storage unary CPU loop requires one original tensor and a certified "
-                                    "dense or rank-one layout below its parallel grain"
-                                ),
-                            )
-                        )
-                        + "\n"
+                    raise Refusal(
+                        code="native_cpu_word_layout_unproved",
+                        reason=(
+                            "reduced storage unary CPU loop requires one original tensor and a certified "
+                            "dense or rank-one layout below its parallel grain"
+                        ),
                     )
-                    return None
         if any(
             dtype in {"i8", "i16", "i32", "i64", "f16", "bf16", "f32", "f64", "complex<f32>"} for dtype in native_types
         ):
@@ -383,10 +364,7 @@ def prepare_integer_components(
                     module, grids, known_grids=conversion_grids, ieee_pointwise=True
                 )
             except ValueError as exc:
-                (directory / "exact-dtype-refusal.json").write_text(
-                    json.dumps(dict(family="F2", code="native_typed_representation_unproved", reason=str(exc))) + "\n"
-                )
-                return None
+                raise Refusal(code="native_typed_representation_unproved", reason=str(exc))
             known_bounds.update(added)
             typed_proofs.extend(floating_proofs)
             from xdsl.dialects.builtin import UnitAttr
@@ -397,34 +375,20 @@ def prepare_integer_components(
             observe("typed_ieee_components")
         if any(b is None for b in bounds):
             if not sign_proofs and not typed_proofs:
-                (directory / "exact-dtype-refusal.json").write_text(
-                    json.dumps(
-                        dict(
-                            family="F2",
-                            code="native_float_representation_semantics_unproved",
-                            reason="no full-domain native IEEE producer theorem for this source",
-                        )
-                    )
-                    + "\n"
+                raise Refusal(
+                    code="native_float_representation_semantics_unproved",
+                    reason="no full-domain native IEEE producer theorem for this source",
                 )
-                return None
             # Sign/selection producers read raw storage words. They do not use a
             # numerical grid, even for signaling NaNs, infinities and signed zeros.
             bounds = [0 if b is None else b for b in bounds]
     if any(proof.get("arithmetic") == "source_compare_select_retained_host" for proof in sign_proofs):
         # An identity component producer followed by the source threshold on
         # the host is not native coverage of that threshold's arithmetic.
-        (directory / "exact-dtype-refusal.json").write_text(
-            json.dumps(
-                dict(
-                    family="F2",
-                    code="native_family_arithmetic_retained_host",
-                    reason="device components only copy storage; source compare/select remains on host",
-                )
-            )
-            + "\n"
+        raise Refusal(
+            code="native_family_arithmetic_retained_host",
+            reason="device components only copy storage; source compare/select remains on host",
         )
-        return None
     if semantics.get("method") == "typed_storage_and_modular_ring_v1":
         from merlin.llvmlower.integer_division_components import rewrite_integer_divisions
 
@@ -439,17 +403,10 @@ def prepare_integer_components(
     )
     observe("integer_components")
     if not plans:
-        (directory / "exact-dtype-refusal.json").write_text(
-            json.dumps(
-                dict(
-                    family="F2",
-                    code="native_component_producer_unavailable",
-                    reason="no complete exact integer component producer matches the source",
-                )
-            )
-            + "\n"
+        raise Refusal(
+            code="native_component_producer_unavailable",
+            reason="no complete exact integer component producer matches the source",
         )
-        return None
     from merlin.llvmlower.entry_weight_projection import _pure_dce
     from merlin.llvmlower.literal_zero_components import fold_literal_zero_components
 
@@ -470,17 +427,10 @@ def prepare_integer_components(
     if remaining_products:
         if quantized_contract is not None:
             (directory / "quantized-native-uncovered.mlir").write_text(str(module))
-        (directory / "exact-dtype-refusal.json").write_text(
-            json.dumps(
-                dict(
-                    family="F2",
-                    reason=("native arithmetic remains in host source; partial preludes do not place the operation"),
-                    source_operation_ordinals=remaining_products,
-                )
-            )
-            + "\n"
+        raise Refusal(
+            reason="native arithmetic remains in host source; partial preludes do not place the operation",
+            source_operation_ordinals=remaining_products,
         )
-        return None
     for origin, destination, dtype in (("host", "accelerator", "i8"), ("accelerator", "host", "i32")):
         decision = screen_transfer_contract(
             selection["spec"],
@@ -492,41 +442,24 @@ def prepare_integer_components(
             result_layout="row_major_contiguous",
         )
         if decision["status"] != "admitted":
-            (directory / "exact-dtype-refusal.json").write_text(
-                json.dumps(
-                    dict(
-                        family="F2",
-                        code="native_component_transfer_unadmitted",
-                        reason="exact component transfer has no admitted declaration",
-                        transfer=decision,
-                    )
-                )
-                + "\n"
+            raise Refusal(
+                code="native_component_transfer_unadmitted",
+                reason="exact component transfer has no admitted declaration",
+                transfer=decision,
             )
-            return None
     from merlin.xdsl_dialects._common import text
 
     source = text(module, generic=True) if quantized_contract is not None else str(module)
     try:
         proof = provider.admit_numeric_schedule(source, package=package, numeric_policy=selection["spec"])
     except ValueError as exc:
-        (directory / "exact-dtype-refusal.json").write_text(
-            json.dumps(
-                dict(
-                    family="F2",
-                    reason="selected provider refuses exact components: " + str(exc),
-                    source_sha256=hashlib.sha256(source.encode()).hexdigest(),
-                )
-            )
-            + "\n"
+        raise Refusal(
+            reason="selected provider refuses exact components: " + str(exc),
+            source_sha256=hashlib.sha256(source.encode()).hexdigest(),
         )
-        return None
     if proof.get("status") != "proven" or proof.get("source_sha256") != hashlib.sha256(source.encode()).hexdigest():
         reason = proof.get("reason", "component provider proof unavailable")
-        (directory / "exact-dtype-refusal.json").write_text(
-            json.dumps(dict(family="F2", reason=reason, provider_proof=proof)) + "\n"
-        )
-        return None
+        raise Refusal(reason=reason, provider_proof=proof)
     sites = []
     for ordinal, op in enumerate(module.walk()):
         if limb_attribute not in op.attributes:
@@ -557,19 +490,12 @@ def prepare_integer_components(
         decision = admit_operation(selection["spec"], family, signature, "accelerator")
         host = admit_operation(selection["host"], family, signature, "host")
         if decision["status"] != "admitted" or host["status"] != "admitted" or len(binding) != 1:
-            (directory / "exact-dtype-refusal.json").write_text(
-                json.dumps(
-                    dict(
-                        family="F2",
-                        reason="component software/host/source binding incomplete",
-                        software=decision,
-                        host=host,
-                        bindings=binding,
-                    )
-                )
-                + "\n"
+            raise Refusal(
+                reason="component software/host/source binding incomplete",
+                software=decision,
+                host=host,
+                bindings=binding,
             )
-            return None
         numeric = binding[0]["numeric"]
         from merlin.targetgen.native_mac_bound import require_mesh_mac_bound
 
