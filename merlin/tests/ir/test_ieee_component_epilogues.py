@@ -1,59 +1,13 @@
 # ruff: noqa: E501 -- MLIR fixtures retain one operation per line
 """Exact bit checks for signed-zero and separable invalid-result epilogues."""
 
-import struct
-
 import pytest
-from mlir_fixtures import forward, generic
+from mlir_fixtures import forward, generic, run_block
 
 from merlin.llvmlower.fixed_point_ir import FORMAT
 from merlin.llvmlower.floating_components import rewrite_floating_components
 from merlin.llvmlower.ieee_zero_division import rewrite_zero_division
 from merlin.targetgen.core_aten_components import unlowered_data_reductions
-
-
-def scalar_bits(block, arguments):
-    values = dict(zip(block.args, arguments, strict=True))
-
-    def floating(bits, token):
-        if token == "bf16":
-            return struct.unpack("<f", (bits << 16).to_bytes(4, "little"))[0]
-        return struct.unpack(
-            {"f16": "<e", "f32": "<f", "f64": "<d"}[token],
-            bits.to_bytes({"f16": 2, "f32": 4, "f64": 8}[token], "little"),
-        )[0]
-
-    for op in block.ops:
-        args = [values[v] for v in op.operands]
-        name = op.name
-        if name == "linalg.yield":
-            return args[0]
-        if name == "arith.constant":
-            value = op.value.value.data
-            typ = str(op.results[0].type)
-            if typ in FORMAT:
-                value = int.from_bytes(op.results[0].type.pack([value]), "little")
-        elif name == "arith.bitcast":
-            value = args[0]
-        elif name == "arith.select":
-            value = args[1] if args[0] else args[2]
-        elif name == "arith.cmpf":
-            assert op.predicate.value.data == 1  # ordered equal
-            value = int(floating(args[0], str(op.operands[0].type)) == floating(args[1], str(op.operands[1].type)))
-        elif name == "arith.cmpi":
-            predicate = op.predicate.value.data
-            a, b = args
-            value = int({0: a == b, 1: a != b, 6: a < b, 8: a > b}[predicate])
-        elif name in {"arith.andi", "arith.ori", "arith.xori"}:
-            a, b = args
-            value = {"arith.andi": lambda: a & b, "arith.ori": lambda: a | b, "arith.xori": lambda: a ^ b}[name]()
-        else:
-            raise AssertionError(name)
-        typ = op.results[0].type
-        if hasattr(typ, "width"):
-            value &= (1 << typ.width.data) - 1
-        values[op.results[0]] = value
-    raise AssertionError("missing yield")
 
 
 def module(token, operation, divisor=None):
@@ -81,11 +35,11 @@ def test_exact_zero_uses_ieee_rne_operand_signs(token, operation):
     for left in (0, sign):
         for right in (0, sign):
             expected_negative = bool(left) and (not bool(right) if operation == "subf" else bool(right))
-            assert scalar_bits(final.body.block, [0, 0, left, right, 0]) == (sign if expected_negative else 0)
+            assert run_block(final.body.block, [0, 0, left, right, 0]) == (sign if expected_negative else 0)
     # Nonzero exact cancellation rounds to positive zero under RNE.
     one = bias << f
     right = one if operation == "subf" else one | sign
-    assert scalar_bits(final.body.block, [0, 0, one, right, 0]) == 0
+    assert run_block(final.body.block, [0, 0, one, right, 0]) == 0
 
 
 @pytest.mark.parametrize("token", ["f16", "bf16", "f32", "f64"])
@@ -101,11 +55,9 @@ def test_zero_divisor_overlay_depends_on_the_computed_numerator(token, divisor):
     zero_sign = sign if divisor == "-0.0" else 0
     invalid = inf | 1 << (f - 1) | (0 if token == "bf16" else sign)
     for numerator in (0, sign):
-        assert scalar_bits(producers[-1].body.block, [numerator, zero_sign, 0]) == invalid
+        assert run_block(producers[-1].body.block, [numerator, zero_sign, 0]) == invalid
     for numerator in (bias << f, (bias << f) | sign):
-        assert scalar_bits(producers[-1].body.block, [numerator, zero_sign, 0]) == inf | (
-            (numerator ^ zero_sign) & sign
-        )
+        assert run_block(producers[-1].body.block, [numerator, zero_sign, 0]) == inf | ((numerator ^ zero_sign) & sign)
 
 
 @pytest.mark.parametrize("token", ["f16", "bf16", "f32", "f64"])
@@ -121,10 +73,10 @@ def test_aggregate_propagation_keeps_special_words_and_discards_finite_terms(tok
     inf, sign = ((1 << e) - 1) << f, 1 << (f + e)
     one, nan = bias << f, inf | 1 << (f - 1)
     invalid = nan | (0 if token == "bf16" else sign)
-    assert scalar_bits(propagation.body.block, [one, one, 0]) == 0
-    assert scalar_bits(propagation.body.block, [inf, one, 0]) == inf
-    assert scalar_bits(propagation.body.block, [inf, inf | sign, 0]) == invalid
-    assert scalar_bits(propagation.body.block, [nan, one, 0]) == nan
+    assert run_block(propagation.body.block, [one, one, 0]) == 0
+    assert run_block(propagation.body.block, [inf, one, 0]) == inf
+    assert run_block(propagation.body.block, [inf, inf | sign, 0]) == invalid
+    assert run_block(propagation.body.block, [nan, one, 0]) == nan
 
 
 def test_aggregate_finite_overflow_requires_host_instruction_order():

@@ -5,8 +5,8 @@ from fractions import Fraction
 
 import numpy as np
 import pytest
-
-from exact_readout_source import Scalar, build_readout
+from exact_readout_source import build_readout
+from mlir_fixtures import run_block
 
 
 def fixture(scales, *, size=513, floating=False, bias=False, **kwargs):
@@ -59,87 +59,6 @@ def fixture(scales, *, size=513, floating=False, bias=False, **kwargs):
     return ModuleOp([fn]), reader
 
 
-def scalar(block, arguments, external=None):
-    values = {**(external or {}), **dict(zip(block.args, arguments))}
-
-    def signed(v, typ):
-        w = typ.width.data
-        return v - (1 << w) if v & (1 << (w - 1)) else v
-
-    for op in block.ops:
-        a = [values[v] for v in op.operands]
-        name = op.name
-        if name == "builtin.unregistered":
-            name = op.op_name.data
-        if name in {"linalg.yield", "scf.yield"}:
-            return a[0]
-        if name == "arith.constant" and hasattr(op.value, "get_values"):
-            v = np.array(list(op.value.get_values()), dtype=object).reshape(op.results[0].type.get_shape())
-        elif name == "tensor.extract":
-            v = a[0][tuple(a[1:])]
-        elif name == "arith.index_cast":
-            v = a[0]
-        elif name == "scf.if":
-            v = scalar(op.regions[0 if a[0] else 1].block, [], values)
-        elif name == "arith.constant":
-            v = op.value.value.data
-            if str(op.results[0].type) == "f32":
-                import struct
-
-                v = int.from_bytes(struct.pack("<f", v), "little")
-        elif name == "arith.select":
-            v = a[1] if a[0] else a[2]
-        elif name in {"arith.trunci", "arith.extui", "arith.bitcast"}:
-            v = a[0]
-        elif name == "arith.uitofp":
-            import struct
-
-            from merlin.targetgen.exact_arithmetic import round_binary
-
-            v = int.from_bytes(struct.pack("<f", round_binary(Fraction(a[0]))), "little")
-        elif name == "arith.mulf":
-            import struct
-
-            from merlin.targetgen.exact_arithmetic import round_binary
-
-            floats = [struct.unpack("<f", int(bits).to_bytes(4, "little"))[0] for bits in a]
-            v = int.from_bytes(struct.pack("<f", round_binary(Fraction(floats[0]) * Fraction(floats[1]))), "little")
-        elif name == "arith.extsi":
-            v = signed(a[0], op.operands[0].type)
-        elif name in {"llvm.call_intrinsic", "llvm.intr.ctlz"}:
-            v = op.operands[0].type.width.data - a[0].bit_length()
-        elif name == "cf.assert":
-            assert a[0]
-            continue
-        elif name == "arith.cmpi":
-            p = op.predicate.value.data
-            x, y = a
-            if 2 <= p <= 5:
-                x, y = [signed(v, o.type) for v, o in zip(a, op.operands)]
-            v = int([x == y, x != y, x < y, x <= y, x > y, x >= y, x < y, x <= y, x > y, x >= y][p])
-        else:
-            x, y = a
-            if name in {"arith.shli", "arith.shrui"}:
-                assert 0 <= y < op.operands[0].type.width.data
-            v = {
-                "arith.addi": lambda: x + y,
-                "arith.subi": lambda: x - y,
-                "arith.muli": lambda: x * y,
-                "arith.xori": lambda: x ^ y,
-                "arith.andi": lambda: x & y,
-                "arith.ori": lambda: x | y,
-                "arith.shrui": lambda: x >> y,
-                "arith.shrsi": lambda: signed(x, op.operands[0].type) >> y,
-                "arith.shli": lambda: x << y,
-                "arith.maxsi": lambda: max(signed(x, op.operands[0].type), signed(y, op.operands[1].type)),
-                "arith.minsi": lambda: min(signed(x, op.operands[0].type), signed(y, op.operands[1].type)),
-            }[name]()
-        if hasattr(op.results[0].type, "width"):
-            v &= (1 << op.results[0].type.width.data) - 1
-        values[op.results[0]] = v
-    raise AssertionError("no yield")
-
-
 @pytest.mark.parametrize(
     "scale",
     [
@@ -168,7 +87,7 @@ def test_emitted_requantizer_exact_at_extremes_ties_and_random(scale, zp, lo, hi
         code = round(v * scale) + zp
         if relu:
             code = max(zp, code)
-        assert scalar(r.body.block, [v & 0xFFFFFFFF, 0]) == min(hi, max(lo, code)) & 255
+        assert run_block(r.body.block, [v & 0xFFFFFFFF, 0]) == min(hi, max(lo, code)) & 255
 
 
 def test_complete_small_numerator_domain():
@@ -176,7 +95,7 @@ def test_complete_small_numerator_domain():
     m, r = fixture([scale])
     m.verify()
     for v in range(-32768, 32769):
-        assert scalar(r.body.block, [v & 0xFFFFFFFF, 0]) == min(127, max(-128, round(v * scale))) & 255
+        assert run_block(r.body.block, [v & 0xFFFFFFFF, 0]) == min(127, max(-128, round(v * scale))) & 255
 
 
 @pytest.mark.parametrize("bias", [False, True])
@@ -209,7 +128,7 @@ def test_float_readout_bits(scale, bias):
         exact = v * scale + Fraction(bv)
         expected = reference_bits(exact.numerator, 0, exact.denominator, "f32")
         args = [v & 0xFFFFFFFF, *([bs] if bias else []), 0]
-        assert scalar(r.body.block, args) == expected, (v, bs, scale)
+        assert run_block(r.body.block, args) == expected, (v, bs, scale)
 
 
 @pytest.mark.parametrize("floating,bias", [(False, False), (True, False), (True, True)])

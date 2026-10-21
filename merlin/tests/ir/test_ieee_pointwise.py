@@ -3,10 +3,9 @@
 
 import math
 import random
-import struct
 
 import pytest
-from mlir_fixtures import pointwise
+from mlir_fixtures import emitter, float_value, pointwise, run_ops
 from xdsl.dialects.builtin import bf16, f16, f32, f64
 from xdsl.ir import Block
 
@@ -18,33 +17,14 @@ from merlin.llvmlower.ieee_pointwise import special
 @pytest.mark.parametrize("typ", [f16, bf16, f32, f64])
 def test_classification_does_not_quiet_or_round_inputs(typ):
     block = Block(arg_types=[typ])
-
-    def emit(op):
-        block.add_op(op)
-        return op.results[0]
-
-    result = special(block.args[0], emit)
+    result = special(block.args[0], emitter(block))
     width = {"f16": 16, "bf16": 16, "f32": 32, "f64": 64}[str(typ)]
     rng = random.Random(842)
     samples = range(1 << 16) if width == 16 else [rng.getrandbits(width) for _ in range(4096)]
     for raw in samples:
         values = {block.args[0]: raw}
-        for op in block.ops:
-            args = [values[v] for v in op.operands]
-            if op.name == "arith.constant":
-                value = op.value.value.data
-            elif op.name == "arith.bitcast":
-                value = args[0]
-            elif op.name == "arith.andi":
-                value = args[0] & args[1]
-            elif op.name == "arith.cmpi":
-                value = args[0] == args[1]
-            else:
-                raise AssertionError(op.name)
-            values[op.results[0]] = value
-        data = (raw << 16).to_bytes(4, "little") if typ == bf16 else raw.to_bytes(width // 8, "little")
-        value = struct.unpack("<f" if typ == bf16 else {16: "<e", 32: "<f", 64: "<d"}[width], data)[0]
-        assert bool(values[result]) == (not math.isfinite(value))
+        run_ops(block.ops, values)
+        assert bool(values[result]) == (not math.isfinite(float_value(raw, typ)))
 
 
 @pytest.mark.parametrize("operation", ["addf", "subf", "mulf"])
@@ -75,12 +55,7 @@ def test_explicit_special_words_match_native_cpu(typ, operation):
     nan = infinity | 1 << (fraction - 1)
     words = [0, sign, bias << fraction, (bias << fraction) | sign, infinity, infinity | sign, nan, nan | sign]
     block = Block(arg_types=[typ, typ])
-
-    def emit(op):
-        block.add_op(op)
-        return op.results[0]
-
-    result = special_arithmetic("arith." + operation + "f", block.args, emit)
+    result = special_arithmetic("arith." + operation + "f", block.args, emitter(block))
     dtype = {"f16": torch.float16, "bf16": torch.bfloat16, "f32": torch.float32, "f64": torch.float64}[str(typ)]
     storage = {16: torch.int16, 32: torch.int32, 64: torch.int64}[width]
     for a in words:
@@ -90,30 +65,7 @@ def test_explicit_special_words_match_native_cpu(typ, operation):
             if a & ~sign > infinity and b & ~sign > infinity and a != b:
                 continue  # The independent admission audit refuses competing payloads.
             values = dict(zip(block.args, [a, b]))
-            for op in block.ops:
-                args = [values[v] for v in op.operands]
-                if op.name == "arith.constant":
-                    value = op.value.value.data
-                elif op.name == "arith.bitcast":
-                    value = args[0]
-                elif op.name == "arith.andi":
-                    value = args[0] & args[1]
-                elif op.name == "arith.ori":
-                    value = args[0] | args[1]
-                elif op.name == "arith.xori":
-                    value = args[0] ^ args[1]
-                elif op.name == "arith.select":
-                    value = args[1] if args[0] else args[2]
-                elif op.name == "arith.cmpi":
-                    value = {0: args[0] == args[1], 1: args[0] != args[1], 6: args[0] < args[1], 8: args[0] > args[1]}[
-                        op.predicate.value.data
-                    ]
-                else:
-                    raise AssertionError(op.name)
-                t = op.results[0].type
-                if hasattr(t, "width"):
-                    value &= (1 << t.width.data) - 1
-                values[op.results[0]] = value
+            run_ops(block.ops, values)
             pair = torch.tensor([v if v < sign else v - (1 << width) for v in [a, b]], dtype=storage).view(dtype)
             expected = int(getattr(torch, operation)(pair[0], pair[1]).view(storage)) & mask
             assert values[result] == expected
@@ -127,12 +79,7 @@ def test_special_readout_does_not_taint_an_unread_shape_operand():
     proof = dependence_proof(source)
     assert [d["operand"] for d in proof["input_dependencies"]] == [0, 1]
     readout = Block(arg_types=[f32] * 4)
-
-    def emit(op):
-        readout.add_op(op)
-        return op.results[0]
-
-    overlay(source, readout.args[:3], readout.args[3], emit)
+    overlay(source, readout.args[:3], readout.args[3], emitter(readout))
     assert not readout.args[2].uses
     assert readout.args[0].uses and readout.args[1].uses
 

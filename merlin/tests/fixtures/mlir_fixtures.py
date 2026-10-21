@@ -4,7 +4,12 @@ Most fixtures are one ``@forward`` function around identity-map ``linalg.generic
 helpers write that boilerplate, so a test states only its types and scalar body.
 """
 
+import operator
 import re
+import struct
+from fractions import Fraction
+
+import numpy as np
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 
@@ -61,3 +66,103 @@ def assert_unchanged(module, transform, expected=0):
     outcome = transform(module)
     assert outcome == expected, outcome
     assert str(module) == before, "refused transform changed the module"
+
+
+_BINARY = {
+    "arith.addi": operator.add,
+    "arith.subi": operator.sub,
+    "arith.muli": operator.mul,
+    "arith.andi": operator.and_,
+    "arith.ori": operator.or_,
+    "arith.xori": operator.xor,
+    "arith.shli": operator.lshift,
+    "arith.shrui": operator.rshift,
+    "arith.divui": operator.floordiv,
+    "arith.remui": operator.mod,
+}
+
+
+def signed(word, typ):
+    """Two's-complement value of an unsigned ``word`` of integer type ``typ``."""
+    width = typ.width.data
+    return word - (1 << width) if word >> (width - 1) & 1 else word
+
+
+def float_value(word, typ):
+    """The IEEE value stored in ``word`` of floating type ``typ``."""
+    if str(typ) == "bf16":
+        return struct.unpack("<f", (word << 16).to_bytes(4, "little"))[0]
+    fmt = {"f16": "<e", "f32": "<f", "f64": "<d"}[str(typ)]
+    return struct.unpack(fmt, word.to_bytes(struct.calcsize(fmt), "little"))[0]
+
+
+def run_ops(ops, values):
+    """Interpret scalar ``ops`` on unsigned storage words in ``values``; return what they yield.
+
+    Integer results are reduced to their width, floating values are raw IEEE words.
+    """
+    from merlin.targetgen.exact_arithmetic import round_binary
+
+    for op in ops:
+        a = [values[v] for v in op.operands]
+        name = op.op_name.data if op.name == "builtin.unregistered" else op.name
+        typ = op.results[0].type if op.results else None
+        if name in {"linalg.yield", "scf.yield"}:
+            return a[0]
+        if name == "cf.assert":
+            assert a[0]
+            continue
+        if name == "arith.constant" and hasattr(op.value, "get_values"):
+            value = np.array(list(op.value.get_values()), dtype=object).reshape(typ.get_shape())
+        elif name == "arith.constant":
+            value = op.value.value.data
+            if str(typ) in {"f16", "bf16", "f32", "f64"}:
+                value = int.from_bytes(typ.pack([value]), "little")
+        elif name == "tensor.extract":
+            value = a[0][tuple(a[1:])]
+        elif name == "scf.if":
+            value = run_ops(op.regions[0 if a[0] else 1].block.ops, values)
+        elif name in {"arith.bitcast", "arith.trunci", "arith.extui", "arith.index_cast"}:
+            value = a[0]
+        elif name == "arith.extsi":
+            value = signed(a[0], op.operands[0].type)
+        elif name == "arith.select":
+            value = a[1] if a[0] else a[2]
+        elif name == "arith.cmpi":
+            x, y = a
+            predicate = op.predicate.value.data
+            if 2 <= predicate <= 5:
+                x, y = [signed(v, o.type) for v, o in zip(a, op.operands)]
+            value = [x == y, x != y, x < y, x <= y, x > y, x >= y, x < y, x <= y, x > y, x >= y][predicate]
+        elif name == "arith.cmpf":
+            x, y = [float_value(v, o.type) for v, o in zip(a, op.operands)]
+            value = {1: x == y, 2: x > y, 3: x >= y, 4: x < y, 5: x <= y}[op.predicate.value.data]
+        elif name in {"arith.shrsi", "arith.maxsi", "arith.minsi"}:
+            x = signed(a[0], op.operands[0].type)
+            if name == "arith.shrsi":
+                value = x >> a[1]
+            else:
+                value = (max if name == "arith.maxsi" else min)(x, signed(a[1], op.operands[1].type))
+        elif name in {"llvm.call_intrinsic", "llvm.intr.ctlz"}:
+            value = op.operands[0].type.width.data - a[0].bit_length()
+        elif name == "arith.uitofp":
+            value = int.from_bytes(typ.pack([round_binary(Fraction(a[0]))]), "little")
+        elif name == "arith.mulf":
+            x, y = [Fraction(float_value(v, o.type)) for v, o in zip(a, op.operands)]
+            value = int.from_bytes(typ.pack([round_binary(x * y)]), "little")
+        else:
+            if name in {"arith.shli", "arith.shrui"}:
+                assert 0 <= a[1] < op.operands[0].type.width.data, (name, a[1])
+            value = _BINARY[name](*a)
+        values[op.results[0]] = int(value) & ((1 << typ.width.data) - 1) if hasattr(typ, "width") else value
+
+
+def run_block(block, arguments):
+    """Run a scalar region on its argument words; return its yielded word."""
+    return run_ops(block.ops, dict(zip(block.args, arguments, strict=True)))
+
+
+def emitter(block):
+    """An ``emit`` callback that appends each op to ``block`` and returns its result."""
+    return lambda op: (block.add_op(op), op.results[0])[1]
+

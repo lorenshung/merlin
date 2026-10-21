@@ -4,6 +4,7 @@ import random
 from fractions import Fraction
 
 import pytest
+from mlir_fixtures import emitter, run_ops
 from xdsl.dialects.builtin import IntegerType, bf16, f16, f32, f64
 from xdsl.ir import Block
 
@@ -38,66 +39,9 @@ def reference_bits(numerator, exponent, denominator, token):
 
 def emitted_bits(numerator, exponent, denominator, dtype, width=128):
     block = Block(arg_types=[IntegerType(width)])
-    operations = []
-
-    def emit(op):
-        operations.append(op)
-        return op.results[0]
-
-    result = encode_fixed_integer(block.args[0], exponent, dtype, emit, denominator=denominator)
+    result = encode_fixed_integer(block.args[0], exponent, dtype, emitter(block), denominator=denominator)
     values = {block.args[0]: numerator & ((1 << width) - 1)}
-
-    def signed(value, typ):
-        width = typ.width.data
-        return value - (1 << width) if value & (1 << (width - 1)) else value
-
-    for op in operations:
-        args = [values[v] for v in op.operands]
-        name = op.name
-        if name == "arith.constant":
-            value = op.value.value.data
-        elif name == "arith.select":
-            value = args[1] if args[0] else args[2]
-        elif name == "arith.cmpi":
-            predicate = op.predicate.value.data
-            left, right = args
-            if predicate in (2, 3, 4, 5):
-                left, right = [signed(v, operand.type) for v, operand in zip(args, op.operands)]
-            value = int(
-                [
-                    left == right,
-                    left != right,
-                    left < right,
-                    left <= right,
-                    left > right,
-                    left >= right,
-                    left < right,
-                    left <= right,
-                    left > right,
-                    left >= right,
-                ][predicate]
-            )
-        elif name in {"arith.trunci", "arith.extui", "arith.bitcast"}:
-            value = args[0]
-        else:
-            left, right = args
-            if name in {"arith.shli", "arith.shrui"}:
-                assert 0 <= right < op.operands[0].type.width.data, (name, right)
-            value = {
-                "arith.addi": lambda: left + right,
-                "arith.muli": lambda: left * right,
-                "arith.subi": lambda: left - right,
-                "arith.andi": lambda: left & right,
-                "arith.ori": lambda: left | right,
-                "arith.shli": lambda: left << right,
-                "arith.shrui": lambda: left >> right,
-                "arith.divui": lambda: left // right,
-                "arith.remui": lambda: left % right,
-            }[name]()
-        typ = op.results[0].type
-        if isinstance(typ, IntegerType):
-            value &= (1 << typ.width.data) - 1
-        values[op.results[0]] = value
+    run_ops(block.ops, values)
     return values[result]
 
 

@@ -1,8 +1,7 @@
 """Fused floating products use integer MACs and one rational result boundary."""
 
 import pytest
-from mlir_fixtures import forward, generic, pointwise
-from test_ieee_component_epilogues import scalar_bits
+from mlir_fixtures import forward, generic, pointwise, run_block
 
 from merlin.llvmlower.floating_components import rewrite_floating_components
 from merlin.llvmlower.integer_components import rewrite_integer_components
@@ -25,10 +24,10 @@ def test_fma_zero_sign_and_exact_cancellation(token, width, bias):
         for b in [0, sign]:
             for c in [0, sign]:
                 expected = sign if bool(a ^ b) and bool(c) else 0
-                assert scalar_bits(final.body.block, [0, 0, a, b, c, 0]) == expected
+                assert run_block(final.body.block, [0, 0, a, b, c, 0]) == expected
     fraction = 23 if width == 32 else 52
     one = bias << fraction
-    assert scalar_bits(final.body.block, [0, 0, one, one, one | sign, 0]) == 0
+    assert run_block(final.body.block, [0, 0, one, one, one | sign, 0]) == 0
 
 
 @pytest.mark.parametrize("grids", [[(-23, 2**23 + 1), (-23, 2**23 - 1), (0, 1)], [(-100, 1), (20, 1), (-120, 1)]])

@@ -4,7 +4,7 @@ import json
 
 import numpy as np
 import pytest
-from mlir_fixtures import assert_unchanged, forward, generic, pointwise
+from mlir_fixtures import assert_unchanged, forward, generic, pointwise, run_ops, signed
 from xdsl.dialects.builtin import IntegerType
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
@@ -18,75 +18,26 @@ def module(dtype, expression):
 
 
 def evaluate(module, arrays):
-    """Small integer SSA interpreter; all generated tensors have identity maps."""
+    """Small integer tensor interpreter over storage words; all generated tensors have identity maps."""
+    from xdsl.ir.affine import AffineDimExpr
+
     function = next(op for op in module.walk() if op.name == "func.func")
-    values = dict(zip(function.body.block.args, [np.array(a, dtype=object) for a in arrays]))
-
-    def normalize(value, typ):
-        if isinstance(typ, IntegerType):
-            bits = typ.width.data
-            value = int(value) % (1 << bits)
-            return value - (1 << bits) if value >= (1 << (bits - 1)) else value
-        return value
-
-    def scalar(op, env):
-        a = [env[v] for v in op.operands]
-        name = op.name
-        if name == "arith.constant":
-            result = op.value.value.data
-            if not isinstance(op.results[0].type, IntegerType):
-                result = int.from_bytes(op.results[0].type.pack([result]), "little")
-        elif name in {"arith.extsi", "arith.trunci", "arith.bitcast"}:
-            result = a[0]
-        elif name == "arith.extui":
-            result = a[0] % (1 << op.operands[0].type.width.data)
-        elif name == "arith.addi":
-            result = a[0] + a[1]
-        elif name == "arith.subi":
-            result = a[0] - a[1]
-        elif name == "arith.andi":
-            result = a[0] & a[1]
-        elif name == "arith.muli":
-            result = a[0] * a[1]
-        elif name == "arith.shrsi":
-            result = a[0] >> a[1]
-        elif name == "arith.shli":
-            assert 0 <= a[1] < op.results[0].type.width.data
-            result = a[0] << a[1]
-        elif name == "arith.cmpi":
-            predicate = op.predicate.value.data
-            assert predicate in (1, 2, 8)
-            result = int(
-                a[0] != a[1]
-                if predicate == 1
-                else a[0] < a[1]
-                if predicate == 2
-                else a[0] % (1 << op.operands[0].type.width.data) > a[1] % (1 << op.operands[1].type.width.data)
-            )
-        elif name == "arith.cmpf":
-            import struct
-
-            assert str(op.operands[0].type) == "f16" and op.predicate.value.data == 4
-            left, right = [struct.unpack("<e", (int(value) & 0xFFFF).to_bytes(2, "little"))[0] for value in a]
-            result = int(left < right)
-        elif name == "arith.select":
-            result = a[1] if a[0] else a[2]
-        else:
-            raise AssertionError(name)
-        env[op.results[0]] = normalize(result, op.results[0].type)
-
+    values = {
+        arg: np.frompyfunc(lambda v, t=arg.type.element_type: word(v, t), 1, 1)(np.array(a, dtype=object))
+        for arg, a in zip(function.body.block.args, arrays)
+    }
     for op in function.body.block.ops:
         if op.name == "func.return":
-            return values[op.operands[0]].tolist()
+            typ = op.operands[0].type.element_type
+            convert = signed if isinstance(typ, IntegerType) else lambda v, t: v
+            return np.frompyfunc(lambda v: convert(v, typ), 1, 1)(values[op.operands[0]]).tolist()
         if op.name == "arith.constant":
-            scalar(op, values)
+            run_ops([op], values)
         elif op.name == "tensor.empty":
             values[op.results[0]] = np.zeros(op.results[0].type.get_shape(), object)
         elif op.name == "tensor.splat":
             values[op.results[0]] = np.full(op.results[0].type.get_shape(), values[op.operands[0]], object)
         elif op.name == "linalg.generic":
-            from xdsl.ir.affine import AffineDimExpr
-
             output = values[op.outputs[0]].copy()
             maps = [attr.data for attr in op.get_indexing_maps()]
             extents = [None] * len(op.get_iterator_types())
@@ -105,15 +56,15 @@ def evaluate(module, arrays):
                     )
                     for i, (arg, source) in enumerate(zip(op.body.block.args, op.operands))
                 }
-                for child in op.body.block.ops:
-                    if child.name == "linalg.yield":
-                        output[output_index] = env[child.operands[0]]
-                    else:
-                        scalar(child, env)
+                output[output_index] = run_ops(op.body.block.ops, env)
             values[op.results[0]] = output
         else:
             raise AssertionError(op.name)
     raise AssertionError("no return")
+
+
+def word(value, typ):
+    return int(value) % (1 << typ.width.data) if isinstance(typ, IntegerType) else value
 
 
 @pytest.mark.parametrize("bits", [8, 32, 64])
