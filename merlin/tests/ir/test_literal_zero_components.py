@@ -2,30 +2,25 @@
 """Integer zero components are source algebra; floating unknowns remain unknown."""
 
 import pytest
+from mlir_fixtures import forward, generic, pointwise
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.literal_zero_components import fold_literal_zero_components
 
+LIMB = '{test.limb="integer"}'
+
 
 def source(literal):
-    rhs = "%zero" if literal else "%y"
-    return parse_mlir_text(f"""module {{
-      func.func @forward(%x:tensor<2xi8>,%y:tensor<2xi8>) -> tensor<2xi32> {{
-        %z=arith.constant 0 : i8
-        %zero=tensor.splat %z : tensor<2xi8>
-        %s=arith.constant 0 : i32
-        %seed=tensor.splat %s : tensor<2xi32>
-        %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-          ins(%x,{rhs}:tensor<2xi8>,tensor<2xi8>) outs(%seed:tensor<2xi32>) attrs={{test.limb="integer"}} {{
-        ^bb0(%a:i8,%b:i8,%acc:i32):
-          %x32=arith.extsi %a : i8 to i32
+    i8 = "tensor<2xi8>"
+    prelude = "%z=arith.constant 0 : i8\n%zero=tensor.splat %z : tensor<2xi8>\n"
+    prelude += "%s=arith.constant 0 : i32\n%seed=tensor.splat %s : tensor<2xi32>\n"
+    body = """%x32=arith.extsi %a : i8 to i32
           %y32=arith.extsi %b : i8 to i32
           %p=arith.muli %x32,%y32 : i32
-          %v=arith.addi %p,%acc : i32
-          linalg.yield %v : i32
-        }} -> tensor<2xi32>
-        return %r : tensor<2xi32>
-      }} }}""")
+          %v=arith.addi %p,%acc : i32"""
+    ins = [("%x", i8), ("%zero" if literal else "%y", i8)]
+    product = generic(ins, "tensor<2xi32>", body, out="%seed", acc="%acc", attrs=LIMB)
+    return forward(f"%x:{i8},%y:{i8}", "tensor<2xi32>", prelude + product)
 
 
 @pytest.mark.parametrize("literal", [True, False])
@@ -37,44 +32,21 @@ def test_only_a_source_literal_zero_removes_a_symbolic_integer_product(literal):
 
 
 def test_unknown_float_times_zero_is_not_an_integer_zero_proof():
-    module = parse_mlir_text("""module {
-      func.func @forward(%x:tensor<2xf32>) -> tensor<2xi32> {
-        %e=tensor.empty() : tensor<2xi8>
-        %p=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x:tensor<2xf32>) outs(%e:tensor<2xi8>) {
-        ^bb0(%v:f32,%out:i8):
-          %z=arith.constant 0.0 : f32
-          %m=arith.mulf %v,%z : f32
-          %i=arith.fptosi %m : f32 to i8
-          linalg.yield %i : i8
-        } -> tensor<2xi8>
-        %dest=tensor.empty() : tensor<2xi32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%p:tensor<2xi8>) outs(%dest:tensor<2xi32>) attrs={test.limb="integer"} {
-        ^bb1(%v:i8,%out:i32):
-          %i=arith.extsi %v : i8 to i32
-          linalg.yield %i : i32
-        } -> tensor<2xi32>
-        return %r : tensor<2xi32>
-      }}""")
+    body = "%z=arith.constant 0.0 : f32\n%m=arith.mulf %a,%z : f32\n%i=arith.fptosi %m : f32 to i8"
+    product = generic([("%x", "tensor<2xf32>")], "tensor<2xi8>", body, yields="%i", name="%p")
+    widened = generic(
+        [("%p", "tensor<2xi8>")], "tensor<2xi32>", "%i=arith.extsi %a : i8 to i32", yields="%i", attrs=LIMB
+    )
+    module = forward("%x:tensor<2xf32>", "tensor<2xi32>", product + "\n" + widened)
     assert fold_literal_zero_components(module, "test.limb") == 0
 
 
 def test_index_arithmetic_is_not_treated_as_a_fixed_width_integer():
-    module = parse_mlir_text("""module {
-      func.func @forward(%x:tensor<2xi32>) -> tensor<2xi32> {
-        %e=tensor.empty() : tensor<2xi32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x:tensor<2xi32>) outs(%e:tensor<2xi32>) attrs={test.limb="integer"} {
-        ^bb0(%v:i32,%unused:i32):
-          %zero=arith.constant 0 : index
+    body = """%zero=arith.constant 0 : index
           %one=arith.constant 1 : index
           %index=arith.addi %zero,%one : index
-          %converted=arith.index_cast %index : index to i32
-          linalg.yield %converted : i32
-        } -> tensor<2xi32>
-        return %r : tensor<2xi32>
-      }}""")
+          %converted=arith.index_cast %index : index to i32"""
+    module = pointwise(["tensor<2xi32>"], "tensor<2xi32>", body, yields="%converted", attrs=LIMB)
     assert fold_literal_zero_components(module, "test.limb") == 0
     assert any(op.name == "arith.index_cast" for op in module.walk())
 
@@ -98,20 +70,11 @@ def test_zero_result_does_not_erase_an_opaque_call():
 
 
 def test_deep_complete_limb_chain_does_not_exhaust_literal_fold_stack():
-    pieces = ["module { func.func @forward(%x:tensor<1xi32>)->tensor<1xi32> {"]
-    prior = "%x"
+    t, prior, chain = "tensor<1xi32>", "%x", []
     for i in range(1100):
-        marker = ' attrs={test.limb="integer"}' if i == 1099 else ""
-        pieces.append(f"""%e{i}=tensor.empty():tensor<1xi32>
-          %r{i}=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-          ins({prior}:tensor<1xi32>) outs(%e{i}:tensor<1xi32>){marker} {{
-          ^bb{i}(%a:i32,%unused:i32):
-            %one=arith.constant 1:i32
-            %sum=arith.addi %a,%one:i32
-            linalg.yield %sum:i32
-          }}->tensor<1xi32>""")
+        add = "%one=arith.constant 1:i32\n%sum=arith.addi %a,%one:i32"
+        chain.append(generic([(prior, t)], t, add, yields="%sum", name=f"%r{i}", attrs=LIMB if i == 1099 else ""))
         prior = f"%r{i}"
-    pieces.append(f"return {prior}:tensor<1xi32> }} }}")
-    module = parse_mlir_text("\n".join(pieces))
+    module = forward(f"%x:{t}", t, "\n".join(chain), ret=prior)
     assert fold_literal_zero_components(module, "test.limb") == 0
     assert sum("test.limb" in op.attributes for op in module.walk()) == 1
