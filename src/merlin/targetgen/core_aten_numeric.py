@@ -285,7 +285,7 @@ def _prepare_spec_int8(
     from merlin.targetgen.core_aten_spec_int8 import admission_plan, host_readout_chain, provider_proof, select_spec
 
     selection = select_spec(target, facts, software_spec, host_capabilities)
-    from merlin.targetgen.core_aten_exact_dtype import empty_host_plan
+    from merlin.targetgen.core_aten_exact_dtype import empty_host_plan, publish_plan
 
     empty = empty_host_plan(directory, report, selection)
     if empty is not None:
@@ -411,12 +411,8 @@ def _prepare_spec_int8(
                         status="refused", reasons=["exact source reference unavailable: " + process.stderr[-4000:]]
                     )
                 plan.update(status="refused", native_contractions=0)
-                document = {"selection": selection, **plan}
-                (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
                 (directory / "model.mlir").write_bytes(original)
-                for record in report["cases"]:
-                    record.update(numeric_admission=plan, numeric_selection=selection["identities"])
-                return document
+                return publish_plan(directory, report["cases"], selection, plan)
             reference = json.loads((directory / "native-int8-reference.json").read_text())
             if len(reference["output_bytes"]) != report["output_count"] + len(accumulators):
                 raise ValueError("native integer reference does not cover the complete exported boundary")
@@ -433,11 +429,7 @@ def _prepare_spec_int8(
             )
             report["output_count"] += len(accumulators)
             (directory / "model.mlir").write_text(str(module) + "\n")
-        document = {"selection": selection, **plan}
-        (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
-        for record in report["cases"]:
-            record.update(numeric_admission=plan, numeric_selection=selection["identities"])
-        return document
+        return publish_plan(directory, report["cases"], selection, plan)
     plan = admission_plan(module, selection, planned_exact_readout=True)
     plan["source_sha256_before"] = hashlib.sha256(original).hexdigest()
     selected = [site for site in plan["sites"] if site["status"] == "admitted"]
@@ -656,10 +648,7 @@ def _prepare_spec_int8(
                 selected = []
                 plan["source_sha256_before"] = hashlib.sha256(original).hexdigest()
                 plan["source_sha256_after"] = plan["source_sha256_before"]
-                document = {"selection": selection, **plan}
-                (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
-                records[0].update(numeric_admission=plan, numeric_selection=selection["identities"])
-                return document
+                return publish_plan(directory, records, selection, plan)
             selected = captured_plan["sites"]
             if len(selected) != len(reference["scales"]) or any(
                 scale.get("accumulator") is None for scale in reference["scales"]
@@ -669,10 +658,7 @@ def _prepare_spec_int8(
                 plan = {**captured_plan, "status": "refused", "quantized_contractions": 0}
                 plan["source_sha256_before"] = hashlib.sha256(original).hexdigest()
                 plan["source_sha256_after"] = plan["source_sha256_before"]
-                document = {"selection": selection, **plan}
-                (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
-                records[0].update(numeric_admission=plan, numeric_selection=selection["identities"])
-                return document
+                return publish_plan(directory, records, selection, plan)
             module = prepared_module
             plan = captured_plan
             if non_contraction_admitted:
