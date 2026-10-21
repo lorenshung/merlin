@@ -257,17 +257,23 @@ def test_selected_synthesis_refuses_changed_selection(tmp_path, changed):
         )
 
 
-def test_numeric_selection_binds_policy_and_source_bytes(tmp_path):
-    recipe = fixture_recipe(tmp_path)
+def numeric_flow(tmp_path, catalog=True):
+    """A spec_int8 numeric flow whose declared sources and device package are files under ``tmp_path``."""
     flow = {"policy": "spec_int8"}
     for key in ("software_spec", "host_capabilities", "execution_provider", "rtl_facts"):
-        path = tmp_path / key
-        path.write_text(key)
-        flow[key] = str(path)
+        (tmp_path / key).write_text(key)
+        flow[key] = str(tmp_path / key)
     package = tmp_path / "provider"
     package.mkdir()
-    (package / "catalog.py").write_text("schedule = 1")
+    if catalog:
+        (package / "catalog.py").write_text("schedule = 1")
     flow["device_package"] = str(package)
+    return flow, package
+
+
+def test_numeric_selection_binds_policy_and_source_bytes(tmp_path):
+    recipe = fixture_recipe(tmp_path)
+    flow, package = numeric_flow(tmp_path)
     document = yaml.safe_load(recipe.read_text())
     document["core_aten"]["numeric_flow"] = flow
     recipe.write_text(yaml.safe_dump(document))
@@ -388,15 +394,7 @@ def test_optional_device_selection_rejects_ambiguous_preparation(tmp_path, lane,
 def test_optional_numeric_preparation_requires_per_row_opt_in(tmp_path, monkeypatch, prepare):
     recipe = fixture_recipe(tmp_path)
     document = yaml.safe_load(recipe.read_bytes())
-    flow = {"policy": "spec_int8"}
-    for key in ("software_spec", "host_capabilities", "execution_provider", "rtl_facts"):
-        path = tmp_path / key
-        path.write_text(key)
-        flow[key] = str(path)
-    package = tmp_path / "provider"
-    package.mkdir()
-    (package / "catalog.py").write_text("schedule = 1")
-    flow["device_package"] = str(package)
+    flow, package = numeric_flow(tmp_path)
     document["core_aten"]["numeric_flow"] = flow
     for cohort in ("public", "hidden"):
         document["core_aten"]["cohorts"][cohort][0].update(lane="any", prepare_numeric=prepare)
@@ -444,14 +442,7 @@ def test_parallel_failure_receipt_never_promotes_and_continues_other_cohorts(tmp
 def test_truth_lanes_prepare_and_preserve_no_work_host_guards(tmp_path, monkeypatch):
     recipe = fixture_recipe(tmp_path)
     document = yaml.safe_load(recipe.read_bytes())
-    flow = {"policy": "spec_int8"}
-    for key in ("software_spec", "host_capabilities", "execution_provider", "rtl_facts"):
-        path = tmp_path / key
-        path.write_text(key)
-        flow[key] = str(path)
-    package = tmp_path / "provider"
-    package.mkdir()
-    flow["device_package"] = str(package)
+    flow, _ = numeric_flow(tmp_path, catalog=False)
     document["core_aten"]["numeric_flow"] = flow
     for cohort in stage.COHORTS:
         document["core_aten"]["cohorts"][cohort][0]["lane"] = "truth"
