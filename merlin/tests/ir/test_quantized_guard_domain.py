@@ -3,38 +3,30 @@
 from fractions import Fraction
 
 import pytest
-from mlir_fixtures import assert_unchanged
+from mlir_fixtures import assert_unchanged, forward
+from mlir_fixtures import generic as build_generic
 
 from merlin.common.mlir_query import op_name
-from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.quantized_guard_domain import Unproved, canonicalize_quantized_affine, prove_affine
+
+QPARAMS = """{prov.quant.storage_dtype="int8",prov.quant.quant_min=-128:i64,prov.quant.quant_max=127:i64,
+  prov.quant.zero_point=-3:i64,prov.quant.scale_numerator=["1"],prov.quant.scale_denominator=["32"]}"""
+
+
+def quantized(params, result, body, scale, inputs):
+    """@forward dequantizing each (name, value, type) input on the declared int8 grid, quantizing %out."""
+    prelude = f"%s=arith.constant {scale} : f64\n%st=tensor.splat %s : tensor<f64>\n"
+    prelude += "%z=arith.constant -3 : i64\n%zt=tensor.splat %z : tensor<i64>\n"
+    for name, value, typ in inputs:
+        operands = f"({value},%st,%zt) {QPARAMS} : ({typ},tensor<f64>,tensor<i64>)->{typ.replace('i8>', 'f32>')}"
+        prelude += f'{name}="quant_ext.dequantize_per_tensor"{operands}\n'
+    out = f'%q="quant_ext.quantize_per_tensor"(%out,%st,%zt) : ({result.replace("i8>", "f32>")},tensor<f64>,tensor<i64>)->{result}'
+    return forward(params, result, f"{prelude}{body}\n{out}", ret="%q")
 
 
 def source(*, subtract=False, scalar=False, live=False, scale="0.03125"):
-    sign = "-2" if subtract else "2"
-    rhs = "%k=tensor.splat %half : tensor<4xf32>" if scalar else ""
-    return parse_mlir_text(
-        """module {
-      func.func @forward(%x:tensor<4xi8>,%y:tensor<4xi8>) -> tensor<4xi8> {
-        %s=arith.constant SCALE : f64
-        %st=tensor.splat %s : tensor<f64>
-        %z=arith.constant -3 : i64
-        %zt=tensor.splat %z : tensor<i64>
-        %deqa="quant_ext.dequantize_per_tensor"(%x,%st,%zt) {
-          prov.quant.storage_dtype="int8",prov.quant.quant_min=-128:i64,prov.quant.quant_max=127:i64,
-          prov.quant.zero_point=-3:i64,prov.quant.scale_numerator=["1"],prov.quant.scale_denominator=["32"]
-        } : (tensor<4xi8>,tensor<f64>,tensor<i64>)->tensor<4xf32>
-        %deqb="quant_ext.dequantize_per_tensor"(%y,%st,%zt) {
-          prov.quant.storage_dtype="int8",prov.quant.quant_min=-128:i64,prov.quant.quant_max=127:i64,
-          prov.quant.zero_point=-3:i64,prov.quant.scale_numerator=["1"],prov.quant.scale_denominator=["32"]
-        } : (tensor<4xi8>,tensor<f64>,tensor<i64>)->tensor<4xf32>
-        %half=arith.constant 0.5 : f32
-        RHS
-        %e=tensor.empty() : tensor<4xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types=["parallel"]} ins(%deqa,RHSARG:tensor<4xf32>,tensor<4xf32>) outs(%e:tensor<4xf32>) {
-        ^bb0(%a:f32,%b:f32,%unused:f32):
-          %two=arith.constant SIGN : i64
+    t = "tensor<4xf32>"
+    body = f"""%two=arith.constant {"-2" if subtract else "2"} : i64
           %alpha=arith.sitofp %two : i64 to f32
           %f=math.fma %b,%alpha,%a : f32
           %bits=arith.constant -4194304 : i32
@@ -46,23 +38,17 @@ def source(*, subtract=False, scalar=False, live=False, scale="0.03125"):
           %index=linalg.index 0 : index
           %twoidx=arith.constant 2 : index
           %thread=arith.cmpi ult,%index,%twoidx : index
-          ALTERNATIVE
-          %v=arith.select %thread,%alternative,%safe : f32
-          linalg.yield %v : f32
-        } -> tensor<4xf32>
-        %q="quant_ext.quantize_per_tensor"(%r,%st,%zt) : (tensor<4xf32>,tensor<f64>,tensor<i64>)->tensor<4xi8>
-        return %q : tensor<4xi8>
-      }}""".replace("SCALE", scale)
-        .replace("RHSARG", "%k" if scalar else "%deqb")
-        .replace("RHS", rhs)
-        .replace("SIGN", sign)
-        .replace(
-            "ALTERNATIVE",
-            "%one=arith.constant 1.0 : f32\n%alternative=arith.addf %separate,%one : f32"
-            if live
-            else "%zero=arith.constant 0.0 : f32\n%alternative=arith.addf %separate,%zero : f32",
-        )
+          %k{1 if live else 0}=arith.constant {"1.0" if live else "0.0"} : f32
+          %alternative=arith.addf %separate,%k{1 if live else 0} : f32
+          %v=arith.select %thread,%alternative,%safe : f32"""
+    rhs = (
+        f"%half=arith.constant 0.5 : f32\n%k=tensor.splat %half : {t}\n"
+        if scalar
+        else "%half=arith.constant 0.5 : f32\n"
     )
+    affine = build_generic([("%deqa", t), ("%k" if scalar else "%deqb", t)], t, body, name="%out")
+    inputs = [("%deqa", "%x", "tensor<4xi8>"), ("%deqb", "%y", "tensor<4xi8>")]
+    return quantized("%x:tensor<4xi8>,%y:tensor<4xi8>", "tensor<4xi8>", rhs + affine, scale, inputs)
 
 
 def generic(module):
@@ -126,51 +112,35 @@ def test_default_has_no_native_ieee_reassociation_permission():
 
 def summed_guard(*, divisor="3.0", add="arith.addf", scale="0.03125", metadata=True):
     """A quantized sum/scale/carrier followed by an IEEE NaN-quieting map."""
-    text = '''module {
- func.func @forward(%x:tensor<2x3xi8>) -> tensor<2x1xi8> {
-  %s=arith.constant SCALE : f64
-  %st=tensor.splat %s : tensor<f64>
-  %z=arith.constant -3 : i64
-  %zt=tensor.splat %z : tensor<i64>
-  %dq="quant_ext.dequantize_per_tensor"(%x,%st,%zt) {
-   prov.quant.storage_dtype="int8",prov.quant.quant_min=-128:i64,prov.quant.quant_max=127:i64,
-   prov.quant.zero_point=-3:i64,prov.quant.scale_numerator=["1"],prov.quant.scale_denominator=["32"]
-  } : (tensor<2x3xi8>,tensor<f64>,tensor<i64>)->tensor<2x3xf32>
-  %zero=arith.constant 0.0 : f32
+    body = f"""%zero=arith.constant 0.0 : f32
   %init=tensor.splat %zero : tensor<2xf32>
-  %sum="linalg.reduce"(%dq,%init) <{dimensions=array<i64:1>}> ({
+  %sum="linalg.reduce"(%dq,%init) <{{dimensions=array<i64:1>}}> ({{
    ^bb0(%a:f32,%b:f32):
-    %v="ADD"(%a,%b) : (f32,f32)->f32
+    %v="{add}"(%a,%b) : (f32,f32)->f32
     "linalg.yield"(%v) : (f32)->()
-  }) : (tensor<2x3xf32>,tensor<2xf32>)->tensor<2xf32>
-  %d=arith.constant DIVISOR : f32
+  }}) : (tensor<2x3xf32>,tensor<2xf32>)->tensor<2xf32>
+  %d=arith.constant {divisor} : f32
   %ds=tensor.splat %d : tensor<2xf32>
-  %empty=tensor.empty() : tensor<2xf32>
-  %scaled=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-    iterator_types=["parallel"]} ins(%sum,%ds:tensor<2xf32>,tensor<2xf32>) outs(%empty:tensor<2xf32>) {
-   ^bb0(%a:f32,%b:f32,%unused:f32):
-    %v=arith.divf %a,%b : f32
-    linalg.yield %v : f32
-  } -> tensor<2xf32>
+"""
+    body += build_generic(
+        [("%sum", "tensor<2xf32>"), ("%ds", "tensor<2xf32>")],
+        "tensor<2xf32>",
+        "%v=arith.divf %a,%b : f32",
+        name="%scaled",
+    )
+    body += """
   %expanded="tensor.expand_shape"(%scaled)
     <{reassociation=[[0:i64,1:i64]],static_output_shape=array<i64:2,1>}>
     : (tensor<2xf32>)->tensor<2x1xf32>
-  %out=tensor.empty() : tensor<2x1xf32>
-  %quiet=linalg.generic {indexing_maps=[affine_map<(d0,d1)->(d0,d1)>,affine_map<(d0,d1)->(d0,d1)>],
-    iterator_types=["parallel","parallel"]} ins(%expanded:tensor<2x1xf32>) outs(%out:tensor<2x1xf32>) {
-   ^bb0(%a:f32,%unused:f32):
-    %bits=arith.bitcast %a : f32 to i32
+"""
+    quiet = """%bits=arith.bitcast %a : f32 to i32
     %mask=arith.constant 4194304 : i32
     %word=arith.ori %bits,%mask : i32
     %nan=arith.bitcast %word : i32 to f32
     %test=arith.cmpf uno,%a,%a : f32
-    %v=arith.select %test,%nan,%a : f32
-    linalg.yield %v : f32
-  } -> tensor<2x1xf32>
-  %q="quant_ext.quantize_per_tensor"(%quiet,%st,%zt) : (tensor<2x1xf32>,tensor<f64>,tensor<i64>)->tensor<2x1xi8>
-  return %q : tensor<2x1xi8>
- }}'''.replace("DIVISOR", divisor).replace("ADD", add).replace("SCALE", scale)
-    module = parse_mlir_text(text)
+    %v=arith.select %test,%nan,%a : f32"""
+    body += build_generic([("%expanded", "tensor<2x1xf32>")], "tensor<2x1xf32>", quiet, name="%out")
+    module = quantized("%x:tensor<2x3xi8>", "tensor<2x1xi8>", body, scale, [("%dq", "%x", "tensor<2x3xi8>")])
     if not metadata:
         next(o for o in module.walk() if op_name(o) == "quant_ext.dequantize_per_tensor").attributes.pop(
             "prov.quant.scale_numerator"
