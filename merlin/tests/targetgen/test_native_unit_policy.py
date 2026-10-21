@@ -3,7 +3,6 @@
 import pytest
 from mlir_fixtures import forward, generic, pointwise
 
-from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.native_unit_policy import construction_evidence
 
 
@@ -123,28 +122,29 @@ def test_construction_role_follows_scalar_dataflow(body, options, status, reason
     assert reason is None or decision["evidence"][0]["reason"] == reason
 
 
-def test_structured_address_selection_is_movement_not_index_payload_math():
-    module = parse_mlir_text("""module {
-      func.func @forward(%x: tensor<3xf32>,%y: tensor<3xf32>) -> tensor<3xf32> {
-        %e=tensor.empty() : tensor<3xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          outs(%e : tensor<3xf32>) {
-          ^bb0(%unused: f32):
-            %i=linalg.index 0 : index
-            %z=arith.constant 0 : index
-            %p=arith.cmpi eq,%i,%z : index
-            %v=scf.if %p -> (f32) {
-              %a=tensor.extract %x[%i] : tensor<3xf32>
-              scf.yield %a : f32
-            } else {
-              %b=tensor.extract %y[%i] : tensor<3xf32>
-              scf.yield %b : f32
-            }
-            linalg.yield %v : f32
-          } -> tensor<3xf32>
-        func.return %r : tensor<3xf32>
-      }}""")
-    assert construction_evidence(module)["status"] == "eligible"
+SELECT = """%z=arith.constant 0 : index
+%p=arith.cmpi eq,%i,%z : index
+%v=scf.if %p -> (f32) {
+  %a=tensor.extract %x[%i] : tensor<3xf32>
+  scf.yield %a : f32
+} else {
+  %b=tensor.extract %y[%i] : tensor<3xf32>
+  scf.yield %b : f32
+}"""
+TABLE = "%table=arith.constant dense<[2,1,0]> : tensor<3xindex>\n"
+GATHER = "%j=tensor.extract %table[%i] : tensor<3xindex>\n%v=tensor.extract %x[%j] : tensor<3xf32>"
+
+
+@pytest.mark.parametrize(
+    "params,prelude,body",
+    [
+        pytest.param("%x:tensor<3xf32>,%y:tensor<3xf32>", "", SELECT, id="structured_address_selection"),
+        pytest.param("%x:tensor<3xf32>", TABLE, GATHER, id="literal_address_table"),
+    ],
+)
+def test_address_selection_is_native_movement_not_index_payload_math(params, prelude, body):
+    body = generic([], "tensor<3xf32>", "%i=linalg.index 0 : index\n" + body)
+    assert construction_evidence(forward(params, "tensor<3xf32>", prelude + body))["status"] == "eligible"
 
 
 def test_exclusions_are_selected_by_the_targets_numeric_contract():
@@ -157,39 +157,13 @@ def test_exclusions_are_selected_by_the_targets_numeric_contract():
 
 def test_precomputed_result_tables_do_not_accelerate_their_construction():
     def table(values):
-        return parse_mlir_text(
-            """module {
-          func.func @forward() -> tensor<3xf32> {
-            %v=arith.constant dense<"""
-            + values
-            + """> : tensor<3xf32>
-            func.return %v : tensor<3xf32>
-          }}"""
-        )
+        return forward("", "tensor<3xf32>", f"%r=arith.constant dense<{values}> : tensor<3xf32>")
 
     generated = construction_evidence(table("[1.0,3.0,5.0]"))
     assert generated["status"] == "host"
     assert generated["evidence"][0]["reason"] == "nonuniform_literal_result_construction"
     assert construction_evidence(table("2.0"))["status"] == "eligible"
     assert construction_evidence(table("[1.0,3.0,5.0]"), excluded=[])["status"] == "eligible"
-
-
-def test_literal_address_tables_are_native_movement():
-    module = parse_mlir_text("""module {
-      func.func @forward(%x: tensor<3xf32>) -> tensor<3xf32> {
-        %table=arith.constant dense<[2,1,0]> : tensor<3xindex>
-        %e=tensor.empty() : tensor<3xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          outs(%e : tensor<3xf32>) {
-          ^bb0(%unused: f32):
-            %i=linalg.index 0 : index
-            %j=tensor.extract %table[%i] : tensor<3xindex>
-            %a=tensor.extract %x[%j] : tensor<3xf32>
-            linalg.yield %a : f32
-          } -> tensor<3xf32>
-        func.return %r : tensor<3xf32>
-      }}""")
-    assert construction_evidence(module)["status"] == "eligible"
 
 
 def test_literal_uniformity_uses_storage_bits_for_nan_and_zero():
@@ -250,14 +224,8 @@ def test_an_unrelated_reduction_does_not_license_parallel_products_or_index_payl
 
 
 def test_integer_offset_readout_is_rounding():
-    module = parse_mlir_text("""module {
-      func.func @forward(%a: i64) -> i64 {
-        %offset=arith.constant 128 : i64
-        %bits=arith.constant 8 : i64
-        %biased=arith.addi %a,%offset : i64
-        %shifted=arith.shrsi %biased,%bits : i64
-        func.return %shifted : i64
-      }}""")
+    body = "%offset=arith.constant 128 : i64\n%bits=arith.constant 8 : i64\n%biased=arith.addi %a,%offset : i64\n"
+    module = forward("%a: i64", "i64", body + "%shifted=arith.shrsi %biased,%bits : i64", ret="%shifted")
     assert construction_evidence(module, excluded=["readout_offset_rounding"])["status"] == "host"
 
 
@@ -332,11 +300,8 @@ COLLAPSE = "tensor.collapse_shape %table [[0,1]] : tensor<2x2xi32> into tensor<4
     ],
 )
 def test_nonuniform_literal_tables_cannot_hide_behind_movement(carrier, result_type):
-    module = parse_mlir_text(
-        f"module {{ func.func @forward(%x:tensor<2x2xi32>) -> tensor<{result_type}> {{\n"
-        f"%table=arith.constant dense<[[1,2],[3,4]]> : tensor<2x2xi32>\n{carrier}\n"
-        f"func.return %r : tensor<{result_type}>\n}}}}"
-    )
+    table = "%table=arith.constant dense<[[1,2],[3,4]]> : tensor<2x2xi32>\n"
+    module = forward("%x:tensor<2x2xi32>", f"tensor<{result_type}>", table + carrier)
     module.verify()
     # prepare() applies this same structural classifier to both source and
     # prepared IR; no source spelling or producer provenance grants an escape.
@@ -346,48 +311,32 @@ def test_nonuniform_literal_tables_cannot_hide_behind_movement(carrier, result_t
         assert any(e["reason"] == "nonuniform_literal_result_construction" for e in proof["evidence"])
 
 
-@pytest.mark.parametrize("seed,host", [("%half", True), ("%x", False)])
-def test_literal_offset_proof_handles_loop_backedges_and_runtime_seeds(seed, host):
-    module = parse_mlir_text(
-        """module {
-      func.func @forward(%x:f32, %y:f32) -> i32 {
-        %lb=arith.constant 0 : index
-        %ub=arith.constant 2 : index
-        %step=arith.constant 1 : index
-        %half=arith.constant 0.5 : f32
-        %carried=scf.for %iv=%lb to %ub step %step iter_args(%v="""
-        + seed
-        + """) -> (f32) {
-          scf.yield %v : f32
-        }
-        %sum=arith.addf %y,%carried : f32
-        %r=arith.fptosi %sum : f32 to i32
-        func.return %r : i32
-      }}"""
+ADVANCE = "%next={} %v,%two : f32\nscf.yield %next : f32"
+
+
+@pytest.mark.parametrize(
+    "seed,step,host",
+    [
+        pytest.param("%half", "scf.yield %v : f32", True, id="literal_seed"),
+        pytest.param("%x", "scf.yield %v : f32", False, id="runtime_seed"),
+        pytest.param("%half", ADVANCE.format("arith.addf"), True, id="literal_addf"),
+        pytest.param("%half", ADVANCE.format("arith.mulf"), True, id="literal_mulf"),
+    ],
+)
+def test_literal_offset_proof_follows_loop_backedges_and_runtime_seeds(seed, step, host):
+    module = forward(
+        "%x:f32, %y:f32",
+        "i32",
+        f"""%lb=arith.constant 0 : index
+%ub=arith.constant 2 : index
+%step=arith.constant 1 : index
+%half=arith.constant 0.5 : f32
+%two=arith.constant 2.0 : f32
+%carried=scf.for %iv=%lb to %ub step %step iter_args(%v={seed}) -> (f32) {{
+{step}
+}}
+%sum=arith.addf %y,%carried : f32
+%r=arith.fptosi %sum : f32 to i32""",
     )
     decision = construction_evidence(module, excluded=["readout_offset_rounding"])
     assert (decision["status"] == "host") is host
-
-
-@pytest.mark.parametrize("primitive", ["arith.addf", "arith.mulf"])
-def test_loop_carried_literal_arithmetic_cannot_hide_an_offset(primitive):
-    module = parse_mlir_text(
-        """module {
-      func.func @forward(%x:f32) -> i32 {
-        %lb=arith.constant 0 : index
-        %ub=arith.constant 2 : index
-        %step=arith.constant 1 : index
-        %half=arith.constant 0.5 : f32
-        %two=arith.constant 2.0 : f32
-        %bias=scf.for %iv=%lb to %ub step %step iter_args(%v=%half) -> (f32) {
-          %next="""
-        + primitive
-        + """ %v,%two : f32
-          scf.yield %next : f32
-        }
-        %sum=arith.addf %x,%bias : f32
-        %r=arith.fptosi %sum : f32 to i32
-        func.return %r : i32
-      }}"""
-    )
-    assert construction_evidence(module, excluded=["readout_offset_rounding"])["status"] == "host"
