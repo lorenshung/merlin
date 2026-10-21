@@ -1,13 +1,23 @@
 """Full-domain admission rejects incomplete guards and runtime products."""
 
+import hashlib
+import json
+import math
+from pathlib import Path
+
 import pytest
 from mlir_fixtures import assert_unchanged, forward, generic, pointwise, returned
+from targetgen_fixtures import assert_host_refusal
+from xdsl.dialects.math import FmaOp
+from xdsl.rewriter import Rewriter
 
+import merlin.targetgen.native_ieee_certificate as checker
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.native_cpu_layout import input_layouts, profile
 from merlin.llvmlower.significand_products import rewrite_significand_products
-from merlin.llvmlower.uniform_numeric_literals import compile_time_operand
+from merlin.llvmlower.uniform_numeric_literals import compile_time_operand, fold_uniform_numeric_literals
 from merlin.targetgen.native_typed_semantics import prove
+from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
 
 
 def guarded(*, missing=False, escape=False):
@@ -92,11 +102,6 @@ def test_runtime_tensor_product_stays_unlowered():
     ],
 )
 def test_source_literal_folding_preserves_typed_rne_and_zero_sign(operation, left, right, expected):
-    import math
-
-    from merlin.llvmlower.uniform_numeric_literals import fold_uniform_numeric_literals
-    from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
-
     prelude = f"""%ca=arith.constant {left}:f16
       %cb=arith.constant {right}:f16
       %x=tensor.splat %ca:tensor<4xf16>
@@ -112,11 +117,6 @@ def test_source_literal_folding_preserves_typed_rne_and_zero_sign(operation, lef
 
 def resealed_certificate(tmp_path, monkeypatch, edit):
     """Install a copy of the native IEEE certificate with ``edit`` applied and its digest resealed."""
-    import json
-    from pathlib import Path
-
-    import merlin.targetgen.native_ieee_certificate as checker
-
     document = json.loads(Path(checker.__file__).with_suffix(".json").read_text())
     edit(document)
     document.pop("content_sha256")
@@ -138,9 +138,6 @@ def test_corrupted_double_rounding_certificate_refuses(tmp_path, monkeypatch):
 
 
 def test_scalar_literal_nan_guard_folds_without_runtime_observation():
-    from merlin.llvmlower.uniform_numeric_literals import fold_uniform_numeric_literals
-    from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
-
     module = parse_mlir_text("""module {func.func @forward()->tensor<4xbf16>{
       %a=arith.constant 0.5:f32
       %b=arith.truncf %a:f32 to bf16
@@ -169,18 +166,13 @@ def test_reciprocal_requires_an_exact_finite_compute_value(certificate, divisor,
 
 def test_fused_runtime_product_cannot_bypass_native_unit_restriction(certificate):
     module = guarded()
-    from xdsl.dialects import math
-    from xdsl.rewriter import Rewriter
-
     added = next(op for op in module.walk() if op.name == "arith.addf")
-    fused = math.FmaOp(added.operands[0], added.operands[1], added.operands[0])
+    fused = FmaOp(added.operands[0], added.operands[1], added.operands[0])
     Rewriter.replace_op(added, fused)
     assert prove(module)["code"] == "native_parallel_runtime_product_construction"
 
 
 def test_uncertified_binary64_narrowing_cannot_fold_away_its_obligation(certificate):
-    from merlin.llvmlower.uniform_numeric_literals import fold_uniform_numeric_literals
-
     # Above a half midpoint, but binary32 first rounds it onto that midpoint.
     module = parse_mlir_text("""module {func.func @forward()->tensor<1xf16>{
       %a=arith.constant 1.0004882812509095:f64
@@ -202,10 +194,6 @@ def test_conversion_prelude_cannot_place_a_numerical_comparison(certificate):
 
 
 def test_dropped_destination_layout_cannot_claim_a_copy_profile(tmp_path, monkeypatch):
-    import json
-
-    from merlin.targetgen.core_aten_components import prepare_integer_components
-
     module = pointwise(["tensor<4xf16>"], "tensor<4xf32>", "%v=arith.extf %a:f16 to f32")
     monkeypatch.setattr(
         "merlin.targetgen.native_dtype_domain.component_semantics",
@@ -215,35 +203,12 @@ def test_dropped_destination_layout_cannot_claim_a_copy_profile(tmp_path, monkey
             "cpu_loop_profile": {"reduced_vector_elements": 4, "float_copy_vector_elements": 2, "parallel_grain": 1024},
         },
     )
-
-    class Provider:
-        def admit_numeric_schedule(self, *args, **kwargs):
-            raise AssertionError("unknown CPU storage context reached device admission")
-
-    report = {
-        "cases": [
-            {
-                "status": "bundled",
-                "input_indices": [0, 1],
-                "case": {
-                    "arguments": [
-                        {"kind": "tensor", "shape": [4], "stride": [1]},
-                        {"kind": "tensor", "shape": [4], "stride": [2]},
-                    ]
-                },
-            }
-        ]
-    }
-    assert (
-        prepare_integer_components(tmp_path, report, None, Provider(), None, module, limb_attribute="test.limb") is None
-    )
-    refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
-    assert refusal["code"] == "native_copy_layout_context_unproved"
+    layouts = [{"kind": "tensor", "shape": [4], "stride": [1]}, {"kind": "tensor", "shape": [4], "stride": [2]}]
+    cases = [{"status": "bundled", "input_indices": [0, 1], "case": {"arguments": layouts}}]
+    assert_host_refusal(tmp_path, module, [], cases, "native_copy_layout_context_unproved")
 
 
 def test_library_is_hashed_once_per_process_until_it_changes(tmp_path, monkeypatch):
-    import hashlib
-
     library = tmp_path / "libtorch_cpu.so"
     library.write_bytes(b"certified library")
 
