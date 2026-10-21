@@ -574,7 +574,6 @@ def _prepare_spec_int8(
             software_numerical_engine="integer_reference",
             readout_numerics="integer_readout",
             **({"host_readout_declarations": declaration_keys(selected[0])["mul"]} if selected else {}),
-            fft_admission_selection={key: selection[key] for key in ("spec", "host", "identities")},
         )
         recipe["recipe_sha256"] = digest(recipe)
         try:
@@ -616,8 +615,6 @@ def _prepare_spec_int8(
             plan.update(status="refused", quantized_contractions=0, quantized_non_contraction_sites=0)
             plan["refusal_code"] = exc.code
             plan["refusal_details"] = exc.details
-            if exc.code == "fft_admission_refused":
-                plan["fft_refusals"] = [str(exc)]
             selected = []
         if selected or non_contraction:
             reference_path = Path(artifact.meta["weights_manifest"]).parent / "spec-int8-reference.json"

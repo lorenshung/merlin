@@ -323,7 +323,6 @@ def run_spike_bundle(
                 ):
                     plan = report["numeric_preparation"]
                     reason = "; ".join(dict.fromkeys(reason for site in plan["sites"] for reason in site["reasons"]))
-                    reason = "; ".join(filter(None, (reason, *plan.get("fft_refusals", []))))
                     reason = (
                         reason
                         or plan.get("host_reason")

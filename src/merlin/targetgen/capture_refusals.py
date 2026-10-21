@@ -66,7 +66,6 @@ def read_refusal(path):
             "complex_calibration",
             "declared_affine_domain_unproved",
             "unquantized_special_readout_unproved",
-            "fft_admission_refused",
             "integerization_golden_disagreement",
         }
         or not isinstance(refusal.get("reason"), str)
