@@ -38,16 +38,9 @@ def selection(tmp_path, monkeypatch):
     )
     path = tmp_path / "selection.json"
     path.write_text(json.dumps(record))
+    directories = (tmp_path / "runs", tmp_path / "reports", tmp_path / "bundles")
     context = C.InvocationContext(
-        tmp_path,
-        tmp_path / "target.yaml",
-        tmp_path,
-        "fixture",
-        tmp_path / "runs",
-        tmp_path / "reports",
-        tmp_path / "bundles",
-        (),
-        candidate_policy=path,
+        tmp_path, tmp_path / "target.yaml", tmp_path, "fixture", *directories, (), candidate_policy=path
     )
     return context, record, observed
 
@@ -129,22 +122,10 @@ def test_oracle_free_qa_and_formal_refuse_before_candidate_execution(selection):
         formal._score("candidate", "corpus", "runs", {"hidden"}, True, context=context)
 
 
-@pytest.mark.parametrize(
-    "change",
-    [
-        None,
-        "unselected",
-        "missing",
-        "empty",
-        "symlink",
-        "malformed",
-        "non_full_call",
-        "tiers_missing",
-        "L3",
-        "unknown",
-        "no_L2",
-    ],
-)
+CHANGES = "unselected missing empty symlink malformed non_full_call tiers_missing L3 unknown no_L2".split()
+
+
+@pytest.mark.parametrize("change", [None, *CHANGES])
 def test_functional_codegen_scope_requires_verified_selection_and_both_complete_roots(selection, tmp_path, change):
     import yaml
 
