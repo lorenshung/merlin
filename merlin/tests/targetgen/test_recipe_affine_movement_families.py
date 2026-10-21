@@ -28,53 +28,20 @@ _SOURCE = merlin_dir() / "python" / "merlin" / "targetgen" / "_recipe_quantizer.
 
 
 def _facet() -> RF.ReadoutFacet:
-    facts = {
-        "facts": {
-            "datapaths": [{"name": "input", "dtype": "i8"}, {"name": "accumulator", "dtype": "i32"}],
-            "memories": [{"name": "accumulator", "bytes": 4096}],
-            "interfaces": [
-                {
-                    "name": "register_bundle_layouts",
-                    "unresolved": {},
-                    "bundles": {
-                        "StoreConfig": {
-                            "width": 64,
-                            "fields": {"out_scale": {"offset": 32, "width": None, "slot_width": 32}},
-                        }
-                    },
-                }
-            ],
-        }
-    }
-    return RF.derive(
-        "t",
-        facts=facts,
-        unit={"name": "u", "dtypes": ["int8"]},
-        scalar_abi={
-            "schema": RF.SCALAR_ABI_SCHEMA,
-            "accumulator_dtype": "i32",
-            "output_dtype": "i8",
-            "scale_dtype": "f32",
-            "clamp_min": -128,
-            "clamp_max": 127,
-            "provenance": {"scope": "test"},
-        },
-        readouts=[{"selector": "i8", "applies": ["acc_scale"]}],
-    )
+    store = {"width": 64, "fields": {"out_scale": {"offset": 32, "width": None, "slot_width": 32}}}
+    layouts = {"name": "register_bundle_layouts", "unresolved": {}, "bundles": {"StoreConfig": store}}
+    datapaths = [{"name": "input", "dtype": "i8"}, {"name": "accumulator", "dtype": "i32"}]
+    memories = [{"name": "accumulator", "bytes": 4096}]
+    facts = {"facts": {"datapaths": datapaths, "memories": memories, "interfaces": [layouts]}}
+    abi = dict(schema=RF.SCALAR_ABI_SCHEMA, accumulator_dtype="i32", output_dtype="i8", scale_dtype="f32")
+    abi.update(clamp_min=-128, clamp_max=127, provenance={"scope": "test"})
+    readouts = [{"selector": "i8", "applies": ["acc_scale"]}]
+    return RF.derive("t", facts=facts, unit={"name": "u", "dtypes": ["int8"]}, scalar_abi=abi, readouts=readouts)
 
 
 def _contract(*rows) -> dict:
-    return {
-        "compute_units": [
-            {
-                "name": "u",
-                "kind": "systolic",
-                "dtypes": ["int8"],
-                "ops": ["matmul"],
-                "semantic_capabilities": list(rows),
-            }
-        ]
-    }
+    unit = {"name": "u", "kind": "systolic", "dtypes": ["int8"], "ops": ["matmul"]}
+    return {"compute_units": [{**unit, "semantic_capabilities": list(rows)}]}
 
 
 _CONTRACTION = {"family": "contraction", "dtypes": ["int8"]}
