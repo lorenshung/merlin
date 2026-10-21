@@ -172,6 +172,16 @@ def provider_proof(provider, source, *, package, policy):
         return None, str(exc)
 
 
+def covering_proof(provider, module, operations, *, package, policy):
+    """The provider's proof of module (its ValueError propagates) covering each operation, else ValueError."""
+    proof = provider.admit_numeric_schedule(str(module), package=package, numeric_policy=policy)
+    for op in operations:
+        failure = provider_coverage(module, proof, op)
+        if failure:
+            raise ValueError(failure)
+    return proof
+
+
 def provider_coverage(module, proof, op) -> str | None:
     """A source-bound, proven catalog binding for this precise contraction."""
     if not isinstance(proof, dict) or proof.get("status") != "proven":

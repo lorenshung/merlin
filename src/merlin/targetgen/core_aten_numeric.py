@@ -377,13 +377,10 @@ def _prepare_spec_int8(
                 )
                 op.attributes["prov.operand_load"] = StringAttr("transfer_contracts.operand_load")
                 op.attributes["prov.accumulator_readout"] = StringAttr("transfer_contracts.accumulator_readout")
-            proof = provider.admit_numeric_schedule(str(module), package=package, numeric_policy=selection["spec"])
-            from merlin.targetgen.core_aten_spec_int8 import provider_coverage
+            from merlin.targetgen.core_aten_spec_int8 import covering_proof
 
-            for site in selected:
-                failure = provider_coverage(module, proof, contractions[site["source_operation_ordinal"]])
-                if failure:
-                    raise ValueError(failure)
+            covered = [contractions[site["source_operation_ordinal"]] for site in selected]
+            proof = covering_proof(provider, module, covered, package=package, policy=selection["spec"])
             plan["schedule_proof"] = proof
             # Expose raw accumulators as well as every user/post-call result. The
             # oracle interprets source integer arithmetic, independently of lowering
@@ -738,19 +735,11 @@ def _prepare_spec_int8(
                     json.dumps(keys, sort_keys=True)
                 )
             # The provider proves contraction schedules; a contraction-free program has none to prove.
-            proof = (
-                provider.admit_numeric_schedule(str(module), package=package, numeric_policy=selection["spec"])
-                if selected
-                else None
-            )
-            plan["schedule_proof"] = proof
-            if selected:
-                from merlin.targetgen.core_aten_spec_int8 import provider_coverage
+            from merlin.targetgen.core_aten_spec_int8 import covering_proof
 
-                for contraction in contractions:
-                    failure = provider_coverage(module, proof, contraction)
-                    if failure:
-                        raise ValueError(failure)
+            policy = selection["spec"]
+            proof = covering_proof(provider, module, contractions, package=package, policy=policy) if selected else None
+            plan["schedule_proof"] = proof
             plan["quantized_contractions"] = len(selected)
             plan["quantized_non_contraction_sites"] = sum(
                 site["status"] == "admitted" and site["quantized_island"] for site in plan["non_contraction_sites"]
