@@ -37,7 +37,8 @@ def generic(
     """``name = linalg.generic`` over ``ins`` ([(value, type)]) into ``out`` (default a fresh empty).
 
     Maps default to identities. Block arguments are ``%a, %b, ...`` for the inputs and ``acc``
-    for the output; ``body`` is the scalar computation and ``yields`` its result.
+    for the output; ``body`` is the scalar computation and ``yields`` its result (None: ``body``
+    ends with its own yield).
     """
     rank = len(re.findall(r"[\d?]+x", result))
     dims = ",".join(f"d{i}" for i in range(rank))
@@ -52,14 +53,15 @@ def generic(
   {sources} outs({out}:{result}){attrs} {{
 ^bb0({params}{acc}:{typ}):
 {body}
-linalg.yield {yields} : {typ}
+{f"linalg.yield {yields} : {typ}" if yields else ""}
 }} -> {result}"""
 
 
 def forward(params, result, body, *, ret="%r"):
     """Parse ``module { func.func @forward(params) -> result { body; return ret } }``."""
+    types = result.removeprefix("(").removesuffix(")")
     return parse_mlir_text(
-        f"module {{func.func @forward({params}) -> {result} {{\n{body}\nreturn {ret} : {result}\n}} }}"
+        f"module {{func.func @forward({params}) -> {result} {{\n{body}\nreturn {ret} : {types}\n}} }}"
     )
 
 

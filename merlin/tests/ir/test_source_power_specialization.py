@@ -1,6 +1,7 @@
 """A literal power becomes a fill or copy only from the live IR, never from a case record."""
 
 import pytest
+from mlir_fixtures import forward, generic
 
 from merlin.frontends.linalg_mlir import parse_mlir_file
 from merlin.targetgen.source_power_specialization import specialize
@@ -25,17 +26,9 @@ def report(*, complex_output=False, overload="aten.pow.Tensor_Scalar", exponent=
 
 
 def fixture(tmp_path, body, *, source="f32", output="f32", shape="4", prelude=""):
-    tmp_path.joinpath("model.mlir").write_text(f"""module {{func.func @forward(%x:tensor<{shape}x{source}>)
-      -> (tensor<{shape}x{output}>,tensor<{shape}x{source}>) {{
-      {prelude}
-      %e=tensor.empty() : tensor<{shape}x{output}>
-      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-        ins(%x:tensor<{shape}x{source}>) outs(%e:tensor<{shape}x{output}>) {{
-        ^bb0(%a:{source},%unused:{output}):
-        {body}
-      }} -> tensor<{shape}x{output}>
-      return %r,%x : tensor<{shape}x{output}>,tensor<{shape}x{source}>
-    }} }}""")
+    t, o = f"tensor<{shape}x{source}>", f"tensor<{shape}x{output}>"
+    module = forward(f"%x:{t}", f"({o},{t})", prelude + "\n" + generic([("%x", t)], o, body, yields=None), ret="%r,%x")
+    tmp_path.joinpath("model.mlir").write_text(str(module))
     return tmp_path / "model.mlir"
 
 
@@ -99,11 +92,9 @@ def test_case_record_neither_enables_nor_disables_the_ir_proof(tmp_path, case_me
 
 def test_operation_labelled_as_power_is_not_rewritten_when_the_ir_is_an_addition(tmp_path):
     # Review S2 probe: an addf carrying a power provenance label must stay an addition.
-    path = fixture(
-        tmp_path,
-        "%k=arith.constant 1.0 : f32\n%s=arith.addf %a,%k : f32\nlinalg.yield %s : f32",
-    )
-    path.write_text(path.read_text().replace("%s=arith.addf %a,%k : f32", '%s=arith.addf %a,%k {"prov.aten"="aten.pow.Tensor_Scalar"} : f32'))
+    label = '{"prov.aten"="aten.pow.Tensor_Scalar"}'
+    path = fixture(tmp_path, f"%k=arith.constant 1.0 : f32\n%s=arith.addf %a,%k {label} : f32\nlinalg.yield %s : f32")
+    assert "prov.aten" in path.read_text()
     before = path.read_bytes()
     assert specialize(tmp_path, report(exponent=1.0)) is None
     assert path.read_bytes() == before
@@ -111,44 +102,16 @@ def test_operation_labelled_as_power_is_not_rewritten_when_the_ir_is_an_addition
 
 def complex_fixture(tmp_path, real, imaginary, component_map="affine_map<(d0)->(d0)>"):
     """The frontend's complex lowering: project, map each component, interleave by index."""
-    tmp_path.joinpath("model.mlir").write_text(f"""module {{func.func @forward(%x:tensor<3x2xf32>)
-      -> (tensor<3x2xf32>,tensor<3x2xf32>) {{
-      %e0=tensor.empty() : tensor<3xf32>
-      %re=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0,0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-        ins(%x:tensor<3x2xf32>) outs(%e0:tensor<3xf32>) {{
-        ^bb0(%a:f32,%u:f32):
-        linalg.yield %a : f32
-      }} -> tensor<3xf32>
-      %e1=tensor.empty() : tensor<3xf32>
-      %im=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0,1)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-        ins(%x:tensor<3x2xf32>) outs(%e1:tensor<3xf32>) {{
-        ^bb0(%a:f32,%u:f32):
-        linalg.yield %a : f32
-      }} -> tensor<3xf32>
-      %e2=tensor.empty() : tensor<3xf32>
-      %fr=linalg.generic {{indexing_maps=[{component_map},{component_map},affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-        ins(%re,%im:tensor<3xf32>,tensor<3xf32>) outs(%e2:tensor<3xf32>) {{
-        ^bb0(%r:f32,%i:f32,%u:f32):
-        {real}
-      }} -> tensor<3xf32>
-      %e3=tensor.empty() : tensor<3xf32>
-      %fi=linalg.generic {{indexing_maps=[{component_map},{component_map},affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-        ins(%re,%im:tensor<3xf32>,tensor<3xf32>) outs(%e3:tensor<3xf32>) {{
-        ^bb0(%r:f32,%i:f32,%u:f32):
-        {imaginary}
-      }} -> tensor<3xf32>
-      %e4=tensor.empty() : tensor<3x2xf32>
-      %out=linalg.generic {{indexing_maps=[affine_map<(d0,d1)->(d0)>,affine_map<(d0,d1)->(d0)>,affine_map<(d0,d1)->(d0,d1)>],iterator_types=["parallel","parallel"]}}
-        ins(%fr,%fi:tensor<3xf32>,tensor<3xf32>) outs(%e4:tensor<3x2xf32>) {{
-        ^bb0(%p:f32,%q:f32,%u:f32):
-        %k=linalg.index 1 : index
-        %z=arith.constant 0 : index
-        %t=arith.cmpi eq,%k,%z : index
-        %s=arith.select %t,%p,%q : f32
-        linalg.yield %s : f32
-      }} -> tensor<3x2xf32>
-      return %out,%x : tensor<3x2xf32>,tensor<3x2xf32>
-    }} }}""")
+    t, c, row = "tensor<3xf32>", "tensor<3x2xf32>", "affine_map<(d0)->(d0)>"
+    project = [generic([("%x", c)], t, "", yields="%a", name=n, maps=[f"affine_map<(d0)->(d0,{k})>", row]) for k, n in enumerate(("%re", "%im"))]
+    parts = [("%re", t), ("%im", t)]
+    maps = [component_map] * 2 + [row]
+    components = [generic(parts, t, body, yields=None, name=n, maps=maps, args="ri") for body, n in ((real, "%fr"), (imaginary, "%fi"))]
+    select = "%k=linalg.index 1 : index\n%z=arith.constant 0 : index\n%t=arith.cmpi eq,%k,%z : index\n%s=arith.select %t,%a,%b : f32"
+    interleave = ["affine_map<(d0,d1)->(d0)>"] * 2 + ["affine_map<(d0,d1)->(d0,d1)>"]
+    out = generic([("%fr", t), ("%fi", t)], c, select, yields="%s", name="%out", maps=interleave)
+    module = forward(f"%x:{c}", f"({c},{c})", "\n".join([*project, *components, out]), ret="%out,%x")
+    tmp_path.joinpath("model.mlir").write_text(str(module))
 
 
 def test_complex_zero_power_fills_exactly_one_plus_positive_zero_i(tmp_path):
