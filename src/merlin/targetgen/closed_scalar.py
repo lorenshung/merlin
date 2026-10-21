@@ -90,7 +90,17 @@ def _zero_sign(value):
 
 
 def evaluate(value, environment, memo=None):
-    """Evaluate one scalar SSA value. environment maps values to Python numbers."""
+    """Evaluate one scalar SSA value. environment maps values to Python numbers.
+
+    A dependence chain deeper than the interpreter's recursion limit is
+    UNKNOWN (closed proofs fail closed)."""
+    try:
+        return _evaluate(value, environment, memo)
+    except RecursionError:
+        return UNKNOWN
+
+
+def _evaluate(value, environment, memo=None):
     from xdsl.dialects.builtin import IntegerType
 
     from merlin.llvmlower.singleton_selectors import _relation
@@ -109,7 +119,7 @@ def evaluate(value, environment, memo=None):
     result_type = _element_type(value)
 
     def get(v):
-        return evaluate(v, environment, memo)
+        return _evaluate(v, environment, memo)
 
     out = UNKNOWN
     if name in {"arith.sitofp", "arith.uitofp"}:
@@ -236,6 +246,14 @@ class Interval:
 
 
 def interval(value, memo=None, active=None):
+    """Closed interval of value, or None (also when the dependence chain is too deep)."""
+    try:
+        return _interval(value, memo, active)
+    except RecursionError:
+        return None
+
+
+def _interval(value, memo=None, active=None):
     """Closed interval of every element value can take, or None when unbounded/unknown.
 
     tensor.empty contributes no value: its contents are unspecified until written,
@@ -257,7 +275,7 @@ def interval(value, memo=None, active=None):
     active.add(value)
 
     def get(v):
-        return interval(v, memo, active)
+        return _interval(v, memo, active)
 
     out = None
     try:
@@ -313,7 +331,7 @@ def interval(value, memo=None, active=None):
                     break
                 memo[carried] = out
                 local = dict(memo)
-                yielded = interval(block.last_op.operands[index], local, set())
+                yielded = _interval(block.last_op.operands[index], local, set())
                 widened = None if yielded is None else out.union(yielded)
                 if widened == out:
                     break

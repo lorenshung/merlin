@@ -72,6 +72,7 @@ class Payloads:
         self._resolve_memo = {}
         self._contraction_memo = {}
         self._readout_memo = {}
+        self._closed_memo = {}
 
     def resolve(self, value):
         path = []
@@ -190,7 +191,7 @@ class Payloads:
 
         values = self.literal_values(op.operands[1])
         if values is None:
-            closed = evaluate(op.operands[1], {})  # a closed scalar expression, e.g. |0|
+            closed = evaluate(op.operands[1], {}, self._closed_memo)  # a closed expression, e.g. |0|
             values = None if closed is UNKNOWN else (closed,)
         if not values or not all(v is not None and v == 0 for v in values):
             return False
@@ -213,7 +214,7 @@ class Payloads:
                 user = use.operation
                 name = op_name(user)
                 if name == "arith.select" and use.index > 0:
-                    condition = evaluate(user.operands[0], {})
+                    condition = evaluate(user.operands[0], {}, self._closed_memo)
                     if condition is not UNKNOWN and use.index != (1 if condition else 2):
                         continue
                 if not user.results:
