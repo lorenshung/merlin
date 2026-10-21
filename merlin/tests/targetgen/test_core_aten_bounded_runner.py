@@ -25,35 +25,16 @@ def test_numeric_success_does_not_claim_complete_semantics():
 
 @pytest.mark.parametrize("selection", ["software_spec", "host_capabilities"])
 def test_cache_stamp_binds_selected_policy_files_and_layout_sources(tmp_path, monkeypatch, selection):
-    import importlib.util
-    from argparse import Namespace
-
     from merlin.common.paths import repo_root
 
-    script = repo_root() / "build_tools/scripts/run_bounded_core_aten_suite.py"
-    spec = importlib.util.spec_from_file_location("bounded_stamp_runner", script)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    simulator, suite = tmp_path / "simulator", tmp_path / "suite.json"
+    module = _measurement_script()
+    simulator = tmp_path / "simulator"
     simulator.write_bytes(b"binary")
-    suite.write_text("{}")
     software, host = tmp_path / "software.yaml", tmp_path / "host.yaml"
     software.write_text("original software declaration")
     host.write_text("original host declaration")
     monkeypatch.setenv("MERLIN_SPIKE", str(simulator))
-    args = Namespace(
-        repo=repo_root(),
-        m2m_dir=repo_root(),
-        pin=[],
-        target=None,
-        device_package=None,
-        facts=None,
-        extension_library=None,
-        execution_provider=None,
-        suite=suite,
-        software_spec=software,
-        host_capabilities=host,
-    )
+    args = _stamp_args(tmp_path, repo=repo_root(), m2m_dir=repo_root(), software_spec=software, host_capabilities=host)
     first = module.stamp(args)
     getattr(args, selection).write_text("changed declaration")
     second = module.stamp(args)
@@ -471,6 +452,17 @@ def _measurement_script():
     return module
 
 
+def _stamp_args(tmp_path, **overrides):
+    """Stamp arguments over an empty suite in ``tmp_path`` with no optional sources selected."""
+    from types import SimpleNamespace
+
+    suite = tmp_path / "suite.json"
+    suite.write_text("{}")
+    fields = dict(repo=tmp_path, m2m_dir=tmp_path, suite=suite, pin=[], extension_library=None, facts=None)
+    fields.update(execution_provider=None, software_spec=None, host_capabilities=None, device_package=None, target=None)
+    return SimpleNamespace(**{**fields, **overrides})
+
+
 def test_cache_compares_entire_provenance_stamp(tmp_path, monkeypatch):
     from copy import deepcopy
     from types import SimpleNamespace
@@ -525,28 +517,13 @@ def test_cache_compares_entire_provenance_stamp(tmp_path, monkeypatch):
 
 
 def test_stamp_reads_descriptor_and_runtime_sources(tmp_path, monkeypatch):
-    from types import SimpleNamespace
 
     module = _measurement_script()
     monkeypatch.setenv("MERLIN_SPIKE", str(tmp_path / "spike"))
     monkeypatch.setattr(module, "git", lambda *_: "commit")
     monkeypatch.setattr(module.subprocess, "check_output", lambda argv, **_: "" if "ls-files" in argv else b"")
     monkeypatch.setattr(module.provenance, "record", lambda **kwargs: kwargs)
-    suite = tmp_path / "suite.json"
-    suite.write_text("{}")
-    args = SimpleNamespace(
-        repo=tmp_path,
-        m2m_dir=tmp_path,
-        suite=suite,
-        pin=[],
-        extension_library=None,
-        facts=None,
-        execution_provider=tmp_path / "provider.py",
-        software_spec=None,
-        host_capabilities=None,
-        device_package=None,
-        target=None,
-    )
+    args = _stamp_args(tmp_path, execution_provider=tmp_path / "provider.py")
     stamp = module.stamp(args)
     expected = [
         "src/merlin/llvmlower/" + name
@@ -587,7 +564,6 @@ def test_unfinished_disk_response_preserves_explicit_missing_case(tmp_path):
 
 
 def test_plain_export_stamp_binds_new_sources_without_claiming_a_git_commit(tmp_path, monkeypatch):
-    from types import SimpleNamespace
 
     module = _measurement_script()
     monkeypatch.setattr(module, "git", lambda *_: None)
@@ -601,22 +577,7 @@ def test_plain_export_stamp_binds_new_sources_without_claiming_a_git_commit(tmp_
     source = tmp_path / "src/new_semantic_rule.py"
     source.parent.mkdir()
     source.write_text("rule = 1\n")
-    suite = tmp_path / "suite.json"
-    suite.write_text("{}")
-    args = SimpleNamespace(
-        repo=tmp_path,
-        m2m_dir=tmp_path,
-        suite=suite,
-        pin=[],
-        extension_library=None,
-        facts=None,
-        execution_provider=None,
-        software_spec=None,
-        host_capabilities=None,
-        device_package=None,
-        target=None,
-        output=tmp_path / "run",
-    )
+    args = _stamp_args(tmp_path, output=tmp_path / "run")
     first = module.stamp(args)
     source.write_text("rule = 2\n")
     second = module.stamp(args)
