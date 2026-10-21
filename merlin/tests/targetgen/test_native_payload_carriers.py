@@ -71,18 +71,22 @@ def test_uninitialized_payload_is_not_proved_to_be_nonliteral_movement():
     assert result['status'] == 'host'
 
 
+DEQUANTIZE = '''module {func.func @f(%x: tensor<4xi8>) -> tensor<4xf32> {
+      %scale = arith.constant dense<1.0> : tensor<f32>
+      %zero = arith.constant dense<0> : tensor<i64>
+      DATA
+      %r = "quant_ext.dequantize_per_tensor"(CODES,%scale,%zero) :
+        (tensor<4xi8>,tensor<f32>,tensor<i64>) -> tensor<4xf32>
+      func.return %r : tensor<4xf32>
+    }}'''
+QUANT = DEQUANTIZE.replace('DATA\n      ', '').replace('CODES', '%x')
+
+
 @pytest.mark.parametrize('table', [False, True])
 def test_validated_numeric_boundary_preserves_its_data_provenance(table):
     data = ('%codes = arith.constant dense<[1,2,3,4]> : tensor<4xi8>' if table else
             '%codes = tensor.cast %x : tensor<4xi8> to tensor<4xi8>')
-    text = '''module {func.func @f(%x: tensor<4xi8>) -> tensor<4xf32> {
-      %scale = arith.constant dense<1.0> : tensor<f32>
-      %zero = arith.constant dense<0> : tensor<i64>
-      '''+data+'''
-      %r = "quant_ext.dequantize_per_tensor"(%codes,%scale,%zero) :
-        (tensor<4xi8>,tensor<f32>,tensor<i64>) -> tensor<4xf32>
-      func.return %r : tensor<4xf32>
-    }}'''
+    text = DEQUANTIZE.replace('DATA', data).replace('CODES', '%codes')
     result = construction_evidence(parse_mlir_text(text))
     assert result['status'] == ('host' if table else 'eligible'), result
     if table:
@@ -91,13 +95,7 @@ def test_validated_numeric_boundary_preserves_its_data_provenance(table):
 
 @pytest.mark.parametrize('mutation', ['unknown_boundary', 'invalid_arity', 'unproved_input', 'unknown_metadata'])
 def test_quant_spelling_cannot_authenticate_an_unknown_or_invalid_carrier(mutation):
-    text = '''module {func.func @f(%x: tensor<4xi8>) -> tensor<4xf32> {
-      %scale = arith.constant dense<1.0> : tensor<f32>
-      %zero = arith.constant dense<0> : tensor<i64>
-      %r = "quant_ext.dequantize_per_tensor"(%x,%scale,%zero) :
-        (tensor<4xi8>,tensor<f32>,tensor<i64>) -> tensor<4xf32>
-      func.return %r : tensor<4xf32>
-    }}'''
+    text = QUANT
     if mutation == 'unknown_boundary':
         text = text.replace('dequantize_per_tensor', 'unknown_movement')
     elif mutation == 'invalid_arity':
@@ -118,15 +116,8 @@ def test_an_unexpected_boundary_lowering_error_is_not_read_as_unknown_semantics(
         raise TypeError("lowering defect")
 
     monkeypatch.setattr(passes, 'lower_quant_ext', broken)
-    text = '''module {func.func @f(%x: tensor<4xi8>) -> tensor<4xf32> {
-      %scale = arith.constant dense<1.0> : tensor<f32>
-      %zero = arith.constant dense<0> : tensor<i64>
-      %r = "quant_ext.dequantize_per_tensor"(%x,%scale,%zero) :
-        (tensor<4xi8>,tensor<f32>,tensor<i64>) -> tensor<4xf32>
-      func.return %r : tensor<4xf32>
-    }}'''
     with pytest.raises(TypeError, match='lowering defect'):
-        construction_evidence(parse_mlir_text(text), excluded=[])
+        construction_evidence(parse_mlir_text(QUANT), excluded=[])
 
 
 @pytest.mark.parametrize('table', [False, True])

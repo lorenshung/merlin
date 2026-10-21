@@ -62,16 +62,29 @@ def test_biased_integer_rounding_still_refuses():
     assert construction_evidence(module, excluded=["readout_offset_rounding"])["status"] == "host"
 
 
+def reduction(dtype, shape, dimensions):
+    """A zero-seeded union (i1) or sum (i64) of ``tensor<{shape}{dtype}>`` over ``dimensions``."""
+    operator = "ori" if dtype == "i1" else "addi"
+    literal = "false" if dtype == "i1" else "0:i64"
+    return parse_mlir_text(
+        """module {
+      func.func @forward(%x:tensor<SHAPETYPE>) -> tensor<TYPE> {
+        %z=arith.constant ZERO
+        %s=tensor.splat %z:tensor<TYPE>
+        %r=linalg.reduce ins(%x:tensor<SHAPETYPE>) outs(%s:tensor<TYPE>) dimensions=[DIMS]
+          (%a:TYPE,%b:TYPE) { %v=arith.OP %a,%b:TYPE
+            linalg.yield %v:TYPE }
+        return %r:tensor<TYPE>
+      }}""".replace("SHAPE", shape)
+        .replace("TYPE", dtype)
+        .replace("ZERO", literal)
+        .replace("DIMS", dimensions)
+        .replace("OP", operator)
+    )
+
+
 def test_boolean_union_reduction_is_a_hack_exclusion():
-    module = parse_mlir_text("""module {
-      func.func @forward(%x:tensor<4xi1>) -> tensor<i1> {
-        %z=arith.constant false
-        %s=tensor.splat %z:tensor<i1>
-        %r=linalg.reduce ins(%x:tensor<4xi1>) outs(%s:tensor<i1>) dimensions=[0]
-          (%a:i1,%b:i1) { %v=arith.ori %a,%b:i1
-            linalg.yield %v:i1 }
-        return %r:tensor<i1>
-      }}""")
+    module = reduction("i1", "4x", "0")
     assert construction_evidence(module, excluded=["multi_op_identity"])["status"] == "host"
 
 
@@ -88,23 +101,7 @@ def test_boolean_storage_carriers_remain_pure_movement():
 def test_single_contribution_zero_seed_reduction_is_storage_movement(dtype, shape, dimensions):
     from merlin.llvmlower.structural_folds import fold_singleton_reductions
 
-    operator = "ori" if dtype == "i1" else "addi"
-    literal = "false" if dtype == "i1" else "0:i64"
-    module = parse_mlir_text(
-        """module {
-      func.func @forward(%x:tensor<SHAPETYPE>) -> tensor<TYPE> {
-        %z=arith.constant ZERO
-        %s=tensor.splat %z:tensor<TYPE>
-        %r=linalg.reduce ins(%x:tensor<SHAPETYPE>) outs(%s:tensor<TYPE>) dimensions=[DIMS]
-          (%a:TYPE,%b:TYPE) { %v=arith.OP %a,%b:TYPE
-            linalg.yield %v:TYPE }
-        return %r:tensor<TYPE>
-      }}""".replace("SHAPE", shape)
-        .replace("TYPE", dtype)
-        .replace("ZERO", literal)
-        .replace("DIMS", dimensions)
-        .replace("OP", operator)
-    )
+    module = reduction(dtype, shape, dimensions)
     original = str(module)
     assert construction_evidence(module, excluded=["multi_op_identity"])["status"] == "eligible"
     assert str(module) == original
