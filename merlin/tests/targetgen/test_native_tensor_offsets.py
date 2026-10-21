@@ -6,6 +6,11 @@ from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.native_unit_policy import construction_evidence
 
 
+def decide(module):
+    module.verify()
+    return construction_evidence(module, excluded=['readout_offset_rounding'])
+
+
 def source(offset, rounding, *, splat=False):
     constant = ('%s = arith.constant '+offset+' : f32\n%c = tensor.splat %s : tensor<4xf32>' if splat else
                 '%c = arith.constant '+offset+' : tensor<4xf32>')
@@ -39,23 +44,19 @@ ROUNDINGS = [
 @pytest.mark.parametrize('rounding', ROUNDINGS)
 @pytest.mark.parametrize('offset', ['dense<0.5>', 'dense<[0.0,0.5,0.0,-0.5]>'])
 def test_dense_offsets_before_every_rounding_observation(rounding, offset):
-    m = source(offset, rounding)
-    m.verify()
-    result = construction_evidence(m, excluded=['readout_offset_rounding'])
+    result = decide(source(offset, rounding))
     assert result['status'] == 'host', result
     assert any(e['reason'] == 'readout_offset_rounding' for e in result['evidence'])
 
 
 @pytest.mark.parametrize('rounding', ROUNDINGS)
 def test_scalar_splat_offset_is_not_an_escape(rounding):
-    assert construction_evidence(source('0.5', rounding, splat=True),
-                                 excluded=['readout_offset_rounding'])['status'] == 'host'
+    assert decide(source('0.5', rounding, splat=True))['status'] == 'host'
 
 
 @pytest.mark.parametrize('rounding', ROUNDINGS)
 def test_zero_tensor_offset_is_not_biased_rounding(rounding):
-    assert construction_evidence(source('dense<-0.0>', rounding),
-                                 excluded=['readout_offset_rounding'])['status'] == 'eligible'
+    assert decide(source('dense<-0.0>', rounding))['status'] == 'eligible'
 
 
 # An IEEE float-to-float RNE narrowing (f32 -> f16 here) whose result is only
@@ -70,53 +71,19 @@ STORAGE_RNE = '%n = arith.truncf %sum : f32 to f16\n%v = arith.extf %n : f16 to 
 
 @pytest.mark.parametrize('offset', ['dense<0.5>', 'dense<[0.0,0.5,0.0,-0.5]>'])
 def test_storage_rne_after_literal_offset_is_not_offset_rounding(offset):
-    assert construction_evidence(source(offset, STORAGE_RNE),
-                                 excluded=['readout_offset_rounding'])['status'] == 'eligible'
-    assert construction_evidence(source('0.5', STORAGE_RNE, splat=True),
-                                 excluded=['readout_offset_rounding'])['status'] == 'eligible'
+    assert decide(source(offset, STORAGE_RNE))['status'] == 'eligible'
+    assert decide(source('0.5', STORAGE_RNE, splat=True))['status'] == 'eligible'
 
 
 @pytest.mark.parametrize('offset', ['dense<1536.0>', 'dense<[1536.0,3072.0,1536.0,6144.0]>'])
 def test_magic_bias_through_storage_rne_is_excluded(offset):
-    m = source(offset, STORAGE_RNE.replace('%v = arith.extf %n : f16 to f32',
-                                           '%w = arith.extf %n : f16 to f32\n%v = arith.subf %w,%b : f32'))
-    m.verify()
-    result = construction_evidence(m, excluded=['readout_offset_rounding'])
+    removal = '%w = arith.extf %n : f16 to f32\n%v = arith.subf %w,%b : f32'
+    result = decide(source(offset, STORAGE_RNE.replace('%v = arith.extf %n : f16 to f32', removal)))
     assert result['status'] == 'host', result
 
 
 def test_literal_affine_offset_without_rounding_remains_eligible():
     assert construction_evidence(source('dense<0.5>', '%v = arith.addf %sum,%a : f32'))['status'] == 'eligible'
-
-
-def _sign_bias(body):
-    return parse_mlir_text('''module { func.func @f(%x: tensor<4xf32>) -> tensor<4xf32> {
-      %e = tensor.empty() : tensor<4xf32>
-      %r = linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>], iterator_types=["parallel"]}
-        ins(%x : tensor<4xf32>) outs(%e : tensor<4xf32>) {
-        ^bb0(%a:f32,%unused:f32):
-          ''' + body + '''
-          %n = arith.fptosi %sum : f32 to i32
-          %v = arith.sitofp %n : i32 to f32
-          linalg.yield %v : f32
-        } -> tensor<4xf32>
-      func.return %r : tensor<4xf32>
-    }}''')
-
-
-def test_literal_magnitude_with_runtime_sign_is_an_offset():
-    # Round half away from zero: x + copysign(0.5, x), then truncate.
-    m = _sign_bias('%h = arith.constant 0.5 : f32\n%b = math.copysign %h, %a : f32\n%sum = arith.addf %a,%b : f32')
-    m.verify()
-    result = construction_evidence(m, excluded=['readout_offset_rounding'])
-    assert result['status'] == 'host', result
-
-
-def test_runtime_magnitude_sign_transfer_is_not_an_offset():
-    # copysign(x, 0.5) = |x| carries runtime magnitude; adding it is not a literal bias.
-    m = _sign_bias('%h = arith.constant 0.5 : f32\n%b = math.copysign %a, %h : f32\n%sum = arith.addf %a,%b : f32')
-    m.verify()
-    assert construction_evidence(m, excluded=['readout_offset_rounding'])['status'] == 'eligible'
 
 
 def single(body):
@@ -130,6 +97,15 @@ def single(body):
         } -> tensor<4xf32>
       func.return %r : tensor<4xf32>
     }}''')
+
+
+# Round half away from zero, x + copysign(0.5, x), is a literal offset; copysign(x, 0.5) = |x|
+# carries runtime magnitude, so adding it is not a literal bias.
+@pytest.mark.parametrize('copysign,status', [('%h, %a', 'host'), ('%a, %h', 'eligible')])
+def test_only_a_literal_magnitude_with_runtime_sign_is_an_offset(copysign, status):
+    body = f'%h = arith.constant 0.5 : f32\n%b = math.copysign {copysign} : f32\n%sum = arith.addf %a,%b : f32\n'
+    result = decide(single(body + '%n = arith.fptosi %sum : f32 to i32\n%v = arith.sitofp %n : i32 to f32'))
+    assert result['status'] == status, result
 
 
 MAGIC = '%c = arith.constant 1536.0 : f32\n%s = arith.addf %a,%c : f32\n'
@@ -152,9 +128,7 @@ MAGIC_REMOVALS = {
 
 @pytest.mark.parametrize('body', MAGIC_REMOVALS.values(), ids=MAGIC_REMOVALS.keys())
 def test_magic_bias_removed_after_narrowing_in_any_spelling_is_excluded(body):
-    m = single(body)
-    m.verify()
-    result = construction_evidence(m, excluded=['readout_offset_rounding'])
+    result = decide(single(body))
     assert result['status'] == 'host', result
     assert any(e['reason'] == 'readout_offset_rounding' for e in result['evidence'])
 
@@ -174,12 +148,10 @@ def test_narrowing_that_is_stored_and_also_reused_is_not_a_storage_boundary():
         } -> (tensor<4xf16>, tensor<4xf32>)
       func.return %r#0, %r#1 : tensor<4xf16>, tensor<4xf32>
     }}''')
-    m.verify()
-    assert construction_evidence(m, excluded=['readout_offset_rounding'])['status'] == 'host'
+    assert decide(m)['status'] == 'host'
 
 
 def test_stored_narrowing_of_an_affine_result_stays_eligible():
     m = single('%c = arith.constant 0.5 : f32\n%s = arith.addf %a,%c : f32\n'
                '%n = arith.truncf %s : f32 to f16\n%v = arith.extf %n : f16 to f32')
-    m.verify()
-    assert construction_evidence(m, excluded=['readout_offset_rounding'])['status'] == 'eligible'
+    assert decide(m)['status'] == 'eligible'
