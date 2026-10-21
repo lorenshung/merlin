@@ -14,6 +14,7 @@ def expose_static_masked_sums(module):
     from merlin.llvmlower import _ir
     from merlin.llvmlower._ir import PARALLEL, REDUCTION, dims, identity, mac, point, splat
     from merlin.llvmlower.additive_regions import positive_zero_seed
+    from merlin.targetgen.closed_scalar import predicate_holds
 
     count = 0
     for op in list(module.walk()):
@@ -120,9 +121,7 @@ def expose_static_masked_sums(module):
         matrix = reshape(transposed, [n, k])
 
         def compare(a, b):
-            return (a == b, a != b, a < b, a <= b, a > b, a >= b, a < b, a <= b, a > b, a >= b)[
-                predicate.predicate.value.data
-            ]
+            return predicate_holds(predicate.predicate.value.data, (a > b) - (a < b))
 
         weights = []
         for source in range(k):

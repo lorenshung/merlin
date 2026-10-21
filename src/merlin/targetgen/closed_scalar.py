@@ -84,6 +84,32 @@ def _zero_sign(value):
     return math.copysign(1.0, value) < 0 if isinstance(value, float) else False
 
 
+def predicate_holds(predicate, relation, unordered=False, *, floating=False):
+    """arith.cmpf (floating) or arith.cmpi predicate of a three-way order; unordered is a NaN operand."""
+    eq, gt, lt = relation == 0, relation > 0, relation < 0
+    if floating:
+        ordered = not unordered
+        return (
+            False,
+            ordered and eq,
+            ordered and gt,
+            ordered and not lt,
+            ordered and lt,
+            ordered and not gt,
+            ordered and not eq,
+            ordered,
+            unordered or eq,
+            unordered or gt,
+            unordered or not lt,
+            unordered or lt,
+            unordered or not gt,
+            unordered or not eq,
+            unordered,
+            True,
+        )[predicate]
+    return (eq, not eq, lt, not gt, gt, not lt, lt, not gt, gt, not lt)[predicate]
+
+
 def evaluate(value, environment, memo=None):
     """Evaluate one scalar SSA value. environment maps values to Python numbers.
 
@@ -97,8 +123,6 @@ def evaluate(value, environment, memo=None):
 
 def _evaluate(value, environment, memo=None):
     from xdsl.dialects.builtin import IntegerType
-
-    from merlin.llvmlower.singleton_selectors import _relation
 
     memo = {} if memo is None else memo
     if value in environment:
@@ -185,7 +209,7 @@ def _evaluate(value, environment, memo=None):
             if name == "arith.cmpf":
                 unordered = (isinstance(a, float) and math.isnan(a)) or (isinstance(b, float) and math.isnan(b))
                 relation = 0 if unordered else (a > b) - (a < b)
-                out = _relation(predicate, relation, unordered, floating=True)
+                out = predicate_holds(predicate, relation, unordered, floating=True)
             else:
                 typ = _element_type(owner.operands[0])
                 if isinstance(typ, IntegerType):
@@ -194,7 +218,7 @@ def _evaluate(value, environment, memo=None):
                     if predicate in {2, 3, 4, 5}:
                         ua = ua - (1 << width) if ua >= 1 << (width - 1) else ua
                         ub = ub - (1 << width) if ub >= 1 << (width - 1) else ub
-                    out = _relation(predicate, (ua > ub) - (ua < ub))
+                    out = predicate_holds(predicate, (ua > ub) - (ua < ub))
     elif name in {"arith.andi", "arith.ori", "arith.xori"}:
         a, b = get(owner.operands[0]), get(owner.operands[1])
         boolean = str(result_type) == "i1"

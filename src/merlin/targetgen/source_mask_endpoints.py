@@ -60,7 +60,7 @@ def closed_private_state(module, function):
 
 def _decided(predicate, bounds, constant):
     """The comparison result shared by every value in bounds, or None."""
-    from merlin.llvmlower.singleton_selectors import _relation
+    from merlin.targetgen.closed_scalar import predicate_holds
 
     c = Fraction(constant)
     relations = set()
@@ -70,7 +70,7 @@ def _decided(predicate, bounds, constant):
         relations.add(1)
     if bounds.lo <= c <= bounds.hi:
         relations.add(0)
-    outcomes = {_relation(predicate, r, False, floating=True) for r in relations}
+    outcomes = {predicate_holds(predicate, r, False, floating=True) for r in relations}
     return outcomes.pop() if len(outcomes) == 1 else None
 
 

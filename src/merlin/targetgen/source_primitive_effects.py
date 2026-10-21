@@ -21,7 +21,7 @@ def pure_tensor_source(function):
     from xdsl.traits import Pure
 
     from merlin.llvmlower._ir import input_literal as literal
-    from merlin.llvmlower.singleton_selectors import _relation
+    from merlin.targetgen.closed_scalar import predicate_holds
 
     def true_assert(value):
         known = literal(value)
@@ -39,7 +39,7 @@ def pure_tensor_source(function):
 
             if owner.fastmath.data:
                 return False
-            return _relation(
+            return predicate_holds(
                 owner.predicate.value.data, (a > b) - (a < b), math.isnan(a) or math.isnan(b), floating=True
             )
         predicate = owner.predicate.value.data
@@ -52,7 +52,7 @@ def pure_tensor_source(function):
                 b = b - (1 << width) if b >= 1 << (width - 1) else b
         elif not (0 <= a < 2**31 and 0 <= b < 2**31):
             return False
-        return _relation(predicate, (a > b) - (a < b))
+        return predicate_holds(predicate, (a > b) - (a < b))
 
     for op in function.body.block.walk():
         name = getattr(getattr(op, "op_name", None), "data", op.name)

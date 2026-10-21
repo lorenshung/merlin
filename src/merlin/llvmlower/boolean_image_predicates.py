@@ -7,7 +7,7 @@ def fold_boolean_image_predicates(module):
     from xdsl.rewriter import Rewriter
 
     from merlin.llvmlower._ir import point, splat
-    from merlin.llvmlower.singleton_selectors import _relation
+    from merlin.targetgen.closed_scalar import predicate_holds
     from merlin.targetgen.native_payload_carriers import UNKNOWN, LiteralPayloads
     from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
 
@@ -59,7 +59,9 @@ def fold_boolean_image_predicates(module):
                 value = -bit if scalar[0].name == "arith.sitofp" else bit
                 a, b = (value, constant) if slot == 0 else (constant, value)
                 answers.append(
-                    _relation(body[0].predicate.value.data, (a > b) - (a < b), math.isnan(constant), floating=True)
+                    predicate_holds(
+                        body[0].predicate.value.data, (a > b) - (a < b), math.isnan(constant), floating=True
+                    )
                 )
             replacement = []
             if answers[0] == answers[1]:

@@ -48,6 +48,7 @@ def _fold_uniform_numeric_literals_once(module, *, close_guards):
     from xdsl.rewriter import Rewriter
 
     from merlin.llvmlower.fixed_point_ir import FORMAT
+    from merlin.targetgen.closed_scalar import predicate_holds
     from merlin.targetgen.exact_arithmetic import round_binary
     from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
 
@@ -59,25 +60,7 @@ def _fold_uniform_numeric_literals_once(module, *, close_guards):
             return None
         if name == "arith.cmpf":
             a, b = operands
-            comparisons = [
-                False,
-                a == b,
-                a > b,
-                a >= b,
-                a < b,
-                a <= b,
-                a != b,
-                True,
-                a == b,
-                a > b,
-                a >= b,
-                a < b,
-                a <= b,
-                a != b,
-                False,
-                True,
-            ]
-            return int(comparisons[primitive.predicate.value.data])
+            return int(predicate_holds(primitive.predicate.value.data, (a > b) - (a < b), floating=True))
         rational = list(map(Fraction, operands))
         negative = [math.copysign(1.0, v) < 0 for v in operands]
         negative_zero = False

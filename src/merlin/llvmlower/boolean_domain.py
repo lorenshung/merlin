@@ -11,6 +11,7 @@ def fold_boolean_domain(module):
     from xdsl.rewriter import Rewriter
 
     from merlin.llvmlower._ir import identity, point, splat
+    from merlin.targetgen.closed_scalar import predicate_holds
     from merlin.targetgen.native_payload_carriers import UNKNOWN, LiteralPayloads
     from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
 
@@ -99,7 +100,7 @@ def fold_boolean_domain(module):
                             bits = child.operands[0].type.width.data
                             a = a - (1 << bits) if a >= 1 << (bits - 1) else a
                             b = b - (1 << bits) if b >= 1 << (bits - 1) else b
-                        value = (a == b, a != b, a < b, a <= b, a > b, a >= b, a < b, a <= b, a > b, a >= b)[predicate]
+                        value = predicate_holds(predicate, (a > b) - (a < b))
                     elif child.name in {"arith.divsi", "arith.floordivsi", "arith.remsi", "arith.divui", "arith.remui"}:
                         a, b = xs
                         bits = child.operands[0].type.width.data

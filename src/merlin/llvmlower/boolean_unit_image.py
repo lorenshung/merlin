@@ -11,7 +11,7 @@ def fold_boolean_unit_image(module):
     from xdsl.rewriter import Rewriter
 
     from merlin.llvmlower._ir import generic_input
-    from merlin.llvmlower.singleton_selectors import _relation
+    from merlin.targetgen.closed_scalar import predicate_holds
     from merlin.targetgen.native_payload_carriers import UNKNOWN, LiteralPayloads
     from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
 
@@ -80,7 +80,7 @@ def fold_boolean_unit_image(module):
         if name == "arith.cmpf":
             a, b = [literal(v) for v in op.operands]
             if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-                predicate_literal = _relation(
+                predicate_literal = predicate_holds(
                     op.predicate.value.data, (a > b) - (a < b), math.isnan(a) or math.isnan(b), floating=True
                 )
             else:
@@ -92,7 +92,7 @@ def fold_boolean_unit_image(module):
                     for bit in (0.0, 1.0):
                         left, right = (bit, threshold) if slot == 0 else (threshold, bit)
                         answers.append(
-                            _relation(
+                            predicate_holds(
                                 op.predicate.value.data,
                                 (left > right) - (left < right),
                                 math.isnan(threshold),
@@ -172,7 +172,7 @@ def fold_boolean_unit_image(module):
                     answers = []
                     for bit in (0.0, 1.0):
                         a, b = (threshold, bit) if reverse else (bit, threshold)
-                        yes = _relation(
+                        yes = predicate_holds(
                             predicate.predicate.value.data, (a > b) - (a < b), math.isnan(threshold), floating=True
                         )
                         chosen = op.operands[1 if yes else 2]

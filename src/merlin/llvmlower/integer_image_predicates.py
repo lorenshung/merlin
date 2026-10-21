@@ -17,7 +17,7 @@ def fold_integer_image_predicates(module):
     from xdsl.rewriter import Rewriter
 
     from merlin.llvmlower._ir import input_literal as literal
-    from merlin.llvmlower.singleton_selectors import _relation
+    from merlin.targetgen.closed_scalar import predicate_holds
     from merlin.targetgen.exact_arithmetic import round_binary
     from merlin.targetgen.native_payload_carriers import UNKNOWN, LiteralPayloads
 
@@ -108,7 +108,7 @@ def fold_integer_image_predicates(module):
             lo, hi = bounds
             answer = None
             if math.isnan(constant):
-                answer = _relation(pred, 0, True, floating=True)
+                answer = predicate_holds(pred, 0, True, floating=True)
             elif pred in {1, 6, 8, 13}:
                 unattainable = (
                     (math.isfinite(constant) and not float(constant).is_integer()) or constant < lo or constant > hi
@@ -119,7 +119,7 @@ def fold_integer_image_predicates(module):
                 relations = [
                     ((constant > x) - (constant < x)) if reverse else ((x > constant) - (x < constant)) for x in bounds
                 ]
-                answers = {_relation(pred, relation, floating=True) for relation in relations}
+                answers = {predicate_holds(pred, relation, floating=True) for relation in relations}
                 if len(answers) == 1:
                     answer = answers.pop()
             if answer is not None:

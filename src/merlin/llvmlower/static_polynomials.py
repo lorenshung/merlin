@@ -19,6 +19,8 @@ def analyze_static_polynomial(
     from xdsl.dialects.builtin import FloatAttr, IntegerAttr
     from xdsl.ir.affine import AffineDimExpr
 
+    from merlin.targetgen.closed_scalar import predicate_holds
+
     if op.name != "linalg.generic" or len(op.results) != 1:
         raise PolynomialRefusal("one generic result required")
     shape = op.results[0].type.get_shape()
@@ -168,26 +170,7 @@ def analyze_static_polynomial(
                 result = {(): abs(args[0][()])} if args[0] else {}
             elif ignore_float_rounding and name == "arith.cmpf" and all(set(v) <= {()} for v in args):
                 a, b = (v.get((), Fraction(0)) for v in args)
-                result = int(
-                    [
-                        False,
-                        a == b,
-                        a > b,
-                        a >= b,
-                        a < b,
-                        a <= b,
-                        a != b,
-                        True,
-                        a == b,
-                        a > b,
-                        a >= b,
-                        a < b,
-                        a <= b,
-                        a != b,
-                        False,
-                        True,
-                    ][child.predicate.value.data]
-                )
+                result = int(predicate_holds(child.predicate.value.data, (a > b) - (a < b), floating=True))
             elif name == "arith.cmpi":
                 if any(type(v) is not int for v in args):
                     raise PolynomialRefusal("data-dependent predicate")
@@ -198,11 +181,7 @@ def analyze_static_polynomial(
                     # Same-sign ordering agrees with mathematical integers.
                     if (a < 0) != (b < 0):
                         a, b = int(a < 0), int(b < 0)
-                result = int(
-                    [a == b, a != b, a < b, a <= b, a > b, a >= b, a < b, a <= b, a > b, a >= b][
-                        child.predicate.value.data
-                    ]
-                )
+                result = int(predicate_holds(child.predicate.value.data, (a > b) - (a < b)))
             elif name == "arith.select":
                 if type(args[0]) is not int:
                     raise PolynomialRefusal("data-dependent select")

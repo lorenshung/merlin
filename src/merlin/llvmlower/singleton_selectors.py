@@ -29,33 +29,10 @@ RUNTIME = object()
 IGNORED = object()
 
 
-def _relation(predicate, relation, unordered=False, *, floating=False):
-    eq, gt, lt = relation == 0, relation > 0, relation < 0
-    if floating:
-        ordered = not unordered
-        return (
-            False,
-            ordered and eq,
-            ordered and gt,
-            ordered and not lt,
-            ordered and lt,
-            ordered and not gt,
-            ordered and not eq,
-            ordered,
-            unordered or eq,
-            unordered or gt,
-            unordered or not lt,
-            unordered or lt,
-            unordered or not gt,
-            unordered or not eq,
-            unordered,
-            True,
-        )[predicate]
-    return (eq, not eq, lt, not gt, gt, not lt, lt, not gt, gt, not lt)[predicate]
-
-
 def _evaluate(op, environment, cell, thresholds, element):
     from xdsl.dialects.builtin import IntegerType, i1
+
+    from merlin.targetgen.closed_scalar import predicate_holds
 
     values = [environment[v] for v in op.operands]
     name = op.name
@@ -86,7 +63,7 @@ def _evaluate(op, environment, cell, thresholds, element):
         a, b = map(position, values)
         unordered = a is None or b is None
         relation = 0 if unordered else (a > b) - (a < b)
-        return Literal(_relation(predicate, relation, unordered, floating=True), i1)
+        return Literal(predicate_holds(predicate, relation, unordered, floating=True), i1)
     signed = predicate in {2, 3, 4, 5}
     operand_type = op.operands[0].type
     width = operand_type.width.data if isinstance(operand_type, IntegerType) else None
@@ -105,8 +82,8 @@ def _evaluate(op, environment, cell, thresholds, element):
 
     a, b = map(interval, values)
     if values[0] is RUNTIME and values[1] is RUNTIME:
-        return Literal(_relation(predicate, 0), i1)
-    answers = {_relation(predicate, (x > y) - (x < y)) for x in a for y in b}
+        return Literal(predicate_holds(predicate, 0), i1)
+    answers = {predicate_holds(predicate, (x > y) - (x < y)) for x in a for y in b}
     if len(answers) != 1:
         raise ValueError("comparison cell straddles a predicate boundary")
     return Literal(answers.pop(), i1)

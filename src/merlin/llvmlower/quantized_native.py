@@ -184,6 +184,7 @@ def simplify_static_controls(module):
     from xdsl.dialects.builtin import FloatAttr, IntegerAttr
     from xdsl.rewriter import Rewriter
 
+    from merlin.targetgen.closed_scalar import predicate_holds
     from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
 
     known = {}
@@ -240,26 +241,7 @@ def simplify_static_controls(module):
             result = {"arith.andi": lambda: a & b, "arith.ori": lambda: a | b, "arith.xori": lambda: a ^ b}[name]()
         elif name == "arith.cmpf":
             a, b = xs
-            result = int(
-                [
-                    False,
-                    a == b,
-                    a > b,
-                    a >= b,
-                    a < b,
-                    a <= b,
-                    a != b,
-                    True,
-                    a == b,
-                    a > b,
-                    a >= b,
-                    a < b,
-                    a <= b,
-                    a != b,
-                    False,
-                    True,
-                ][op.predicate.value.data]
-            )
+            result = int(predicate_holds(op.predicate.value.data, (a > b) - (a < b), floating=True))
         if result is not None:
             known[op.results[0]] = result
 
