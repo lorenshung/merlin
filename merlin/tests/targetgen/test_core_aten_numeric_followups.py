@@ -109,6 +109,21 @@ else:
 """)
 
 
+def measured_spec_int8(overload, dtype, expected, raw, admission):
+    """A measured device spec_int8 case whose independent integer reference is ``raw``."""
+    reference = dict(status="prepared", engine="independent", expected_output_bytes={"0": raw.hex()})
+    return dict(
+        overload=overload,
+        status="bundled",
+        numeric_policy="spec_int8",
+        case=dict(expected=expected),
+        output_indices=[0],
+        output_abi=[dict(dtype=dtype, shape=[1])],
+        numeric_admission=dict(status="admitted", **admission, integer_reference=reference),
+        routing=measured_routing(overload),
+    )
+
+
 @pytest.mark.parametrize(
     "dtype,narrowing,qualification",
     [
@@ -121,21 +136,9 @@ def test_native_integer_grade_qualifies_only_exact_measured_device(monkeypatch, 
 
     monkeypatch.setattr("merlin.targetgen.core_aten_device.verify_execution_evidence", lambda _: True)
     raw = np.array([7], np.int8 if dtype == "i8" else np.int32).tobytes()
-    record = dict(
-        overload="aten._int_mm.default",
-        status="bundled",
-        numeric_policy="spec_int8",
-        case=dict(expected=dict(kind="tensor", dtype="int8" if narrowing else "int32", shape=[1], values=[7])),
-        output_indices=[0],
-        output_abi=[dict(dtype=dtype, shape=[1])],
-        numeric_admission=dict(
-            status="admitted",
-            native_contractions=1,
-            host_int8_narrowing=narrowing,
-            integer_reference=dict(status="prepared", engine="independent", expected_output_bytes={"0": raw.hex()}),
-        ),
-        routing=measured_routing("aten._int_mm.default"),
-    )
+    expected = dict(kind="tensor", dtype="int8" if narrowing else "int32", shape=[1], values=[7])
+    admission = dict(native_contractions=1, host_int8_narrowing=narrowing)
+    record = measured_spec_int8("aten._int_mm.default", dtype, expected, raw, admission)
     result = grade_core_aten_batch(dict(cases=[record]), [raw])
     verdict = result["cases"][record["overload"]]
     assert verdict["numeric_qualification"] == qualification
@@ -251,21 +254,9 @@ def test_contraction_free_quantized_execution_keeps_its_exact_reference_policy(m
 
     monkeypatch.setattr("merlin.targetgen.core_aten_device.verify_execution_evidence", lambda _: True)
     raw = np.array([7.0], np.float64).tobytes()
-    record = dict(
-        overload="aten._to_copy.default",
-        status="bundled",
-        numeric_policy="spec_int8",
-        case=dict(expected=dict(kind="tensor", dtype="float64", shape=[1], values=[7.0])),
-        output_indices=[0],
-        output_abi=[dict(dtype="f64", shape=[1])],
-        numeric_admission=dict(
-            status="admitted",
-            quantized_contractions=0,
-            quantized_non_contraction_sites=1,
-            integer_reference=dict(status="prepared", engine="independent", expected_output_bytes={"0": raw.hex()}),
-        ),
-        routing=measured_routing("aten._to_copy.default"),
-    )
+    expected = dict(kind="tensor", dtype="float64", shape=[1], values=[7.0])
+    admission = dict(quantized_contractions=0, quantized_non_contraction_sites=1)
+    record = measured_spec_int8("aten._to_copy.default", "f64", expected, raw, admission)
     result = grade_core_aten_batch(dict(cases=[record]), [raw])
     assert result["cases"][record["overload"]]["numeric_execution_policy"] == "spec_int8"
     assert result["spec_int8_passed_count"] == 1
