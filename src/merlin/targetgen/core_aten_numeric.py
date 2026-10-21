@@ -318,28 +318,23 @@ def _prepare_spec_int8(
     original = (directory / "model.mlir").read_bytes()
     prepare = getattr(provider, "prepare_bundle", None)
     preparation = prepare(directory, target=target, facts=facts) if prepare is not None else {}
-    module = parse_mlir_file(directory / "model.mlir")
     if construction_observer is not None:
-        construction_observer(module, "provider_prelude")
-    from merlin.kernels.shapes import observe_contractions
-    from merlin.targetgen.core_aten_exact_dtype import prepare_bitwise
-
-    bitwise = prepare_bitwise(directory, report, selection, provider, package, module)
-    if bitwise is not None:
-        return bitwise
+        construction_observer(parse_mlir_file(directory / "model.mlir"), "provider_prelude")
     import functools
 
+    from merlin.kernels.shapes import observe_contractions
     from merlin.targetgen.core_aten_components import prepare_integer_components
-    from merlin.targetgen.native_byte_activation import prepare as prepare_activation
-    from merlin.targetgen.native_quantized_activation import prepare as prepare_quantized_activation
-    from merlin.targetgen.native_wide_activation import prepare as prepare_wide_activation
+    from merlin.targetgen.core_aten_exact_dtype import prepare_bitwise
+    from merlin.targetgen.native_byte_activation import prepare as byte_activation
+    from merlin.targetgen.native_quantized_activation import prepare as quantized_activation
+    from merlin.targetgen.native_wide_activation import prepare as wide_activation
 
     components = functools.partial(
         prepare_integer_components, limb_attribute=f"{target}.limb", construction_observer=construction_observer
     )
     # Each candidate parses its own copy: a declined candidate's in-place
     # rewrites cannot change the next candidate's source or its ordinals.
-    for candidate in (prepare_activation, prepare_wide_activation, components, prepare_quantized_activation):
+    for candidate in (prepare_bitwise, byte_activation, wide_activation, components, quantized_activation):
         plan = candidate(directory, report, selection, provider, package, parse_mlir_file(directory / "model.mlir"))
         if plan is not None:
             return plan
