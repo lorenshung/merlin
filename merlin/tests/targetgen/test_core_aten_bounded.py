@@ -42,16 +42,8 @@ def test_bounded_pool_is_deterministic_exact_and_smaller_than_candidates() -> No
 
 
 def test_v2_profile_includes_int8_and_refuses_a_misleading_custom_bound() -> None:
-    assert BoundedCoverageProfile().dtypes == (
-        "bool",
-        "int8",
-        "int32",
-        "int64",
-        "float16",
-        "bfloat16",
-        "float32",
-        "complex64",
-    )
+    dtypes = ("bool", "int8", "int32", "int64", "float16", "bfloat16", "float32", "complex64")
+    assert BoundedCoverageProfile().dtypes == dtypes
     with pytest.raises(ValueError, match="fixed ranks"):
         BoundedCoverageProfile(ranks=(0,))
 
@@ -78,34 +70,31 @@ def test_bounded_summary_qualifies_the_claim() -> None:
 
 
 @requires_torch
-def test_layout_variants_do_not_make_running_statistics_overlap() -> None:
-    overload = "aten._native_batch_norm_legit.default"
-    canonical = case_document(core_aten_cases()[overload])
-    pool = _one_overload_pool(overload, canonical, BoundedCoverageProfile())
-    for identifier in pool["selected_case_ids"]:
-        case = pool["candidates"][identifier]
-        _validate_observation(case, eager_case_observation(case))
-
-
-@requires_torch
-def test_layer_norm_backward_pool_is_reproducible() -> None:
-    overload = "aten.native_layer_norm_backward.default"
-    canonical = case_document(core_aten_cases()[overload])
-    first = _one_overload_pool(overload, canonical, BoundedCoverageProfile())
-    second = _one_overload_pool(overload, canonical, BoundedCoverageProfile())
-    assert first == second
-
-
-@requires_torch
-def test_group_norm_backward_pool_is_reproducible_and_replayable() -> None:
-    overload = "aten.native_group_norm_backward.default"
+@pytest.mark.parametrize(
+    "overload,repeat,replay",
+    [
+        pytest.param("aten._native_batch_norm_legit.default", False, True, id="batch_norm_layout_variants"),
+        pytest.param("aten.native_layer_norm_backward.default", True, False, id="layer_norm_backward"),
+        pytest.param("aten.native_group_norm_backward.default", True, True, id="group_norm_backward"),
+        pytest.param("aten.resize_.default", True, False, id="metadata_only_resize"),
+    ],
+)
+def test_pools_are_reproducible_and_replayable(overload, repeat, replay) -> None:
+    """Pools rebuild identically; selected cases replay (layout variants do not overlap running statistics)."""
     canonical = case_document(core_aten_cases()[overload])
     first = _one_overload_pool(overload, canonical, BoundedCoverageProfile())
-    second = _one_overload_pool(overload, canonical, BoundedCoverageProfile())
-    assert first == second
-    for identifier in first["selected_case_ids"]:
+    if repeat:
+        assert first == _one_overload_pool(overload, canonical, BoundedCoverageProfile())
+    for identifier in first["selected_case_ids"] if replay else ():
         case = first["candidates"][identifier]
         _validate_observation(case, eager_case_observation(case))
+    if overload == "aten.resize_.default":
+        assert all(
+            "values" not in tensor
+            for case in first["candidates"].values()
+            for tensor in case["post_arguments"]["args"]
+            if isinstance(tensor, dict) and tensor.get("kind") == "tensor"
+        )
 
 
 @requires_torch
@@ -121,21 +110,6 @@ def test_known_nonreplayable_cells_are_rejected(overload: str, reason: str) -> N
     canonical = case_document(core_aten_cases()[overload])
     pool = _one_overload_pool(overload, canonical, BoundedCoverageProfile())
     assert any(reason in rejection["reason"] for rejection in pool["rejected"])
-
-
-@requires_torch
-def test_metadata_only_resize_pool_is_reproducible() -> None:
-    overload = "aten.resize_.default"
-    canonical = case_document(core_aten_cases()[overload])
-    first = _one_overload_pool(overload, canonical, BoundedCoverageProfile())
-    second = _one_overload_pool(overload, canonical, BoundedCoverageProfile())
-    assert first == second
-    assert all(
-        "values" not in tensor
-        for case in first["candidates"].values()
-        for tensor in case["post_arguments"]["args"]
-        if isinstance(tensor, dict) and tensor.get("kind") == "tensor"
-    )
 
 
 @pytest.mark.parametrize(
