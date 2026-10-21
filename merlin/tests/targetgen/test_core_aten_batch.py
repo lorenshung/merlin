@@ -12,6 +12,37 @@ from merlin.targetgen.core_aten_batch import build_core_aten_batch
 from merlin.targetgen.core_aten_batch_grade import grade_core_aten_batch
 
 
+def capture(directory, source, inputs, golden, input_abi=(), output_abi=(), status=None, **meta):
+    """Write one capture directory: the capsule source, capture.json, inputs.json and golden.json."""
+    directory.mkdir(parents=True)
+    (directory / "capsule.linalg.mlir").write_text(source, encoding="utf-8")
+    meta = dict(ok=True, opaque=0, input_abi=list(input_abi), output_abi=list(output_abi), **meta)
+    document = dict(capture_meta=meta) if status is None else dict(status=status, capture_meta=meta)
+    (directory / "capture.json").write_text(json.dumps(document), encoding="utf-8")
+    (directory / "inputs.json").write_text(json.dumps(inputs), encoding="utf-8")
+    (directory / "golden.json").write_text(json.dumps(golden), encoding="utf-8")
+
+
+def unary(op, declarations=""):
+    """A capsule applying scalar ``op`` (``%5 = op ...``) elementwise to one tensor<2xf32>."""
+    return (
+        "builtin.module {\n" + declarations + "  func.func @forward(%0: tensor<2xf32>) -> tensor<2xf32> {\n"
+        "    %1 = tensor.empty() : tensor<2xf32>\n"
+        "    %2 = linalg.generic {indexing_maps = [affine_map<(d0) -> (d0)>, "
+        'affine_map<(d0) -> (d0)>], iterator_types = ["parallel"]} '
+        "ins(%0 : tensor<2xf32>) outs(%1 : tensor<2xf32>) {\n"
+        "      ^bb0(%3: f32, %4: f32):\n"
+        f"        %5 = {op}\n"
+        "        linalg.yield %5 : f32\n"
+        "    } -> tensor<2xf32>\n"
+        "    func.return %2 : tensor<2xf32>\n"
+        "  }\n}\n"
+    )
+
+
+F32X2 = [{"dtype": "f32", "shape": [2]}]
+
+
 def test_nested_nonfinite_documents_preserve_ieee_values():
     from merlin.targetgen.core_aten_batch_grade import _complex_values, _grade_output
 
@@ -108,50 +139,15 @@ def test_batch_inlines_clean_cases_and_keeps_unavailable_case(tmp_path):
         ("aten__add__Tensor", "arith.addf", [[1.0, 2.0], [3.0, 4.0]]),
         ("aten__sub__Tensor", "arith.subf", [[4.0, 3.0], [2.0, 1.0]]),
     ):
-        directory = captures / name
-        directory.mkdir(parents=True)
-        (directory / "capsule.linalg.mlir").write_text(
-            "builtin.module {\n"
-            "  func.func @forward(%0: tensor<2xf32>) -> tensor<2xf32> {\n"
-            "    %1 = tensor.empty() : tensor<2xf32>\n"
-            "    %2 = linalg.generic {indexing_maps = [affine_map<(d0) -> (d0)>, "
-            'affine_map<(d0) -> (d0)>], iterator_types = ["parallel"]} '
-            "ins(%0 : tensor<2xf32>) outs(%1 : tensor<2xf32>) {\n"
-            "      ^bb0(%3: f32, %4: f32):\n"
-            f"        %5 = {op} %3, %3 : f32\n"
-            "        linalg.yield %5 : f32\n"
-            "    } -> tensor<2xf32>\n"
-            "    func.return %2 : tensor<2xf32>\n"
-            "  }\n}\n",
-            encoding="utf-8",
-        )
-        (directory / "capture.json").write_text(
-            json.dumps(
-                {
-                    "status": "captured_exact",
-                    "capture_meta": {
-                        "ok": True,
-                        "opaque": 0,
-                        "input_abi": [{"dtype": "f32", "shape": [2]}],
-                        "output_abi": [{"dtype": "f32", "shape": [2]}],
-                    },
-                }
-            ),
-            encoding="utf-8",
-        )
-        (directory / "inputs.json").write_text(json.dumps([values[0]]), encoding="utf-8")
-        (directory / "golden.json").write_text(json.dumps(values[1]), encoding="utf-8")
+        source = unary(f"{op} %3, %3 : f32")
+        capture(captures / name, source, [values[0]], values[1], F32X2, F32X2, status="captured_exact")
     corpus = {"cases": cases, "denominator_sha256": "fixture"}
     first = tmp_path / "first"
     second = tmp_path / "second"
     report = build_core_aten_batch(corpus, captures, first)
     build_core_aten_batch(corpus, captures, second)
-    assert (report["case_count"], report["bundled_count"], report["input_count"], report["output_count"]) == (
-        3,
-        2,
-        2,
-        2,
-    )
+    counts = (report["case_count"], report["bundled_count"], report["input_count"], report["output_count"])
+    assert counts == (3, 2, 2, 2)
     assert [row["output_indices"] for row in report["cases"][:2]] == [[0], [1]]
     assert report["cases"][2]["status"] == "capture_unavailable"
     assert "%c0_2" in (first / "model.mlir").read_text()
@@ -231,18 +227,12 @@ def test_metadata_only_empty_result_requires_descriptor_observations():
 
 def test_identical_functional_results_have_unambiguous_single_user_value(tmp_path):
     captures = tmp_path / "captures"
-    directory = captures / "fixture"
-    directory.mkdir(parents=True)
-    (directory / "capsule.linalg.mlir").write_text(
+    source = (
         "builtin.module { func.func @forward(%x: tensor<2xi64>) -> (tensor<2xi64>, tensor<2xi64>) {\n"
         "func.return %x, %x : tensor<2xi64>, tensor<2xi64>\n} }"
     )
-    abi = dict(dtype="i64", shape=[2])
-    (directory / "capture.json").write_text(
-        json.dumps({"capture_meta": {"ok": True, "opaque": 0, "input_abi": [abi], "output_abi": [abi]}})
-    )
-    (directory / "inputs.json").write_text("[[5, 9]]")
-    (directory / "golden.json").write_text("[5, 9]")
+    abi = [dict(dtype="i64", shape=[2])]
+    capture(captures / "fixture", source, [[5, 9]], [5, 9], abi, abi)
     report = build_core_aten_batch(
         {"cases": [{"overload": "fixture", "expected": {"kind": "tensor"}}]}, captures, tmp_path / "bundle"
     )
@@ -259,31 +249,16 @@ def test_bundle_carries_independent_mutable_globals(tmp_path):
         pytest.skip("native MLIR interpreter unavailable")
     cases = [{"overload": name, "expected": {"kind": "tensor"}} for name in ("left", "right")]
     captures = tmp_path / "captures"
-    for case in cases:
-        directory = captures / case["overload"]
-        directory.mkdir(parents=True)
-        (directory / "capsule.linalg.mlir").write_text("""builtin.module {
+    source = """builtin.module {
           ml_program.global private mutable @state(dense<0> : tensor<i64>) : tensor<i64>
           func.func @forward() -> tensor<i64> {
             %state = "ml_program.global_load"() <{global = @state}> : () -> tensor<i64>
             "ml_program.global_store"(%state) <{global = @state}> : (tensor<i64>) -> ()
             func.return %state : tensor<i64>
           }
-        }""")
-        (directory / "capture.json").write_text(
-            json.dumps(
-                {
-                    "capture_meta": {
-                        "ok": True,
-                        "opaque": 0,
-                        "input_abi": [],
-                        "output_abi": [{"dtype": "i64", "shape": []}],
-                    }
-                }
-            )
-        )
-        (directory / "inputs.json").write_text("[]")
-        (directory / "golden.json").write_text("0")
+        }"""
+    for case in cases:
+        capture(captures / case["overload"], source, [], 0, output_abi=[{"dtype": "i64", "shape": []}])
     bundle = tmp_path / "bundle"
     report = build_core_aten_batch({"cases": cases}, captures, bundle)
     assert report["bundled_count"] == 2
@@ -304,46 +279,11 @@ def test_generic_reprinted_bundle_still_restores_caller_layouts(tmp_path, monkey
         return out
 
     monkeypatch.setattr(generic_form, "to_generic_form", generic)
-    directory = tmp_path / "captures" / "aten__neg__default"
-    directory.mkdir(parents=True)
-    (directory / "capsule.linalg.mlir").write_text(
-        "builtin.module {\n"
-        "  func.func private @helper(f32) -> f32\n"
-        "  func.func @forward(%0: tensor<2xf32>) -> tensor<2xf32> {\n"
-        "    %1 = tensor.empty() : tensor<2xf32>\n"
-        "    %2 = linalg.generic {indexing_maps = [affine_map<(d0) -> (d0)>, "
-        'affine_map<(d0) -> (d0)>], iterator_types = ["parallel"]} '
-        "ins(%0 : tensor<2xf32>) outs(%1 : tensor<2xf32>) {\n"
-        "      ^bb0(%3: f32, %4: f32):\n"
-        "        %5 = arith.negf %3 : f32\n"
-        "        linalg.yield %5 : f32\n"
-        "    } -> tensor<2xf32>\n"
-        "    func.return %2 : tensor<2xf32>\n"
-        "  }\n}\n",
-        encoding="utf-8",
-    )
     layout = {"dtype": "float32", "shape": [2], "stride": [1], "storage_offset": 0, "requires_grad": False}
-    (directory / "capture.json").write_text(
-        json.dumps(
-            {
-                "status": "captured_exact",
-                "capture_meta": {
-                    "ok": True,
-                    "opaque": 0,
-                    "input_abi": [{"dtype": "f32", "shape": [2]}],
-                    "output_abi": [{"dtype": "f32", "shape": [2]}],
-                    "result_contract": {
-                        "authority": "fixture",
-                        "results": [{**layout, "role": "user_output"}],
-                        "inputs": [layout],
-                    },
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    (directory / "inputs.json").write_text(json.dumps([[1.0, 2.0]]), encoding="utf-8")
-    (directory / "golden.json").write_text(json.dumps([-1.0, -2.0]), encoding="utf-8")
+    contract = {"authority": "fixture", "results": [{**layout, "role": "user_output"}], "inputs": [layout]}
+    source = unary("arith.negf %3 : f32", "  func.func private @helper(f32) -> f32\n")
+    directory = tmp_path / "captures" / "aten__neg__default"
+    capture(directory, source, [[1.0, 2.0]], [-1.0, -2.0], F32X2, F32X2, "captured_exact", result_contract=contract)
     tensor = {"kind": "tensor", **layout, "values": [1.0, 2.0]}
     case = {
         "overload": "aten.neg.default",
@@ -524,37 +464,22 @@ def test_frontend_layout_contract_is_rebased_with_batch_arguments(tmp_path):
 
     captures, bundle = tmp_path / "captures", tmp_path / "bundle"
     cases = [{"overload": name, "expected": {"kind": "tensor"}} for name in ("left", "right")]
-    for case in cases:
-        directory = captures / case["overload"]
-        directory.mkdir(parents=True)
-        contract = dict(
-            inputs=[dict(shape=[3], stride=[1], storage_offset=0)],
-            results=[dict(shape=[3], stride=[1], storage_offset=0, alias_inputs=[0], alias_results=[])],
-        )
-        source = (
-            "builtin.module"
-            + module_attribute(contract)
-            + """ {
+    contract = dict(
+        inputs=[dict(shape=[3], stride=[1], storage_offset=0)],
+        results=[dict(shape=[3], stride=[1], storage_offset=0, alias_inputs=[0], alias_results=[])],
+    )
+    source = (
+        "builtin.module"
+        + module_attribute(contract)
+        + """ {
           func.func @forward(%x: tensor<3xf32>) -> tensor<3xf32> {
             func.return %x : tensor<3xf32>
           }
         }"""
-        )
-        (directory / "capsule.linalg.mlir").write_text(source)
-        (directory / "capture.json").write_text(
-            json.dumps(
-                dict(
-                    capture_meta=dict(
-                        ok=True,
-                        opaque=0,
-                        input_abi=[dict(shape=[3], dtype="f32")],
-                        output_abi=[dict(shape=[3], dtype="f32")],
-                    )
-                )
-            )
-        )
-        (directory / "inputs.json").write_text("[[1, 2, 3]]")
-        (directory / "golden.json").write_text("[1, 2, 3]")
+    )
+    abi = [dict(shape=[3], dtype="f32")]
+    for case in cases:
+        capture(captures / case["overload"], source, [[1, 2, 3]], [1, 2, 3], abi, abi)
     report = build_core_aten_batch(dict(cases=cases), captures, bundle)
     assert report["output_count"] == 2
     layout = read_layout((bundle / "model.mlir").read_text())
@@ -565,8 +490,6 @@ def test_overlapping_input_observation_borrows_readonly_storage(tmp_path):
     from merlin.llvmlower.input_layout import refuse_overlapping_input_aliases
     from merlin.llvmlower.result_layout import module_attribute, read_layout
 
-    directory = tmp_path / "captures/fixture"
-    directory.mkdir(parents=True)
     input_layout = dict(shape=[2, 3], stride=[0, 1], storage_offset=0)
     output_layout = dict(shape=[2, 3], stride=[3, 1], storage_offset=0, alias_inputs=[])
     layout = dict(inputs=[input_layout], results=[output_layout])
@@ -581,27 +504,14 @@ def test_overlapping_input_observation_borrows_readonly_storage(tmp_path):
       }
     }"""
     )
-    abi = dict(shape=[2, 3], dtype="f32")
-    (directory / "capsule.linalg.mlir").write_text(source)
-    (directory / "capture.json").write_text(
-        json.dumps(
-            dict(
-                capture_meta=dict(
-                    ok=True,
-                    opaque=0,
-                    input_abi=[abi],
-                    output_abi=[abi],
-                    result_contract=dict(
-                        authority="same_conversion_exported_program",
-                        inputs=[dict(input_layout, dtype="float32", requires_grad=False)],
-                        results=[dict(output_layout, dtype="float32", requires_grad=False, role="user_output")],
-                    ),
-                )
-            )
-        )
+    abi = [dict(shape=[2, 3], dtype="f32")]
+    contract = dict(
+        authority="same_conversion_exported_program",
+        inputs=[dict(input_layout, dtype="float32", requires_grad=False)],
+        results=[dict(output_layout, dtype="float32", requires_grad=False, role="user_output")],
     )
-    (directory / "inputs.json").write_text("[[[1, 2, 3], [1, 2, 3]]]")
-    (directory / "golden.json").write_text("[[0, 0, 0], [0, 0, 0]]")
+    directory = tmp_path / "captures/fixture"
+    capture(directory, source, [[[1, 2, 3], [1, 2, 3]]], [[0, 0, 0], [0, 0, 0]], abi, abi, result_contract=contract)
     bundle = tmp_path / "bundle"
     build_core_aten_batch(
         dict(
