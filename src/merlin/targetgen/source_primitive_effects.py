@@ -3,18 +3,10 @@
 
 def pure_tensor_source(function):
     from xdsl.dialects.builtin import IntegerType, TensorType
-    from xdsl.ir import BlockArgument
     from xdsl.traits import Pure
 
+    from merlin.llvmlower._ir import input_literal as literal
     from merlin.llvmlower.singleton_selectors import _relation
-    from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
-
-    def literal(value):
-        if isinstance(value, BlockArgument):
-            parent = value.owner.parent_op()
-            if getattr(parent, "name", None) == "linalg.generic" and value.index < len(parent.inputs):
-                value = parent.inputs[value.index]
-        return _constant_of(value)
 
     def true_assert(value):
         known = literal(value)

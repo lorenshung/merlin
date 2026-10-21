@@ -10,6 +10,7 @@ def fold_boolean_unit_image(module):
     from xdsl.ir import BlockArgument
     from xdsl.rewriter import Rewriter
 
+    from merlin.llvmlower._ir import generic_input
     from merlin.llvmlower.singleton_selectors import _relation
     from merlin.targetgen.native_payload_carriers import UNKNOWN, LiteralPayloads
     from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
@@ -18,10 +19,8 @@ def fold_boolean_unit_image(module):
     memo = {}
 
     def literal(value):
-        if isinstance(value, BlockArgument):
-            parent = value.owner.parent_op()
-            if getattr(parent, "name", None) == "linalg.generic" and value.index < len(parent.inputs):
-                value = parent.inputs[value.index]
+        source = generic_input(value)
+        value = value if source is None else source
         owner = value.owner
         if getattr(owner, "name", None) == "arith.bitcast":
             bits = _constant_of(owner.operands[0])

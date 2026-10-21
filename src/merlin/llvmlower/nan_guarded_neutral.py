@@ -9,17 +9,9 @@ import math
 
 
 def fold_nan_guarded_neutral(module):
-    from xdsl.ir import BlockArgument
     from xdsl.rewriter import Rewriter
 
-    from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
-
-    def literal(value):
-        if isinstance(value, BlockArgument):
-            parent = value.owner.parent_op()
-            if getattr(parent, "name", None) == "linalg.generic" and value.index < len(parent.inputs):
-                value = parent.inputs[value.index]
-        return _constant_of(value)
+    from merlin.llvmlower._ir import input_literal as literal
 
     def classification(op, value):
         return (

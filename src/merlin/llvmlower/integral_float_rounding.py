@@ -8,8 +8,8 @@ def fold_integral_float_rounding(module):
     from xdsl.ir import BlockArgument
     from xdsl.rewriter import Rewriter
 
+    from merlin.llvmlower._ir import input_literal as literal
     from merlin.targetgen.native_payload_carriers import UNKNOWN, LiteralPayloads
-    from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
 
     payloads = LiteralPayloads()
     memo = {}
@@ -33,12 +33,7 @@ def fold_integral_float_rounding(module):
         elif name in {"arith.extf", "arith.truncf"}:
             result = integral(owner.operands[0])
         elif name == "arith.divf":
-            divisor = _constant_of(owner.operands[1])
-            if isinstance(owner.operands[1], BlockArgument):
-                argument = owner.operands[1]
-                parent = argument.owner.parent_op()
-                if getattr(parent, "name", None) == "linalg.generic" and argument.index < len(parent.inputs):
-                    divisor = _constant_of(parent.inputs[argument.index])
+            divisor = literal(owner.operands[1])
             if isinstance(divisor, (int, float)) and divisor:
                 from math import isfinite
 
@@ -73,13 +68,6 @@ def fold_integral_float_rounding(module):
                 owner.body.block.last_op.operands[0]
             )
         return False
-
-    def literal(value):
-        if isinstance(value, BlockArgument):
-            parent = value.owner.parent_op()
-            if getattr(parent, "name", None) == "linalg.generic" and value.index < len(parent.inputs):
-                value = parent.inputs[value.index]
-        return _constant_of(value)
 
     count = 0
     # Only finite integer images license these identities. Infinities from an

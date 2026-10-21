@@ -8,17 +8,9 @@ signed overflow domains are not licensed by this value-producing theorem.
 
 
 def literal_divisor(op):
-    from xdsl.ir import BlockArgument
+    from merlin.llvmlower._ir import input_literal
 
-    from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
-
-    value = op.operands[1]
-    if isinstance(value, BlockArgument):
-        parent = value.owner.parent_op()
-        if parent is None or parent.name != "linalg.generic" or value.index >= len(parent.inputs):
-            return None
-        value = parent.inputs[value.index]
-    literal = _constant_of(value)
+    literal = input_literal(op.operands[1])
     return literal if type(literal) is int else None
 
 

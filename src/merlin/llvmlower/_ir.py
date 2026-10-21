@@ -7,7 +7,7 @@ in the same order, so the emitted IR does not depend on which helper built it.
 from xdsl.dialects import arith, tensor
 from xdsl.dialects.builtin import AffineMapAttr, DenseIntOrFPElementsAttr, IntegerAttr, TensorType, UnitAttr, i64
 from xdsl.dialects.linalg import ops as L
-from xdsl.ir import Block, Region
+from xdsl.ir import Block, BlockArgument, Region
 from xdsl.ir.affine import AffineDimExpr, AffineMap
 
 PARALLEL = L.IteratorTypeAttr(L.IteratorType.PARALLEL)
@@ -25,6 +25,23 @@ def dims(rank, axes):
 # A pointwise product as a K=1 batched contraction over [N, 1, 1] operands.
 BATCHED_MAPS = [dims(4, axes) for axes in [(0, 1, 3), (0, 3, 2), (0, 1, 2)]]
 BATCHED_ITERATORS = [PARALLEL] * 3 + [REDUCTION]
+
+
+def generic_input(value):
+    """The linalg.generic input that a block argument reads, else None."""
+    if isinstance(value, BlockArgument):
+        parent = value.owner.parent_op()
+        if getattr(parent, "name", None) == "linalg.generic" and value.index < len(parent.inputs):
+            return parent.inputs[value.index]
+    return None
+
+
+def input_literal(value):
+    """The scalar literal behind value, reading a generic block argument as its input."""
+    from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
+
+    source = generic_input(value)
+    return _constant_of(value if source is None else source)
 
 
 def emitter(block):

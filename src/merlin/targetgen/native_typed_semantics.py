@@ -9,6 +9,7 @@ Reductions need a different theorem about order and competing NaN payloads.
 def prove(module):
     import math
 
+    from merlin.llvmlower._ir import input_literal as literal
     from merlin.targetgen.native_ieee_certificate import certificate
     from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
 
@@ -122,15 +123,6 @@ def prove(module):
                 form=check["form"],
                 counterexample=check["counterexample"],
             )
-
-    def literal(value):
-        from xdsl.ir import BlockArgument
-
-        if isinstance(value, BlockArgument):
-            parent = value.owner.parent_op()
-            if parent is not None and parent.name == "linalg.generic" and value.index < len(parent.inputs):
-                value = parent.inputs[value.index]
-        return _constant_of(value)
 
     def has_nan_guard(value):
         """Require the complete explicit invalid/default + quieted-input DAG.

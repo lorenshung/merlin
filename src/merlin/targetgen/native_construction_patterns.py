@@ -96,17 +96,15 @@ class Payloads:
         return root
 
     def alias(self, value):
+        from merlin.llvmlower._ir import generic_input
+
         owner = value.owner
         name = getattr(owner, "name", None)
         if name in CASTS:
             return owner.operands[0]
         if name == "linalg.generic":
             return owner.body.block.last_op.operands[value.index]
-        if name is None and hasattr(owner, "parent_op"):
-            parent = owner.parent_op()
-            if getattr(parent, "name", None) == "linalg.generic" and value.index < len(parent.inputs):
-                return parent.inputs[value.index]
-        return None
+        return generic_input(value)
 
     def operation(self, value):
         return self.resolve(value).owner

@@ -16,10 +16,10 @@ def fold_integer_image_predicates(module):
     from xdsl.ir.affine import AffineMap
     from xdsl.rewriter import Rewriter
 
+    from merlin.llvmlower._ir import input_literal as literal
     from merlin.llvmlower.singleton_selectors import _relation
     from merlin.targetgen.exact_arithmetic import round_binary
     from merlin.targetgen.native_payload_carriers import UNKNOWN, LiteralPayloads
-    from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
 
     memo = {}
     payloads = LiteralPayloads()
@@ -39,13 +39,6 @@ def fold_integer_image_predicates(module):
             )
         except OverflowError:
             return math.copysign(math.inf, value)
-
-    def literal(value):
-        if isinstance(value, BlockArgument):
-            parent = value.owner.parent_op()
-            if getattr(parent, "name", None) == "linalg.generic" and value.index < len(parent.inputs):
-                value = parent.inputs[value.index]
-        return _constant_of(value)
 
     def domain(value):
         if value in memo:

@@ -84,18 +84,10 @@ def fold_ieee_identity_selectors(module):
 def fold_zero_sign_selectors(module):
     """select(x == 0, copysign(0,x), x) preserves every IEEE storage word."""
     from xdsl.dialects import arith
-    from xdsl.ir import BlockArgument
     from xdsl.rewriter import Rewriter
 
+    from merlin.llvmlower._ir import input_literal as literal
     from merlin.llvmlower.fixed_point_ir import FORMAT
-    from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
-
-    def literal(v):
-        if isinstance(v, BlockArgument):
-            parent = v.owner.parent_op()
-            if getattr(parent, "name", None) == "linalg.generic" and v.index < len(parent.inputs):
-                v = parent.inputs[v.index]
-        return _constant_of(v)
 
     count = 0
     for op in list(module.walk()):
