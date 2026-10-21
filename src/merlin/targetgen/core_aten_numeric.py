@@ -185,7 +185,7 @@ def prepare_spec_int8(
 def normalize_closed_identities(module):
     """Apply the closed, payload-independent identity normalizations in order.
 
-    Returns the list of folds. Shared by native preparation and by the
+    Returns the number of folds. Shared by native preparation and by the
     floating-contract decision, which must see the same normalized program.
     """
     from merlin.llvmlower.boolean_domain import fold_boolean_domain
@@ -227,6 +227,13 @@ def normalize_closed_identities(module):
     from merlin.llvmlower.ieee_identity_selectors import fold_ieee_identity_selectors
 
     folds += fold_ieee_identity_selectors(module)
+    from merlin.targetgen.closed_scalar import fold_closed_generics
+
+    # An elementwise generic whose inputs are all closed literals (for
+    # example an empty reduction narrowed to f16/bf16 storage) is a uniform
+    # literal fill; evaluate it exactly once instead of leaving a closed
+    # conversion chain for the native word proofs.
+    folds += fold_closed_generics(module)
     return folds
 
 

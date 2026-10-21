@@ -354,3 +354,55 @@ def _interval(value, memo=None, active=None):
         active.discard(value)
     memo[value] = out
     return out
+
+
+def fold_closed_generics(module):
+    """Replace an elementwise generic whose inputs are all closed literals by a splat fill.
+
+    The yielded scalar is evaluated exactly (typed IEEE rounding); only a finite
+    closed result is folded, and index-dependent bodies are never folded, so no
+    non-uniform table is ever produced. Returns the number of folds.
+    """
+    import math as _math
+
+    from xdsl.dialects import arith, tensor
+    from xdsl.dialects.builtin import FloatAttr, IntegerAttr, IntegerType
+
+    count = 0
+    for op in list(module.walk()):
+        if _name(op) != "linalg.generic" or len(op.results) != 1:
+            continue
+        if any(it.data.value != "parallel" for it in op.get_iterator_types()):
+            continue
+        body = op.body.block
+        if any(_name(child) == "linalg.index" for child in body.walk()):
+            continue
+        environment = {}
+        closed = True
+        for index, _ in enumerate(op.inputs):
+            value = literal(body.args[index])
+            if value is None:
+                closed = False
+                break
+            environment[body.args[index]] = value
+        if not closed:
+            continue
+        result = evaluate(body.last_op.operands[0], environment)
+        typ = op.results[0].type
+        element = typ.element_type
+        if result is UNKNOWN or result is None:
+            continue
+        if isinstance(element, IntegerType):
+            attr = IntegerAttr(int(result), element)
+        elif str(element) in FLOAT_BITS and isinstance(result, (int, float)) and _math.isfinite(float(result)):
+            attr = FloatAttr(float(result), element)
+        else:
+            continue
+        constant = arith.ConstantOp(attr)
+        filled = tensor.SplatOp(constant.result, [], typ)
+        parent = op.parent
+        parent.insert_ops_before([constant, filled], op)
+        op.results[0].replace_all_uses_with(filled.result)
+        parent.erase_op(op)
+        count += 1
+    return count
