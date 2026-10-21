@@ -129,6 +129,7 @@ def prepare_integer_components(
     quantized_contract=None,
 ):
     from merlin.llvmlower.integer_components import rewrite_integer_components
+    from merlin.targetgen.core_aten_spec_int8 import provider_proof
     from merlin.targetgen.software_spec import admit_operation
     from merlin.targetgen.transfer_contracts import screen_transfer_contract
 
@@ -450,11 +451,10 @@ def prepare_integer_components(
     from merlin.xdsl_dialects._common import text
 
     source = text(module, generic=True) if quantized_contract is not None else str(module)
-    try:
-        proof = provider.admit_numeric_schedule(source, package=package, numeric_policy=selection["spec"])
-    except ValueError as exc:
+    proof, error = provider_proof(provider, source, package=package, policy=selection["spec"])
+    if error is not None:
         raise Refusal(
-            reason="selected provider refuses exact components: " + str(exc),
+            reason="selected provider refuses exact components: " + error,
             source_sha256=hashlib.sha256(source.encode()).hexdigest(),
         )
     if proof.get("status") != "proven" or proof.get("source_sha256") != hashlib.sha256(source.encode()).hexdigest():

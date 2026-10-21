@@ -282,7 +282,7 @@ def _prepare_spec_int8(
     import hashlib
 
     from merlin.frontends.linalg_mlir import parse_mlir_file
-    from merlin.targetgen.core_aten_spec_int8 import admission_plan, host_readout_chain, select_spec
+    from merlin.targetgen.core_aten_spec_int8 import admission_plan, host_readout_chain, provider_proof, select_spec
 
     selection = select_spec(target, facts, software_spec, host_capabilities)
     from merlin.targetgen.core_aten_exact_dtype import empty_host_plan
@@ -350,13 +350,7 @@ def _prepare_spec_int8(
     module = parse_mlir_file(directory / "model.mlir")
     native = any(shape.dtypes == ("i8", "i8", "i32") for _, shape in observe_contractions(module))
     if native:
-        proof = None
-        proof_error = None
-        if callable(getattr(provider, "admit_numeric_schedule", None)):
-            try:
-                proof = provider.admit_numeric_schedule(str(module), package=package, numeric_policy=selection["spec"])
-            except ValueError as exc:
-                proof_error = str(exc)
+        proof, proof_error = provider_proof(provider, module, package=package, policy=selection["spec"])
         plan = admission_plan(module, selection, native=True, provider_proof=proof)
         if proof_error:
             plan["provider_refusal"] = proof_error
@@ -626,15 +620,9 @@ def _prepare_spec_int8(
                 exact_rational=selection["spec"].get("numerical_semantics", {}).get("model", {}).get("engine")
                 == "integer_reference",
             )
-            capture_proof = None
-            capture_proof_error = None
-            if callable(getattr(provider, "admit_numeric_schedule", None)):
-                try:
-                    capture_proof = provider.admit_numeric_schedule(
-                        str(prepared_module), package=package, numeric_policy=selection["spec"]
-                    )
-                except ValueError as exc:
-                    capture_proof_error = str(exc)
+            capture_proof, capture_proof_error = provider_proof(
+                provider, prepared_module, package=package, policy=selection["spec"]
+            )
             captured_plan = admission_plan(prepared_module, selection, captured=True, provider_proof=capture_proof)
             residuals = artifact.meta.get("integerization_receipt", {}).get("ieee_quantizer_residuals", [])
             active_residuals = [row for row in residuals if row.get("beta") != 0]

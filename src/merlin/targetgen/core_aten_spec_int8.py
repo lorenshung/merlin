@@ -162,6 +162,16 @@ def readout_refusals(selection, decision):
     return reasons
 
 
+def provider_proof(provider, source, *, package, policy):
+    """(schedule proof, None), (None, provider ValueError text), or (None, None) without a prover."""
+    if not callable(getattr(provider, "admit_numeric_schedule", None)):
+        return None, None
+    try:
+        return provider.admit_numeric_schedule(str(source), package=package, numeric_policy=policy), None
+    except ValueError as exc:
+        return None, str(exc)
+
+
 def provider_coverage(module, proof, op) -> str | None:
     """A source-bound, proven catalog binding for this precise contraction."""
     if not isinstance(proof, dict) or proof.get("status") != "proven":
