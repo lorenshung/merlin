@@ -238,58 +238,38 @@ def normalize_closed_identities(module):
     Returns the number of folds. Shared by native preparation and by the
     floating-contract decision, which must see the same normalized program.
     """
-    from merlin.llvmlower.image_folds import (
-        fold_boolean_domain,
-        fold_boolean_image_predicates,
-        fold_boolean_unit_image,
-        fold_integer_image_predicates,
-        fold_integral_float_rounding,
-    )
+    from merlin.llvmlower import image_folds as image
+    from merlin.llvmlower import structural_folds as structural
     from merlin.llvmlower.static_masked_sums import expose_static_masked_sums
-    from merlin.llvmlower.structural_folds import (
-        fold_empty_reductions,
-        fold_singleton_carriers,
-        fold_singleton_reductions,
-        fold_singleton_selectors,
-        fold_static_unit_indices,
-    )
-
-    folds = expose_static_masked_sums(module)
-    folds += fold_static_unit_indices(module)
-    folds += fold_integral_float_rounding(module)
-    folds += fold_boolean_unit_image(module)
-    folds += fold_integer_image_predicates(module)
-    folds += fold_empty_reductions(module)
-    folds += fold_boolean_image_predicates(module)
-    folds += fold_boolean_domain(module)
-    from merlin.llvmlower.structural_folds import normalize_singleton_boundaries
-
-    folds += normalize_singleton_boundaries(module)
-    from merlin.llvmlower.image_folds import fold_nan_guarded_neutral
-
-    folds += fold_nan_guarded_neutral(module)
-    from merlin.llvmlower.image_folds import fold_integral_image_identities
-
-    folds += fold_integral_image_identities(module)
-    folds += fold_singleton_reductions(module)
-    folds += fold_singleton_selectors(module)
-    folds += expose_static_masked_sums(module)
-    folds += fold_singleton_carriers(module)
-    from merlin.llvmlower.structural_folds import prune_unused_tensor_inputs
-
-    folds += prune_unused_tensor_inputs(module)
-    from merlin.llvmlower.image_folds import fold_ieee_identity_selectors
-
-    folds += fold_ieee_identity_selectors(module)
     from merlin.targetgen.closed_scalar import fold_closed_generics, fold_unit_scales
 
+    order = (
+        expose_static_masked_sums,
+        structural.fold_static_unit_indices,
+        image.fold_integral_float_rounding,
+        image.fold_boolean_unit_image,
+        image.fold_integer_image_predicates,
+        structural.fold_empty_reductions,
+        image.fold_boolean_image_predicates,
+        image.fold_boolean_domain,
+        structural.normalize_singleton_boundaries,
+        image.fold_nan_guarded_neutral,
+        image.fold_integral_image_identities,
+        structural.fold_singleton_reductions,
+        structural.fold_singleton_selectors,
+        expose_static_masked_sums,
+        structural.fold_singleton_carriers,
+        structural.prune_unused_tensor_inputs,
+        image.fold_ieee_identity_selectors,
+    )
+    folds = sum(fold(module) for fold in order)
     # x * 1 and x / 1 are exact identities (movement, graded bit-exact). The
     # literal operand they read becomes unused and is pruned with them.
     for _ in range(3):  # a pruned literal operand can expose a round trip across generics
         unit_scales = fold_unit_scales(module)
         if not unit_scales:
             break
-        folds += unit_scales + prune_unused_tensor_inputs(module)
+        folds += unit_scales + structural.prune_unused_tensor_inputs(module)
 
     # An elementwise generic whose inputs are all closed literals (for
     # example an empty reduction narrowed to f16/bf16 storage) is a uniform

@@ -8,18 +8,8 @@ express them with contractions. Index arithmetic remains address selection.
 
 
 def construction_evidence(module, *, excluded=None, result_abi=None):
-    from merlin.llvmlower.image_folds import (
-        fold_boolean_domain,
-        fold_boolean_image_predicates,
-        fold_boolean_unit_image,
-        fold_integer_image_predicates,
-    )
-    from merlin.llvmlower.structural_folds import (
-        fold_singleton_carriers,
-        fold_singleton_reductions,
-        fold_singleton_selectors,
-        fold_static_unit_indices,
-    )
+    from merlin.llvmlower import image_folds as image
+    from merlin.llvmlower import structural_folds as structural
     from merlin.targetgen.native_construction_patterns import Payloads, dataflow
 
     # Classify the canonical arithmetic role, without mutating source bytes.
@@ -44,33 +34,24 @@ def construction_evidence(module, *, excluded=None, result_abi=None):
     )
     if candidates:
         canonical = module.clone()
-        from merlin.llvmlower.image_folds import (
-            fold_ieee_identity_selectors,
-            fold_integral_image_identities,
-            fold_nan_guarded_neutral,
+        order = (
+            structural.fold_static_unit_indices,
+            image.fold_integer_image_predicates,
+            image.fold_integral_image_identities,
+            image.fold_ieee_identity_selectors,
+            structural.normalize_singleton_boundaries,
+            image.fold_nan_guarded_neutral,
+            image.fold_boolean_unit_image,
+            image.fold_boolean_image_predicates,
+            image.fold_boolean_domain,
+            structural.fold_empty_reductions,
+            lambda m: (
+                structural.fold_singleton_reductions(m) if any(op.name == "linalg.reduce" for op in m.walk()) else 0
+            ),
+            structural.fold_singleton_selectors,
+            structural.fold_singleton_carriers,
         )
-        from merlin.llvmlower.structural_folds import fold_empty_reductions, normalize_singleton_boundaries
-
-        image_folds = (
-            fold_static_unit_indices(canonical)
-            + fold_integer_image_predicates(canonical)
-            + fold_integral_image_identities(canonical)
-            + fold_ieee_identity_selectors(canonical)
-            + normalize_singleton_boundaries(canonical)
-            + fold_nan_guarded_neutral(canonical)
-        )
-        boolean_folds = (
-            fold_boolean_unit_image(canonical)
-            + fold_boolean_image_predicates(canonical)
-            + fold_boolean_domain(canonical)
-        )
-        empty_folds = fold_empty_reductions(canonical)
-        singleton_folds = (
-            fold_singleton_reductions(canonical) if any(op.name == "linalg.reduce" for op in canonical.walk()) else 0
-        )
-        selector_folds = fold_singleton_selectors(canonical)
-        carrier_folds = fold_singleton_carriers(canonical)
-        if empty_folds or singleton_folds or selector_folds or boolean_folds or carrier_folds or image_folds:
+        if sum(fold(canonical) for fold in order):
             from merlin.llvmlower.entry_weight_projection import _pure_dce
 
             for function in canonical.walk():
