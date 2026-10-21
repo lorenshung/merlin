@@ -1,6 +1,7 @@
 """General excluded constructions read from IR properties, never from operator names."""
 
 import pytest
+from mlir_fixtures import forward, generic, pointwise
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.native_unit_policy import construction_evidence
@@ -52,19 +53,10 @@ def test_selection_sum_and_single_scale_tables_remain_eligible(table):
 
 
 def division(divisor, op="arith.divf"):
-    return parse_mlir_text(f"""module {{ func.func @forward(%x: tensor<4xf32>) -> tensor<4xf32> {{
-      %d = arith.constant {divisor} : f32
-      %ds = tensor.splat %d : tensor<4xf32>
-      %e = tensor.empty() : tensor<4xf32>
-      %r = linalg.generic {{indexing_maps = [affine_map<(i)->(i)>, affine_map<(i)->(i)>, affine_map<(i)->(i)>],
-                            iterator_types = ["parallel"]}}
-        ins(%x, %ds : tensor<4xf32>, tensor<4xf32>) outs(%e : tensor<4xf32>) {{
-        ^bb0(%a: f32, %b: f32, %u: f32):
-          %q = "{op}"(%a, %b) : (f32, f32) -> f32
-          linalg.yield %q : f32
-      }} -> tensor<4xf32>
-      func.return %r : tensor<4xf32>
-    }} }}""")
+    prelude = f"%d = arith.constant {divisor} : f32\n%ds = tensor.splat %d : tensor<4xf32>\n"
+    body = f'%v = "{op}"(%a, %b) : (f32, f32) -> f32'
+    computation = generic([("%x", "tensor<4xf32>"), ("%ds", "tensor<4xf32>")], "tensor<4xf32>", body)
+    return forward("%x:tensor<4xf32>", "tensor<4xf32>", prelude + computation)
 
 
 @pytest.mark.parametrize("op", ["arith.divf", "arith.remf"])
@@ -84,25 +76,17 @@ def test_division_by_a_nonzero_literal_is_not_a_forced_special(op):
 def test_zero_divisor_in_a_discarded_branch_is_not_forced():
     # Smith-style complex division by a real literal: c/0 appears only in the
     # alternative a closed |re| >= |im| test discards.
-    module = parse_mlir_text("""module { func.func @forward(%x: tensor<4xf32>) -> tensor<4xf32> {
-      %e = tensor.empty() : tensor<4xf32>
-      %r = linalg.generic {indexing_maps = [affine_map<(i)->(i)>, affine_map<(i)->(i)>], iterator_types = ["parallel"]}
-        ins(%x : tensor<4xf32>) outs(%e : tensor<4xf32>) {
-        ^bb0(%a: f32, %u: f32):
-          %re = arith.constant -2.0 : f32
-          %im = arith.constant 0.0 : f32
-          %ar = math.absf %re : f32
-          %ai = math.absf %im : f32
-          %p = arith.cmpf oge, %ar, %ai : f32
-          %t = arith.divf %im, %re : f32
-          %s = arith.divf %re, %im : f32
-          %d1 = arith.mulf %a, %t : f32
-          %d2 = arith.mulf %a, %s : f32
-          %v = arith.select %p, %d1, %d2 : f32
-          linalg.yield %v : f32
-      } -> tensor<4xf32>
-      func.return %r : tensor<4xf32>
-    } }""")
+    body = """%re = arith.constant -2.0 : f32
+      %im = arith.constant 0.0 : f32
+      %ar = math.absf %re : f32
+      %ai = math.absf %im : f32
+      %p = arith.cmpf oge, %ar, %ai : f32
+      %t = arith.divf %im, %re : f32
+      %s = arith.divf %re, %im : f32
+      %d1 = arith.mulf %a, %t : f32
+      %d2 = arith.mulf %a, %s : f32
+      %v = arith.select %p, %d1, %d2 : f32"""
+    module = pointwise(["tensor<4xf32>"], "tensor<4xf32>", body)
     assert construction_evidence(module, excluded=["forced_ieee_special_division"])["status"] == "eligible"
 
 

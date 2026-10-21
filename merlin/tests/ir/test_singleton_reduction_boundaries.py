@@ -1,6 +1,7 @@
 """Singleton reduction exposure retains the floating operation, not just its bits."""
 
 import pytest
+from mlir_fixtures import assert_unchanged
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.singleton_reduction_boundaries import expose_singleton_reduction_boundaries
@@ -29,6 +30,4 @@ def test_one_iteration_becomes_parallel_without_erasing_the_nan_boundary():
 
 @pytest.mark.parametrize("options", [dict(extent=2), dict(unknown=True)])
 def test_repeated_or_unknown_computations_are_not_specialized(options):
-    module = source(**options)
-    before = str(module)
-    assert expose_singleton_reduction_boundaries(module) == 0 and str(module) == before
+    assert_unchanged(source(**options), expose_singleton_reduction_boundaries)

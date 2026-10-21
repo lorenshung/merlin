@@ -1,35 +1,18 @@
 """Native roles are derived from source scalar dataflow, never overload names."""
 
 import pytest
+from mlir_fixtures import forward, generic, pointwise
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.native_unit_policy import construction_evidence
 
 
 def source(expression, *, literal=False, reduction=False):
-    return parse_mlir_text(
-        '''module {
-      func.func @forward(%x: tensor<3xf32>,%y: tensor<3xf32>) -> tensor<3xf32> {
-        %zero=arith.constant 0.0 : f32
-        %one=arith.constant 1.0 : f32
-        %ones=tensor.splat %one : tensor<3xf32>
-        %e=tensor.empty() : tensor<3xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types=["'''
-        + ("reduction" if reduction else "parallel")
-        + """"]}
-          ins(%x,"""
-        + ("%ones" if literal else "%y")
-        + """ : tensor<3xf32>,tensor<3xf32>) outs(%e : tensor<3xf32>) {
-          ^bb0(%a: f32,%b: f32,%c: f32):
-            """
-        + expression
-        + """
-            linalg.yield %v : f32
-          } -> tensor<3xf32>
-        func.return %r : tensor<3xf32>
-      }}"""
-    )
+    typ = "tensor<3xf32>"
+    ones = "%zero=arith.constant 0.0 : f32\n%one=arith.constant 1.0 : f32\n%ones=tensor.splat %one : tensor<3xf32>\n"
+    ins = [("%x", typ), ("%ones" if literal else "%y", typ)]
+    body = generic(ins, typ, expression, iterators=["reduction" if reduction else "parallel"])
+    return forward(f"%x:{typ},%y:{typ}", typ, ones + body)
 
 
 def test_parallel_runtime_product_is_not_a_native_contraction():
@@ -211,18 +194,7 @@ def test_rectifier_extremum_identity_is_excluded_but_native_relu_is_not():
 
 
 def boolean_source():
-    return parse_mlir_text("""module {
-      func.func @forward(%x: tensor<3xi1>,%y: tensor<3xi1>) -> tensor<3xi1> {
-        %e=tensor.empty() : tensor<3xi1>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,
-          affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x,%y : tensor<3xi1>,tensor<3xi1>) outs(%e : tensor<3xi1>) {
-          ^bb0(%a: i1,%b: i1,%c: i1):
-            %v=arith.ori %a,%b : i1
-            linalg.yield %v : i1
-          } -> tensor<3xi1>
-        func.return %r : tensor<3xi1>
-      }}""")
+    return pointwise(["tensor<3xi1>"] * 2, "tensor<3xi1>", "%v=arith.ori %a,%b : i1")
 
 
 def test_boolean_or_is_host_and_is_never_rewritten_as_add_and_truth():

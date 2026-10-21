@@ -2,28 +2,15 @@
 
 import numpy as np
 import pytest
+from mlir_fixtures import pointwise
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.core_aten_w8a8_reference import evaluate
 
 
 def source(arguments, result, body):
-    types = [f"tensor<1x{t}>" for t in arguments]
-    declaration = ",".join(f"%x{i}:{t}" for i, t in enumerate(types))
-    inputs = ",".join(f"%x{i}" for i in range(len(types)))
-    block = ",".join(f"%a{i}:{t}" for i, t in enumerate(arguments))
-    maps = ",".join(["affine_map<(d0)->(d0)>"] * (len(types) + 1))
-    return parse_mlir_text(f"""module {{
-      func.func @forward({declaration}) -> tensor<1x{result}> {{
-        %e=tensor.empty() : tensor<1x{result}>
-        %r=linalg.generic {{indexing_maps=[{maps}],iterator_types=["parallel"]}}
-          ins({inputs}:{",".join(types)}) outs(%e:tensor<1x{result}>) {{
-          ^bb0({block},%unused:{result}):
-          {body}
-          linalg.yield %v : {result}
-        }} -> tensor<1x{result}>
-        return %r : tensor<1x{result}>
-      }} }}""")
+    inputs = [f"tensor<1x{t}>" for t in arguments]
+    return pointwise(inputs, f"tensor<1x{result}>", body, args=[f"a{i}" for i in range(len(inputs))])
 
 
 def run(module, arrays):

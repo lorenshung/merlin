@@ -1,6 +1,7 @@
 """Shape-only singleton monoids preserve complete integer words, not float NaNs."""
 
 import pytest
+from mlir_fixtures import assert_unchanged
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.singleton_reductions import fold_singleton_reductions
@@ -40,19 +41,13 @@ def test_singleton_integer_monoid_becomes_exact_indexed_movement(element, bits, 
 
 @pytest.mark.parametrize("extent,seed", [(2, -128), (0, -128), (1, 0)])
 def test_non_singleton_or_non_identity_seed_is_retained(extent, seed):
-    module = source("i8", "maxsi", seed, extent=extent)
-    original = str(module)
-    assert fold_singleton_reductions(module) == 0
-    assert str(module) == original
+    assert_unchanged(source("i8", "maxsi", seed, extent=extent), fold_singleton_reductions)
 
 
 @pytest.mark.parametrize("arithmetic,seed", [("maximumf", "-0x7F800000"), ("addf", "0.0")])
 def test_float_singleton_does_not_erase_nan_or_signed_zero_semantics(arithmetic, seed):
     # Float extrema can change NaN payloads; adding +0 can change a -0 word.
-    module = source("f32", arithmetic, seed)
-    original = str(module)
-    assert fold_singleton_reductions(module) == 0
-    assert str(module) == original
+    assert_unchanged(source("f32", arithmetic, seed), fold_singleton_reductions)
 
 
 def test_overflow_promises_do_not_gain_a_modular_identity_proof():

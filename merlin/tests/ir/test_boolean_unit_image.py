@@ -1,6 +1,7 @@
 """Discrete IEEE identities require the full unsigned Boolean conversion image."""
 
 import pytest
+from mlir_fixtures import assert_unchanged, forward, generic, pointwise
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.boolean_unit_image import fold_boolean_unit_image
@@ -17,19 +18,9 @@ def source(operation, *, element="f32", integer="i1", literal=None, unknown=Fals
         if operation == "arith.remf"
         else f"%v={operation} {args} : {element}"
     )
-    return parse_mlir_text(f"""module {{func.func @forward(%x:tensor<4x{integer}>) -> tensor<4x{element}> {{
-      {carrier}
-      %e=tensor.empty() : tensor<4x{element}>
-      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-        ins({"%opaque" if unknown else "%x"}:tensor<4x{integer}>) outs(%e:tensor<4x{element}>) {{
-        ^bb0(%a:{integer},%unused:{element}):
-        %f=arith.uitofp %a : {integer} to {element}
-        {coefficient}
-        {calculation}
-        linalg.yield %v : {element}
-      }} -> tensor<4x{element}>
-      return %r : tensor<4x{element}>
-    }} }}""")
+    typ, result = f"tensor<4x{integer}>", f"tensor<4x{element}>"
+    body = f"%f=arith.uitofp %a : {integer} to {element}\n{coefficient}\n{calculation}"
+    return forward(f"%x:{typ}", result, carrier + "\n" + generic([("%opaque" if unknown else "%x", typ)], result, body))
 
 
 @pytest.mark.parametrize("element", ["f16", "bf16", "f32", "f64"])
@@ -55,17 +46,11 @@ def test_every_boolean_word_has_the_proved_ieee_result(element, operation, liter
 
 @pytest.mark.parametrize("options", [dict(integer="i8"), dict(unknown=True)])
 def test_other_or_unknown_integer_images_are_not_boolean(options):
-    module = source("math.sqrt", **options)
-    original = str(module)
-    assert fold_boolean_unit_image(module) == 0
-    assert str(module) == original
+    assert_unchanged(source("math.sqrt", **options), fold_boolean_unit_image)
 
 
 def test_a_rounded_reciprocal_is_not_an_exact_remainder_proof():
-    module = source("arith.remf", element="f64", literal="0.3333333333333333")
-    original = str(module)
-    assert fold_boolean_unit_image(module) == 0
-    assert str(module) == original
+    assert_unchanged(source("arith.remf", element="f64", literal="0.3333333333333333"), fold_boolean_unit_image)
 
 
 @pytest.mark.parametrize(
@@ -84,20 +69,12 @@ def test_a_storage_mask_is_zero_only_over_the_proved_boolean_image(integer, mask
 
 @pytest.mark.parametrize("zero,identity", [("0.0", True), ("-0.0", False)])
 def test_unit_selector_does_not_erase_a_negative_zero_word(zero, identity):
-    module = parse_mlir_text(f"""module {{func.func @forward(%x:tensor<4xi1>) -> tensor<4xf32> {{
-      %e=tensor.empty() : tensor<4xf32>
-      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-        ins(%x:tensor<4xi1>) outs(%e:tensor<4xf32>) {{
-        ^bb0(%a:i1,%unused:f32):
-        %f=arith.uitofp %a : i1 to f32
-        %positive=arith.constant 0.0 : f32
-        %z=arith.constant {zero} : f32
-        %p=arith.cmpf oeq,%f,%positive : f32
-        %v=arith.select %p,%z,%f : f32
-        linalg.yield %v : f32
-      }} -> tensor<4xf32>
-      return %r : tensor<4xf32>
-    }} }}""")
+    body = f"""%f=arith.uitofp %a : i1 to f32
+      %positive=arith.constant 0.0 : f32
+      %z=arith.constant {zero} : f32
+      %p=arith.cmpf oeq,%f,%positive : f32
+      %v=arith.select %p,%z,%f : f32"""
+    module = pointwise(["tensor<4xi1>"], "tensor<4xf32>", body)
     original = str(module)
     assert (fold_boolean_unit_image(module) > 0) == identity
     if not identity:

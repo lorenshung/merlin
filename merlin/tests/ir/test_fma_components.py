@@ -1,27 +1,17 @@
 """Fused floating products use integer MACs and one rational result boundary."""
 
 import pytest
+from mlir_fixtures import forward, generic, pointwise
 from test_ieee_component_epilogues import scalar_bits
 
-from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.floating_components import rewrite_floating_components
 from merlin.llvmlower.integer_components import rewrite_integer_components
 from merlin.targetgen.core_aten_components import unlowered_data_reductions
 
 
 def source(token):
-    return parse_mlir_text(f"""module {{
-      func.func @forward(%x:tensor<1x{token}>,%y:tensor<1x{token}>,%z:tensor<1x{token}>) -> tensor<1x{token}> {{
-        %e=tensor.empty() : tensor<1x{token}>
-        %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,
-          affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-          ins(%x,%y,%z:tensor<1x{token}>,tensor<1x{token}>,tensor<1x{token}>) outs(%e:tensor<1x{token}>) {{
-          ^bb0(%a:{token},%b:{token},%c:{token},%out:{token}):
-            %v=math.fma %a,%b,%c : {token}
-            linalg.yield %v : {token}
-        }} -> tensor<1x{token}>
-        return %r : tensor<1x{token}>
-      }} }}""")
+    typ = f"tensor<1x{token}>"
+    return pointwise([typ] * 3, typ, f"%v=math.fma %a,%b,%c : {token}")
 
 
 @pytest.mark.parametrize("token,width,bias", [("f32", 32, 127), ("f64", 64, 1023)])
@@ -58,32 +48,24 @@ def test_fma_has_full_integer_producers_and_one_final_rounding(grids):
 def test_reduced_storage_scalar_coefficients_keep_their_finite_grid(token, coefficient):
     from merlin.llvmlower.integer_float_boundaries import rewrite_integer_float_boundaries
 
-    module = parse_mlir_text(f"""module {{
-      func.func @forward(%x:tensor<1x{token}>) -> tensor<1x{token}> {{
-        %one=arith.constant 1.0 : f32
-        %raw=arith.truncf %one : f32 to {token}
-        %nanword=arith.constant 32767 : i16
-        %nan=arith.bitcast %nanword : i16 to {token}
-        %missing=arith.cmpf uno,%one,%one : f32
-        %literal=arith.select %missing,%nan,%raw : {token}
-        %other=tensor.splat %literal : tensor<1x{token}>
-        %e=tensor.empty() : tensor<1x{token}>
-        %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,
-          affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-          ins(%x,%other:tensor<1x{token}>,tensor<1x{token}>) outs(%e:tensor<1x{token}>) {{
-          ^bb0(%a:{token},%b:{token},%unused:{token}):
-            %integer=arith.constant {coefficient} : i64
-            %fp=arith.sitofp %integer : i64 to f32
-            %alpha=arith.truncf %fp : f32 to {token}
-            %aa=arith.extf %a : {token} to f32
-            %bb=arith.extf %b : {token} to f32
-            %cc=arith.extf %alpha : {token} to f32
-            %v=math.fma %bb,%cc,%aa : f32
-            %out=arith.truncf %v : f32 to {token}
-            linalg.yield %out : {token}
-        }} -> tensor<1x{token}>
-        return %r : tensor<1x{token}>
-      }} }}""")
+    typ = f"tensor<1x{token}>"
+    prelude = f"""%one=arith.constant 1.0 : f32
+      %raw=arith.truncf %one : f32 to {token}
+      %nanword=arith.constant 32767 : i16
+      %nan=arith.bitcast %nanword : i16 to {token}
+      %missing=arith.cmpf uno,%one,%one : f32
+      %literal=arith.select %missing,%nan,%raw : {token}
+      %other=tensor.splat %literal : {typ}
+"""
+    body = f"""%integer=arith.constant {coefficient} : i64
+      %fp=arith.sitofp %integer : i64 to f32
+      %alpha=arith.truncf %fp : f32 to {token}
+      %aa=arith.extf %a : {token} to f32
+      %bb=arith.extf %b : {token} to f32
+      %cc=arith.extf %alpha : {token} to f32
+      %wide=math.fma %bb,%cc,%aa : f32
+      %v=arith.truncf %wide : f32 to {token}"""
+    module = forward(f"%x:{typ}", typ, prelude + generic([("%x", typ), ("%other", typ)], typ, body))
     grids = {}
     _, count = rewrite_integer_float_boundaries(module, [None], output_grids=grids)
     assert count == 1 and list(grids.values()) == [(0, 2 * coefficient)]

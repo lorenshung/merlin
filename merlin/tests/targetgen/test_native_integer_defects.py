@@ -1,6 +1,7 @@
 """Integer and IEEE storage boundaries do not inherit unrelated proof gates."""
 
 import pytest
+from mlir_fixtures import forward, generic, pointwise
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.native_dtype_domain import component_semantics
@@ -10,23 +11,9 @@ from merlin.targetgen.native_unit_policy import construction_evidence
 def quotient(divisor, *, unknown=False):
     operand = '%bad="opaque.carrier"(%x) : (tensor<4xi64>) -> tensor<4xi64>' if unknown else ""
     source = "%bad" if unknown else "%x"
-    return parse_mlir_text(
-        """module {
-      func.func @forward(%x:tensor<4xi64>) -> tensor<4xi64> {
-        BEFORE
-        %d=arith.constant DIVISOR : i64
-        %e=tensor.empty() : tensor<4xi64>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types=["parallel"]} ins(SOURCE:tensor<4xi64>) outs(%e:tensor<4xi64>) {
-        ^bb0(%a:i64,%unused:i64):
-          %v=arith.divsi %a,%d:i64
-          linalg.yield %v:i64
-        } -> tensor<4xi64>
-        return %r:tensor<4xi64>
-      }}""".replace("BEFORE", operand)
-        .replace("DIVISOR", str(divisor))
-        .replace("SOURCE", source)
-    )
+    typ = "tensor<4xi64>"
+    body = generic([(source, typ)], typ, "%v=arith.divsi %a,%d:i64")
+    return forward(f"%x:{typ}", typ, f"{operand}\n%d=arith.constant {divisor} : i64\n{body}")
 
 
 @pytest.mark.parametrize("divisor", [1, 3, 4, 9223372036854775807])
@@ -56,20 +43,10 @@ def test_known_quotient_cannot_authenticate_an_unknown_input_carrier():
 
 @pytest.mark.parametrize("target", ["f16", "bf16"])
 def test_affine_data_followed_by_rne_storage_conversion_is_not_offset_rounding(target):
-    module = parse_mlir_text(
-        """module {
-      func.func @forward(%x:tensor<4xf32>) -> tensor<4xTARGET> {
-        %e=tensor.empty():tensor<4xTARGET>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types=["parallel"]} ins(%x:tensor<4xf32>) outs(%e:tensor<4xTARGET>) {
-        ^bb0(%a:f32,%unused:TARGET):
-          %c=arith.constant 0.5:f32
-          %b=arith.addf %a,%c:f32
-          %v=arith.truncf %b:f32 to TARGET
-          linalg.yield %v:TARGET
-        } -> tensor<4xTARGET>
-        return %r:tensor<4xTARGET>
-      }}""".replace("TARGET", target)
+    module = pointwise(
+        ["tensor<4xf32>"],
+        f"tensor<4x{target}>",
+        f"%c=arith.constant 0.5:f32\n%b=arith.addf %a,%c:f32\n%v=arith.truncf %b:f32 to {target}",
     )
     assert construction_evidence(module, excluded=["readout_offset_rounding"])["status"] == "eligible"
 

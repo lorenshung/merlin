@@ -1,6 +1,7 @@
 """Full-domain admission rejects incomplete guards and runtime products."""
 
 import pytest
+from mlir_fixtures import assert_unchanged, forward, generic, pointwise, returned
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.native_cpu_layout import input_layouts, profile
@@ -10,15 +11,7 @@ from merlin.targetgen.native_typed_semantics import prove
 
 
 def guarded(*, missing=False, escape=False):
-    return parse_mlir_text(
-        """module {
-      func.func @forward(%x:tensor<4xf32>,%y:tensor<4xf32>)->tensor<4xf32> {
-        %e=tensor.empty():tensor<4xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types=["parallel"]}
-          ins(%x,%y:tensor<4xf32>,tensor<4xf32>) outs(%e:tensor<4xf32>) {
-        ^bb0(%a:f32,%b:f32,%unused:f32):
-          %q=arith.addf %a,%b:f32
+    body = """%q=arith.addf %a,%b:f32
           %n=arith.constant -4194304:i32
           %nan=arith.bitcast %n:i32 to f32
           %mask=arith.constant 4194304:i32
@@ -33,12 +26,9 @@ def guarded(*, missing=False, escape=False):
           %bv=arith.bitcast %bq:i32 to f32
           %invalid=arith.select %qn,%nan,%q:f32
           %first=arith.select %an,%av,%invalid:f32
-          %last=arith.select %bn,%bv,%first:f32
-          linalg.yield RESULT:f32
-        }->tensor<4xf32>
-        return %r:tensor<4xf32>
-      }}""".replace("RESULT", "%q" if escape else "%first" if missing else "%last")
-    )
+          %last=arith.select %bn,%bv,%first:f32"""
+    result = "%q" if escape else "%first" if missing else "%last"
+    return pointwise(["tensor<4xf32>"] * 2, "tensor<4xf32>", body, yields=result)
 
 
 @pytest.fixture
@@ -89,20 +79,8 @@ def test_runtime_tensor_product_stays_unlowered():
     arithmetic = next(op for op in module.walk() if op.name == "arith.addf")
     assert not any(compile_time_operand(v) for v in arithmetic.operands)
     # A closed, unguarded product is numerically lowerable but ineligible.
-    module = parse_mlir_text("""module {func.func @forward(%x:tensor<4xf16>,%y:tensor<4xf16>)->tensor<4xf16>{
-      %e=tensor.empty():tensor<4xf16>
-      %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types=["parallel"]}
-        ins(%x,%y:tensor<4xf16>,tensor<4xf16>) outs(%e:tensor<4xf16>){
-      ^bb0(%a:f16,%b:f16,%unused:f16):
-        %p=arith.mulf %a,%b:f16
-        linalg.yield %p:f16
-      }->tensor<4xf16>
-      return %r:tensor<4xf16>
-    }}""")
-    original = str(module)
-    assert rewrite_significand_products(module) == ({}, [])
-    assert str(module) == original
+    module = pointwise(["tensor<4xf16>"] * 2, "tensor<4xf16>", "%v=arith.mulf %a,%b:f16")
+    assert_unchanged(module, rewrite_significand_products, ({}, []))
 
 
 @pytest.mark.parametrize(
@@ -119,27 +97,15 @@ def test_source_literal_folding_preserves_typed_rne_and_zero_sign(operation, lef
     from merlin.llvmlower.uniform_numeric_literals import fold_uniform_numeric_literals
     from merlin.xdsl_dialects.lowering.group_numerics import _constant_of
 
-    module = parse_mlir_text(
-        """module {func.func @forward()->tensor<4xf16>{
-      %ca=arith.constant LEFT:f16
-      %cb=arith.constant RIGHT:f16
+    prelude = f"""%ca=arith.constant {left}:f16
+      %cb=arith.constant {right}:f16
       %x=tensor.splat %ca:tensor<4xf16>
       %y=tensor.splat %cb:tensor<4xf16>
-      %e=tensor.empty():tensor<4xf16>
-      %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-        iterator_types=["parallel"]} ins(%x,%y:tensor<4xf16>,tensor<4xf16>) outs(%e:tensor<4xf16>){
-      ^bb0(%a:f16,%b:f16,%unused:f16):
-        %p=OP %a,%b:f16
-        linalg.yield %p:f16
-      }->tensor<4xf16>
-      return %r:tensor<4xf16>
-    }}""".replace("LEFT", left)
-        .replace("RIGHT", right)
-        .replace("OP", operation)
-    )
+"""
+    ins = [("%x", "tensor<4xf16>"), ("%y", "tensor<4xf16>")]
+    module = forward("", "tensor<4xf16>", prelude + generic(ins, "tensor<4xf16>", f"%v={operation} %a,%b:f16"))
     assert fold_uniform_numeric_literals(module) == 1
-    returned = next(op for op in module.walk() if op.name == "func.return").operands[0]
-    actual = _constant_of(returned)
+    actual = _constant_of(returned(module))
     assert actual == expected
     assert math.copysign(1.0, actual) == math.copysign(1.0, expected)
 
@@ -177,26 +143,15 @@ def test_scalar_literal_nan_guard_folds_without_runtime_observation():
       return %r:tensor<4xbf16>
     }}""")
     assert fold_uniform_numeric_literals(module) == 3
-    returned = next(op for op in module.walk() if op.name == "func.return").operands[0]
-    assert _constant_of(returned) == 0.5
+    assert _constant_of(returned(module)) == 0.5
 
 
 @pytest.mark.parametrize("divisor,accepted", [("2.0", True), ("3.0", False), ("0x00000001", False)])
 def test_reciprocal_requires_an_exact_finite_compute_value(certificate, divisor, accepted):
-    module = parse_mlir_text(
-        """module {func.func @forward(%x:tensor<4xf32>)->tensor<4xf32>{
-      %d=arith.constant DIVISOR:f32
-      %y=tensor.splat %d:tensor<4xf32>
-      %e=tensor.empty():tensor<4xf32>
-      %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-        iterator_types=["parallel"]} ins(%x,%y:tensor<4xf32>,tensor<4xf32>) outs(%e:tensor<4xf32>){
-      ^bb0(%a:f32,%b:f32,%unused:f32):
-        %q=arith.divf %a,%b:f32
-        linalg.yield %q:f32
-      }->tensor<4xf32>
-      return %r:tensor<4xf32>
-    }}""".replace("DIVISOR", divisor)
-    )
+    prelude = f"%d=arith.constant {divisor}:f32\n%y=tensor.splat %d:tensor<4xf32>\n"
+    ins = [("%x", "tensor<4xf32>"), ("%y", "tensor<4xf32>")]
+    quotient = generic(ins, "tensor<4xf32>", "%v=arith.divf %a,%b:f32")
+    module = forward("%x:tensor<4xf32>", "tensor<4xf32>", prelude + quotient)
     result = prove(module)
     assert (result["status"] == "proven") == accepted
     if not accepted:
@@ -229,20 +184,11 @@ def test_uncertified_binary64_narrowing_cannot_fold_away_its_obligation(certific
 
 
 def test_conversion_prelude_cannot_place_a_numerical_comparison(certificate):
-    module = parse_mlir_text("""module {
-      func.func @forward(%x:tensor<4xf16>,%y:tensor<4xf16>)->tensor<4xf32>{
-        %e=tensor.empty():tensor<4xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types=["parallel"]} ins(%x,%y:tensor<4xf16>,tensor<4xf16>) outs(%e:tensor<4xf32>){
-        ^bb0(%a:f16,%b:f16,%unused:f32):
-          %af=arith.extf %a:f16 to f32
-          %bf=arith.extf %b:f16 to f32
-          %c=arith.cmpf olt,%af,%bf:f32
-          %v=arith.select %c,%af,%bf:f32
-          linalg.yield %v:f32
-        }->tensor<4xf32>
-        return %r:tensor<4xf32>
-    }}""")
+    body = """%af=arith.extf %a:f16 to f32
+      %bf=arith.extf %b:f16 to f32
+      %c=arith.cmpf olt,%af,%bf:f32
+      %v=arith.select %c,%af,%bf:f32"""
+    module = pointwise(["tensor<4xf16>"] * 2, "tensor<4xf32>", body)
     assert prove(module)["code"] == "native_float_predicate_family_unproved"
 
 
@@ -251,16 +197,7 @@ def test_dropped_destination_layout_cannot_claim_a_copy_profile(tmp_path, monkey
 
     from merlin.targetgen.core_aten_components import prepare_integer_components
 
-    module = parse_mlir_text("""module {func.func @forward(%x:tensor<4xf16>)->tensor<4xf32>{
-      %e=tensor.empty():tensor<4xf32>
-      %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-        iterator_types=["parallel"]} ins(%x:tensor<4xf16>) outs(%e:tensor<4xf32>){
-      ^bb0(%a:f16,%unused:f32):
-        %v=arith.extf %a:f16 to f32
-        linalg.yield %v:f32
-      }->tensor<4xf32>
-      return %r:tensor<4xf32>
-    }}""")
+    module = pointwise(["tensor<4xf16>"], "tensor<4xf32>", "%v=arith.extf %a:f16 to f32")
     monkeypatch.setattr(
         "merlin.targetgen.native_dtype_domain.component_semantics",
         lambda _: {

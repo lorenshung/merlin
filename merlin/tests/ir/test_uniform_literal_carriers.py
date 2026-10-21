@@ -1,6 +1,7 @@
 """Literal transport exposes a device fill without reading runtime inputs."""
 
 import pytest
+from mlir_fixtures import assert_unchanged, returned
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.uniform_literal_carriers import expose_uniform_literal_carriers
@@ -17,9 +18,8 @@ def test_singleton_rank_change_preserves_the_literal_attribute(element, value):
     }} }}""")
     before = next(op for op in module.walk() if op.name == "arith.constant").value
     assert expose_uniform_literal_carriers(module) == 1
-    returned = next(op for op in module.walk() if op.name == "func.return").operands[0]
-    assert returned.owner.name == "tensor.splat"
-    assert returned.owner.operands[0].owner.value == before
+    assert returned(module).owner.name == "tensor.splat"
+    assert returned(module).owner.operands[0].owner.value == before
     assert expose_uniform_literal_carriers(module) == 0
 
 
@@ -31,6 +31,4 @@ def test_runtime_or_unknown_carrier_is_not_a_literal_fill(source):
       %r = tensor.reshape {source}(%s) : (tensor<i64>, tensor<1xi64>) -> tensor<1xi64>
       return %r : tensor<1xi64>
     }} }}""")
-    original = str(module)
-    assert expose_uniform_literal_carriers(module) == 0
-    assert str(module) == original
+    assert_unchanged(module, expose_uniform_literal_carriers)

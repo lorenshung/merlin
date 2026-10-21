@@ -1,24 +1,14 @@
 """Native admission retains exactness gates without any profitability policy."""
 import pytest
+from mlir_fixtures import forward, generic
 from merlin.frontends.linalg_mlir import parse_mlir_text
 
 def inputs():
     return {}, {}
 
 def source(size):
-    return parse_mlir_text(f"""builtin.module {{
-      func.func @forward(%a: tensor<{size}xf32>) -> tensor<{size}xf32> {{
-        %e = tensor.empty() : tensor<{size}xf32>
-        %v = linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-                             iterator_types=["parallel"]}}
-          ins(%a : tensor<{size}xf32>) outs(%e : tensor<{size}xf32>) {{
-          ^bb0(%x: f32, %unused: f32):
-            %n = arith.negf %x : f32
-            linalg.yield %n : f32
-        }} -> tensor<{size}xf32>
-        func.return %v : tensor<{size}xf32>
-      }}
-    }}""")
+    typ = f"tensor<{size}xf32>"
+    return forward(f"%x:{typ}", typ, generic([("%x", typ)], typ, "%v=arith.negf %a : f32", name="%v"), ret="%v")
 
 def candidate(module, family="elementwise_map", numerical="F2"):
     ordinal = next(i for i, op in enumerate(module.walk()) if op.name == "linalg.generic")

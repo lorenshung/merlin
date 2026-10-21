@@ -3,6 +3,7 @@
 import json
 
 import numpy as np
+from mlir_fixtures import forward, generic
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.core_aten_components import prepare_integer_components
@@ -10,26 +11,10 @@ from merlin.targetgen.native_dtype_domain import component_semantics
 
 
 def division_module(literal):
-    return parse_mlir_text(
-        """builtin.module {
-      func.func @forward(%x: tensor<1xi32>) -> tensor<1xf32> {
-        %zero=arith.constant """
-        + literal
-        + """ : f32
-        %divisor=tensor.splat %zero : tensor<1xf32>
-        %empty=tensor.empty() : tensor<1xf32>
-        %r=linalg.generic {
-          indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types=["parallel"]
-        } ins(%x,%divisor : tensor<1xi32>,tensor<1xf32>) outs(%empty : tensor<1xf32>) {
-        ^bb0(%a: i32,%b: f32,%unused: f32):
-          %v=arith.sitofp %a : i32 to f32
-          %r=arith.divf %v,%b : f32
-          linalg.yield %r : f32
-        } -> tensor<1xf32>
-        func.return %r : tensor<1xf32>
-      }}"""
-    )
+    prelude = f"%zero=arith.constant {literal} : f32\n%divisor=tensor.splat %zero : tensor<1xf32>\n"
+    ins = [("%x", "tensor<1xi32>"), ("%divisor", "tensor<1xf32>")]
+    body = "%w=arith.sitofp %a : i32 to f32\n%v=arith.divf %w,%b : f32"
+    return forward("%x: tensor<1xi32>", "tensor<1xf32>", prelude + generic(ins, "tensor<1xf32>", body))
 
 
 def test_certified_integer_conversion_zero_division():

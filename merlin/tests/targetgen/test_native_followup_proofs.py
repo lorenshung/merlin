@@ -1,6 +1,7 @@
 """Static storage/layout qualification and independent conversion negatives."""
 
 import pytest
+from mlir_fixtures import pointwise
 
 from merlin.llvmlower.native_cpu_layout import joint_profile, profile
 from merlin.targetgen.native_ieee_arithmetic_check import arithmetic_word
@@ -111,16 +112,12 @@ else:
 
 
 def test_proof_closes_a_folded_literal_nan_guard_without_mutating_source():
-    from merlin.frontends.linalg_mlir import parse_mlir_text
     from merlin.targetgen.native_typed_semantics import prove
 
-    module = parse_mlir_text("""module {
-      func.func @forward(%x:tensor<4xf16>) -> tensor<4xf16> {
-        %e=tensor.empty():tensor<4xf16>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x:tensor<4xf16>) outs(%e:tensor<4xf16>) {
-        ^bb0(%a:f16,%unused:f16):
-          %v=arith.extf %a:f16 to f32
+    module = pointwise(
+        ["tensor<4xf16>"],
+        "tensor<4xf16>",
+        """%v=arith.extf %a:f16 to f32
           %c=arith.constant 2.0:f32
           %p=arith.mulf %v,%c:f32
           %d=arith.constant -4194304:i32
@@ -135,11 +132,9 @@ def test_proof_closes_a_folded_literal_nan_guard_without_mutating_source():
           %out=arith.select %nan,%quiet,%base:f32
           %false=arith.constant false
           %guard=arith.select %false,%c,%out:f32
-          %result=arith.truncf %guard:f32 to f16
-          linalg.yield %result:f16
-        } -> tensor<4xf16>
-        return %r:tensor<4xf16>
-      }}""")
+          %result=arith.truncf %guard:f32 to f16""",
+        yields="%result",
+    )
     original = str(module)
     result = prove(module)
     assert result["status"] == "proven", result
@@ -160,42 +155,25 @@ def test_runtime_guard_is_not_folded_by_literal_closure():
 
 
 def test_widening_does_not_license_binary64_arithmetic():
-    from merlin.frontends.linalg_mlir import parse_mlir_text
     from merlin.targetgen.native_typed_semantics import prove
 
-    module = parse_mlir_text("""module {
-      func.func @forward(%x:tensor<4xf32>) -> tensor<4xf64> {
-        %e=tensor.empty():tensor<4xf64>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x:tensor<4xf32>) outs(%e:tensor<4xf64>) {
-        ^bb0(%a:f32,%unused:f64):
-          %v=arith.extf %a:f32 to f64
-          %c=arith.constant 2.0:f64
-          %result=arith.addf %v,%c:f64
-          linalg.yield %result:f64
-        } -> tensor<4xf64>
-        return %r:tensor<4xf64>
-      }}""")
+    module = pointwise(
+        ["tensor<4xf32>"],
+        "tensor<4xf64>",
+        "%v=arith.extf %a:f32 to f64\n%c=arith.constant 2.0:f64\n%result=arith.addf %v,%c:f64",
+        yields="%result",
+    )
     assert prove(module)["code"] == "native_binary64_arithmetic_form_unproved"
 
 
 @pytest.mark.parametrize("storage,expected", [("f16", "proven"), ("f32", "refused")])
 def test_new_guard_closure_stays_in_reduced_storage_family(storage, expected):
-    from merlin.frontends.linalg_mlir import parse_mlir_text
     from merlin.targetgen.native_typed_semantics import prove
 
     widen = "%a=arith.extf %lhs:f16 to f32\n%b=arith.extf %rhs:f16 to f32" if storage == "f16" else ""
-    arguments = "%lhs:STORAGE,%rhs:STORAGE" if widen else "%a:STORAGE,%b:STORAGE"
-    text = (
-        """module {
-      func.func @forward(%x:tensor<4xSTORAGE>,%y:tensor<4xSTORAGE>) -> tensor<4xf32> {
-        %e=tensor.empty():tensor<4xf32>
-        %r=linalg.generic {
-          indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types=["parallel"]}
-          ins(%x,%y:tensor<4xSTORAGE>,tensor<4xSTORAGE>) outs(%e:tensor<4xf32>) {
-        ^bb0(ARGUMENTS,%unused:f32):
-          WIDEN
+    body = (
+        widen
+        + """
           %p=arith.addf %a,%b:f32
           %d=arith.constant -4194304:i32
           %default=arith.bitcast %d:i32 to f32
@@ -213,15 +191,10 @@ def test_new_guard_closure_stays_in_reduced_storage_family(storage, expected):
           %aq=arith.ori %ar,%mask:i32
           %aquiet=arith.bitcast %aq:i32 to f32
           %anan=arith.cmpf uno,%a,%a:f32
-          %out=arith.select %anan,%aquiet,%alias:f32
-          linalg.yield %out:f32
-        } -> tensor<4xf32>
-        return %r:tensor<4xf32>
-      }}""".replace("ARGUMENTS", arguments)
-        .replace("WIDEN", widen)
-        .replace("STORAGE", storage)
+          %out=arith.select %anan,%aquiet,%alias:f32"""
     )
-    result = prove(parse_mlir_text(text))
+    args = ("lhs", "rhs") if widen else "ab"
+    result = prove(pointwise([f"tensor<4x{storage}>"] * 2, "tensor<4xf32>", body, yields="%out", args=args))
     assert result["status"] == expected, result
     if expected == "refused":
         assert result["code"] == "native_competing_nan_priority_unproved"

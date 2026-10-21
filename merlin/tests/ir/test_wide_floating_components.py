@@ -4,6 +4,7 @@
 from fractions import Fraction
 
 import pytest
+from mlir_fixtures import forward, generic, pointwise
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.fixed_point_ir import finite_grid
@@ -13,18 +14,9 @@ from merlin.llvmlower.integer_components import rewrite_integer_components
 
 @pytest.mark.parametrize("divisor", [0.5, 2.0, 3.0, -0.5])
 def test_literal_division_has_a_nonidentity_native_numerator(divisor):
-    module = parse_mlir_text(f"""module {{func.func @forward(%x:tensor<3xf32>) -> tensor<3xf32> {{
-      %c=arith.constant {divisor} : f32
-      %weight=tensor.splat %c : tensor<3xf32>
-      %e=tensor.empty() : tensor<3xf32>
-      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-        ins(%x,%weight:tensor<3xf32>,tensor<3xf32>) outs(%e:tensor<3xf32>) {{
-        ^bb0(%xv:f32,%cvalue:f32,%unused:f32):
-        %q=arith.divf %xv,%cvalue : f32
-        linalg.yield %q : f32
-      }} -> tensor<3xf32>
-      return %r : tensor<3xf32>
-    }} }}""")
+    t = "tensor<3xf32>"
+    prelude = f"%c=arith.constant {divisor} : f32\n%weight=tensor.splat %c : {t}\n"
+    module = forward(f"%x:{t}", t, prelude + generic([("%x", t), ("%weight", t)], t, "%v=arith.divf %a,%b : f32"))
     bounds, proofs = rewrite_floating_components(module, [(-6, 128)])
     products = [
         op
@@ -48,17 +40,7 @@ def test_extreme_bfloat_payload_has_full_integer_producers():
         assert Fraction.from_float(value) / Fraction(2) ** exponent == int(
             Fraction.from_float(value) / Fraction(2) ** exponent
         )
-    module = parse_mlir_text("""module {
-      func.func @forward(%x: tensor<3xbf16>) -> tensor<3xbf16> {
-        %e = tensor.empty() : tensor<3xbf16>
-        %r = linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>], iterator_types=["parallel"]}
-          ins(%x : tensor<3xbf16>) outs(%e : tensor<3xbf16>) {
-        ^bb0(%a:bf16,%b:bf16):
-          %v=arith.addf %a,%a : bf16
-          linalg.yield %v : bf16
-        } -> tensor<3xbf16>
-        return %r : tensor<3xbf16>
-      }}""")
+    module = pointwise(["tensor<3xbf16>"], "tensor<3xbf16>", "%v=arith.addf %a,%a : bf16")
     bounds, proofs = rewrite_floating_components(module, [(exponent, bound)])
     assert proofs[0]["packing"] == "exact_ieee_bit_fields"
     assert proofs[0]["reconstruction"] == "bounded_i1024"
@@ -99,19 +81,9 @@ def test_exact_widening_keeps_extreme_finite_grids_for_following_arithmetic():
 
 
 def test_integer_promotion_grids_participate_in_the_packing_width_proof():
-    module = parse_mlir_text("""module {
-      func.func @forward(%x: tensor<5xf32>) -> tensor<5xf32> {
-        %two=arith.constant -2.0 : f32
-        %y=tensor.splat %two : tensor<5xf32>
-        %e=tensor.empty() : tensor<5xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x,%y:tensor<5xf32>,tensor<5xf32>) outs(%e:tensor<5xf32>) {
-        ^bb0(%a:f32,%b:f32,%out:f32):
-          %w=arith.divf %a,%b : f32
-          linalg.yield %w : f32
-        } -> tensor<5xf32>
-        return %r : tensor<5xf32>
-      }}""")
+    t = "tensor<5xf32>"
+    prelude = f"%two=arith.constant -2.0 : f32\n%y=tensor.splat %two : {t}\n"
+    module = forward(f"%x:{t}", t, prelude + generic([("%x", t), ("%y", t)], t, "%v=arith.divf %a,%b : f32"))
     function = next(op for op in module.walk() if op.name == "func.func")
     # A preceding exact native integer->f32 boundary supplies this integral grid.
     bounds, proofs = rewrite_floating_components(
@@ -125,17 +97,7 @@ def test_integer_promotion_grids_participate_in_the_packing_width_proof():
 
 
 def test_alignment_between_individually_short_grids_selects_wide_packing():
-    module = parse_mlir_text("""module {
-      func.func @forward(%x:tensor<1xf32>,%y:tensor<1xf32>) -> tensor<1xf32> {
-        %e=tensor.empty() : tensor<1xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x,%y:tensor<1xf32>,tensor<1xf32>) outs(%e:tensor<1xf32>) {
-        ^bb0(%a:f32,%b:f32,%out:f32):
-          %w=arith.addf %a,%b : f32
-          linalg.yield %w : f32
-        } -> tensor<1xf32>
-        return %r : tensor<1xf32>
-      }}""")
+    module = pointwise(["tensor<1xf32>"] * 2, "tensor<1xf32>", "%v=arith.addf %a,%b : f32")
     bounds, proofs = rewrite_floating_components(module, [finite_grid([2.0**-120]), finite_grid([2.0**100])])
     assert len(proofs) == 1 and proofs[0]["packing"] == "exact_ieee_bit_fields"
     assert not any(op.name == "arith.addf" for op in module.walk())
@@ -220,21 +182,15 @@ def test_bilinear_numerator_survives_reshape_and_following_scalar_arithmetic(val
 def test_ieee_bit_epilogue_does_not_hide_the_complete_arithmetic_producer():
     from merlin.targetgen.core_aten_components import unlowered_data_reductions
 
-    module = parse_mlir_text("""module {
-      func.func @forward(%x:tensor<2xf32>,%y:tensor<2xf32>) -> tensor<2xf32> {
-        %e=tensor.empty() : tensor<2xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x,%y:tensor<2xf32>,tensor<2xf32>) outs(%e:tensor<2xf32>) {
-        ^bb0(%a:f32,%b:f32,%out:f32):
-          %sum=arith.addf %a,%b : f32
-          %bits=arith.bitcast %sum : f32 to i32
-          %mask=arith.constant 2147483647 : i32
-          %magnitude=arith.andi %bits,%mask : i32
-          %v=arith.bitcast %magnitude : i32 to f32
-          linalg.yield %v : f32
-        } -> tensor<2xf32>
-        return %r : tensor<2xf32>
-      }}""")
+    module = pointwise(
+        ["tensor<2xf32>"] * 2,
+        "tensor<2xf32>",
+        """%sum=arith.addf %a,%b : f32
+        %bits=arith.bitcast %sum : f32 to i32
+        %mask=arith.constant 2147483647 : i32
+        %magnitude=arith.andi %bits,%mask : i32
+        %v=arith.bitcast %magnitude : i32 to f32""",
+    )
     bounds, proofs = rewrite_floating_components(module, [(0, 2), (0, 2)])
     assert any(p["source_data_arithmetic"] for p in proofs)
     assert rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0, 0], known_bounds=bounds)

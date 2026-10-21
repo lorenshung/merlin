@@ -6,6 +6,7 @@ import random
 import struct
 
 import pytest
+from mlir_fixtures import pointwise
 from xdsl.dialects.builtin import bf16, f16, f32, f64
 from xdsl.ir import Block
 
@@ -48,17 +49,8 @@ def test_classification_does_not_quiet_or_round_inputs(typ):
 
 @pytest.mark.parametrize("operation", ["addf", "subf", "mulf"])
 def test_floating_special_arithmetic_occurs_only_in_the_affected_branch(operation):
-    source = parse_mlir_text(f"""module {{
-      func.func @forward(%x: tensor<2xf32>, %y: tensor<2xf32>) -> tensor<2xf32> {{
-        %e=tensor.empty() : tensor<2xf32>
-        %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-          ins(%x,%y : tensor<2xf32>,tensor<2xf32>) outs(%e : tensor<2xf32>) {{
-        ^bb0(%a:f32,%b:f32,%unused:f32):
-          %v=arith.{operation} %a,%b : f32
-          linalg.yield %v : f32
-        }} -> tensor<2xf32>
-        return %r : tensor<2xf32>
-      }} }}""")
+    typ = "tensor<2xf32>"
+    source = pointwise([typ, typ], typ, f"%v=arith.{operation} %a,%b : f32")
     _, proofs = rewrite_floating_components(source, [(0, 1), (0, 1)], ieee_pointwise=True)
     assert proofs[0]["ieee_special_readout"] == "affected_elements_only"
     branches = [op for op in source.walk() if op.name == "scf.if"]
@@ -130,17 +122,7 @@ def test_explicit_special_words_match_native_cpu(typ, operation):
 def test_special_readout_does_not_taint_an_unread_shape_operand():
     from merlin.llvmlower.ieee_pointwise import dependence_proof, overlay
 
-    module = parse_mlir_text('''module {
-      func.func @forward(%x: tensor<2xf32>, %y: tensor<2xf32>, %shape: tensor<2xf32>) -> tensor<2xf32> {
-        %e=tensor.empty() : tensor<2xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x,%y,%shape : tensor<2xf32>,tensor<2xf32>,tensor<2xf32>) outs(%e : tensor<2xf32>) {
-        ^bb0(%a:f32,%b:f32,%unread:f32,%unused:f32):
-          %v=arith.addf %a,%b : f32
-          linalg.yield %v : f32
-        } -> tensor<2xf32>
-        return %r : tensor<2xf32>
-      }}''')
+    module = pointwise(["tensor<2xf32>"] * 3, "tensor<2xf32>", "%v=arith.addf %a,%b : f32")
     source = next(op for op in module.walk() if op.name == "linalg.generic")
     proof = dependence_proof(source)
     assert [d["operand"] for d in proof["input_dependencies"]] == [0, 1]

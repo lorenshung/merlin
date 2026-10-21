@@ -1,25 +1,19 @@
 """Every integer data producer needs its own native-unit binding."""
 
-from merlin.frontends.linalg_mlir import parse_mlir_text
+from mlir_fixtures import forward, generic, pointwise
+
 from merlin.targetgen.native_integer_work import uncovered
 
 
 def source():
-    return parse_mlir_text("""module {func.func @forward(%x:tensor<3xi32>,%y:tensor<3xi32>) -> tensor<i32> {
-      %e=tensor.empty() : tensor<3xi32>
-      %sum=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-        ins(%x,%y:tensor<3xi32>,tensor<3xi32>) outs(%e:tensor<3xi32>) {
-        ^bb0(%a:i32,%b:i32,%unused:i32):
-        %v=arith.addi %a,%b : i32
-        linalg.yield %v : i32
-      } -> tensor<3xi32>
+    typ = "tensor<3xi32>"
+    total = generic([("%x", typ), ("%y", typ)], typ, "%v=arith.addi %a,%b : i32", name="%sum")
+    return forward(f"%x:{typ},%y:{typ}", "tensor<i32>", total + """
       %zero=arith.constant 0 : i32
       %seed=tensor.splat %zero : tensor<i32>
       %reduced=linalg.reduce ins(%sum:tensor<3xi32>) outs(%seed:tensor<i32>) dimensions=[0]
         (%v:i32,%acc:i32) { %added=arith.addi %v,%acc : i32
-        linalg.yield %added : i32 }
-      return %reduced : tensor<i32>
-    }}""")
+        linalg.yield %added : i32 }""", ret="%reduced")
 
 
 def test_both_parallel_fold_and_bias_reduction_need_a_binding():
@@ -31,16 +25,6 @@ def test_both_parallel_fold_and_bias_reduction_need_a_binding():
 
 
 def test_float_readout_integer_representation_is_separate_from_source_integer_work():
-    module = parse_mlir_text("""module {func.func @forward(%x:tensor<3xi32>) -> tensor<3xf32> {
-      %e=tensor.empty() : tensor<3xf32>
-      %out=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-        ins(%x:tensor<3xi32>) outs(%e:tensor<3xf32>) {
-        ^bb0(%a:i32,%unused:f32):
-        %zero=arith.constant 0 : i32
-        %v=arith.addi %a,%zero : i32
-        %f=arith.sitofp %v : i32 to f32
-        linalg.yield %f : f32
-      } -> tensor<3xf32>
-      return %out : tensor<3xf32>
-    }}""")
+    body = "%zero=arith.constant 0 : i32\n%v=arith.addi %a,%zero : i32\n%f=arith.sitofp %v : i32 to f32"
+    module = pointwise(["tensor<3xi32>"], "tensor<3xf32>", body, yields="%f")
     assert uncovered(module, None) == []

@@ -1,6 +1,7 @@
 """Scalar storage wrappers may be views only when every coordinate is proved."""
 
 import pytest
+from mlir_fixtures import assert_unchanged, returned
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.singleton_carriers import fold_singleton_carriers
@@ -15,8 +16,7 @@ def test_one_extracted_storage_word_reassembles_without_numeric_conversion(dtype
     }} }}""")
     assert fold_singleton_carriers(module) == 1
     module.verify()
-    returned = next(op for op in module.walk() if op.name == "func.return").operands[0]
-    assert returned.owner.name == "tensor.reshape"
+    assert returned(module).owner.name == "tensor.reshape"
     assert fold_singleton_carriers(module) == 0
 
 
@@ -27,6 +27,4 @@ def test_selecting_one_of_multiple_words_is_not_a_reshape():
       %r=tensor.from_elements %v : tensor<1xi64>
       func.return %r : tensor<1xi64>
     }}""")
-    original = str(module)
-    assert fold_singleton_carriers(module) == 0
-    assert str(module) == original
+    assert_unchanged(module, fold_singleton_carriers)

@@ -1,6 +1,7 @@
 """Index-selected integer prefixes are exact masked contractions, not host scans."""
 
 import pytest
+from mlir_fixtures import assert_unchanged
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.integer_components import rewrite_integer_components
@@ -49,10 +50,7 @@ def test_mask_is_a_runtime_data_contraction_with_static_coefficients(dtype, pred
 
 @pytest.mark.parametrize("dtype,seed,flags", [("f32", "0.0", ""), ("i64", "1", ""), ("i64", "0", "overflow<nsw>")])
 def test_float_order_nonzero_seed_and_overflow_promises_remain_unchanged(dtype, seed, flags):
-    module = source(dtype, seed=seed, flags=flags)
-    original = str(module)
-    assert expose_static_masked_sums(module) == 0
-    assert str(module) == original
+    assert_unchanged(source(dtype, seed=seed, flags=flags), expose_static_masked_sums)
 
 
 @pytest.mark.parametrize("dtype", ["i8", "i32", "i64"])

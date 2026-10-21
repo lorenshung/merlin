@@ -1,6 +1,7 @@
 """Quantized activation has real byte arithmetic and fully checked IO boundaries."""
 
 import pytest
+from mlir_fixtures import generic
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen import floating_contract, native_byte_activation, operator_review, quantized_literal_reference
@@ -8,21 +9,14 @@ from merlin.targetgen.native_quantized_activation import prepare
 
 
 def source(dtype, *, extra=False):
-    module = parse_mlir_text(f"""module {{func.func @forward(%x:tensor<4x{dtype}>)
-      -> (tensor<4x{dtype}>,tensor<4x{dtype}>) {{
-      %e=tensor.empty() : tensor<4x{dtype}>
-      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-        ins(%x:tensor<4x{dtype}>) outs(%e:tensor<4x{dtype}>) {{
-        ^bb0(%a:{dtype},%unused:{dtype}):
-        %zero=arith.constant 0.0 : {dtype}
-        %p=arith.cmpf olt,%a,%zero : {dtype}
-        %v=arith.select %p,%zero,%a : {dtype}
-        linalg.yield %v : {dtype}
-      }} -> tensor<4x{dtype}>
-      {'"fixture.effect"() : () -> ()' if extra else ""}
-      return %r,%x : tensor<4x{dtype}>,tensor<4x{dtype}>
-    }} }}""")
-    return module
+    t = f"tensor<4x{dtype}>"
+    relu = generic([("%x", t)], t, f"""%zero=arith.constant 0.0 : {dtype}
+      %p=arith.cmpf olt,%a,%zero : {dtype}
+      %v=arith.select %p,%zero,%a : {dtype}""")
+    effect = '"fixture.effect"() : () -> ()' if extra else ""
+    return parse_mlir_text(
+        f"module {{func.func @forward(%x:{t}) -> ({t},{t}) {{\n{relu}\n{effect}\nreturn %r,%x : {t},{t} }} }}"
+    )
 
 
 def setup(monkeypatch, *, precision="quantized_exact", maximum=1):

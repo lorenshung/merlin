@@ -3,6 +3,7 @@
 import hashlib
 
 import pytest
+from mlir_fixtures import generic
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.core_aten_exact_dtype import bitwise_catalog_coverage
@@ -21,19 +22,15 @@ def source(dtype="f32", *, zero=False, reversed=False, finite_mask=False, unknow
           %bad=arith.bitcast %changed : i{n} to {dtype}"""
     data = "%bad" if finite_mask else "%word"
     yes, no = (data, "%nan") if reversed else ("%nan", data)
-    return parse_mlir_text(f"""module {{func.func @forward(%x:tensor<4x{dtype}>) -> (tensor<4x{dtype}>,tensor<4x{dtype}>) {{
-      %e=tensor.empty() : tensor<4x{dtype}>
-      %out=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-        ins(%x:tensor<4x{dtype}>) outs(%e:tensor<4x{dtype}>) {{
-        ^bb0(%word:{dtype},%unused:{dtype}):
-        %nan=arith.constant {value} : {dtype}
-        {extra}
-        %p=arith.cmpf uno,%word,%word : {dtype}
-        %v=arith.select %p,{yes},{no} : {dtype}
-        linalg.yield %v : {dtype}
-      }} -> tensor<4x{dtype}>
-      return %out,%x : tensor<4x{dtype}>,tensor<4x{dtype}>
-    }} }}""")
+    t = f"tensor<4x{dtype}>"
+    body = f"""%nan=arith.constant {value} : {dtype}
+      {extra}
+      %p=arith.cmpf uno,%word,%word : {dtype}
+      %v=arith.select %p,{yes},{no} : {dtype}"""
+    epilogue = generic([("%x", t)], t, body, name="%out", args=["word"])
+    return parse_mlir_text(
+        f"module {{func.func @forward(%x:{t}) -> ({t},{t}) {{\n{epilogue}\nreturn %out,%x : {t},{t} }} }}"
+    )
 
 
 @pytest.mark.parametrize("dtype", ["f16", "bf16", "f32", "f64"])

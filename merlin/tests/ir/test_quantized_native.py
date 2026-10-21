@@ -7,6 +7,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from mlir_fixtures import pointwise
 
 from merlin.common.yaml import load_yaml
 from merlin.frontends.linalg_mlir import parse_mlir_text
@@ -316,23 +317,10 @@ def test_nan_word_overlay_is_removed_but_live_nan_is_refused():
     from merlin.llvmlower.quantized_native import finite_source
 
     def fixture(yielded):
-        return parse_mlir_text(
-            """module {
-          func.func @forward(%x:tensor<1xf32>) -> tensor<1xf32> {
-            %e=tensor.empty() : tensor<1xf32>
-            %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-              ins(%x:tensor<1xf32>) outs(%e:tensor<1xf32>) {
-            ^bb0(%a:f32,%b:f32):
-              %nan=arith.constant 0x7FC00000 : f32
-              %isnan=arith.cmpf uno,%a,%a : f32
-              %v=arith.select %isnan,%nan,%a : f32
-              linalg.yield """
-            + yielded
-            + """ : f32
-            } -> tensor<1xf32>
-            return %r : tensor<1xf32>
-          }}"""
-        )
+        body = """%nan=arith.constant 0x7FC00000 : f32
+          %isnan=arith.cmpf uno,%a,%a : f32
+          %v=arith.select %isnan,%nan,%a : f32"""
+        return pointwise(["tensor<1xf32>"], "tensor<1xf32>", body, yields=yielded)
 
     module = fixture("%v")
     finite_source(module)

@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 import pytest
+from mlir_fixtures import generic, pointwise
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.core_aten_components import prepare_integer_components, unlowered_data_reductions
@@ -23,28 +24,22 @@ def test_host_math_after_conversion_is_not_device_operation_coverage(intrinsic):
 
 
 def test_integer_conversion_does_not_admit_a_retained_host_float_sum(tmp_path):
-    module = parse_mlir_text("""builtin.module {
-      func.func @forward(%x: tensor<4xi64>) -> tensor<f32> {
-        %e=tensor.empty() : tensor<4xf32>
-        %cast=linalg.generic {
-          indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]
-        } ins(%x : tensor<4xi64>) outs(%e : tensor<4xf32>) {
-        ^bb0(%a: i64,%unused: f32):
-          %v=arith.sitofp %a : i64 to f32
-          linalg.yield %v : f32
-        } -> tensor<4xf32>
+    cast = generic([("%x", "tensor<4xi64>")], "tensor<4xf32>", "%v=arith.sitofp %a : i64 to f32", name="%cast")
+    module = parse_mlir_text(f"""builtin.module {{
+      func.func @forward(%x: tensor<4xi64>) -> tensor<f32> {{
+        {cast}
         %zero=arith.constant 0.0 : f32
         %seed=tensor.splat %zero : tensor<f32>
-        %sum=linalg.generic {
+        %sum=linalg.generic {{
           indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->()>],iterator_types=["reduction"]
-        } ins(%cast : tensor<4xf32>) outs(%seed : tensor<f32>) {
+        }} ins(%cast : tensor<4xf32>) outs(%seed : tensor<f32>) {{
         ^bb1(%a: f32,%b: f32):
           %nonlinear=math.exp %a : f32
           %v=arith.addf %nonlinear,%b : f32
           linalg.yield %v : f32
-        } -> tensor<f32>
+        }} -> tensor<f32>
         func.return %sum : tensor<f32>
-      }}""")
+      }}}}""")
     original = str(module) + "\n"
     (tmp_path / "model.mlir").write_text(original)
     np.savez(tmp_path / "inputs.npz", in0=np.array([1, 2, 3, 4], np.int64))
@@ -70,26 +65,20 @@ def test_integer_conversion_does_not_admit_a_retained_host_float_sum(tmp_path):
 
 
 def test_device_pointwise_prelude_does_not_hide_a_host_bilinear_loop(tmp_path):
-    module = parse_mlir_text("""builtin.module {
-      func.func @forward(%a: tensor<2xf16>,%b: tensor<2xf16>) -> tensor<f32> {
-        %e=tensor.empty() : tensor<2xf16>
-        %pre=linalg.generic {
-          indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types=["parallel"]
-        } ins(%a,%b : tensor<2xf16>,tensor<2xf16>) outs(%e : tensor<2xf16>) {
-        ^bb0(%x: f16,%y: f16,%unused: f16):
-          %v=arith.addf %x,%y : f16
-          linalg.yield %v : f16
-        } -> tensor<2xf16>
+    ins = [("%a", "tensor<2xf16>"), ("%b", "tensor<2xf16>")]
+    prelude = generic(ins, "tensor<2xf16>", "%v=arith.addf %x,%y : f16", name="%pre", args="xy")
+    module = parse_mlir_text(f"""builtin.module {{
+      func.func @forward(%a: tensor<2xf16>,%b: tensor<2xf16>) -> tensor<f32> {{
+        {prelude}
         %out=tensor.empty() : tensor<f32>
-        %r=linalg.generic {indexing_maps=[affine_map<()->()>],iterator_types=[]}
-          outs(%out : tensor<f32>) {
+        %r=linalg.generic {{indexing_maps=[affine_map<()->()>],iterator_types=[]}}
+          outs(%out : tensor<f32>) {{
         ^bb1(%unused: f32):
           %lo=arith.constant 0 : index
           %hi=arith.constant 2 : index
           %step=arith.constant 1 : index
           %zero=arith.constant 0.0 : f32
-          %sum=scf.for %k=%lo to %hi step %step iter_args(%s=%zero) -> (f32) {
+          %sum=scf.for %k=%lo to %hi step %step iter_args(%s=%zero) -> (f32) {{
             %x=tensor.extract %pre[%k] : tensor<2xf16>
             %y=tensor.extract %b[%k] : tensor<2xf16>
             %xf=arith.extf %x : f16 to f32
@@ -98,11 +87,11 @@ def test_device_pointwise_prelude_does_not_hide_a_host_bilinear_loop(tmp_path):
             %cube=arith.mulf %p,%yf : f32
             %v=arith.addf %s,%cube : f32
             scf.yield %v : f32
-          }
+          }}
           linalg.yield %sum : f32
-        } -> tensor<f32>
+        }} -> tensor<f32>
         func.return %r : tensor<f32>
-      }}""")
+      }}}}""")
     original = str(module) + "\n"
     (tmp_path / "model.mlir").write_text(original)
     np.savez(tmp_path / "inputs.npz", in0=np.array([1, 2], np.float16), in1=np.array([3, 4], np.float16))
@@ -167,19 +156,14 @@ def test_fused_components_retain_only_self_nan_classification(tmp_path, monkeypa
     )
     right = "%a" if qualified else "%b"
     choices = "%fma, %a" if predicate == "ord" else "%a, %fma"
+    body = f"""%fma=math.fma %a,%b,%c : f32
+      %nan=arith.cmpf {predicate},%a,{right} : f32
+      %v=arith.select %nan,{choices} : f32"""
+    computation = generic([(v, "tensor<2xf32>") for v in ("%x", "%y", "%z")], "tensor<2xf32>", body)
     module = parse_mlir_text(f"""module {{
       func.func @forward(%x:tensor<2xf32>,%y:tensor<2xf32>,%z:tensor<2xf32>)
         -> (tensor<2xf32>,tensor<2xf32>,tensor<2xf32>,tensor<2xf32>) {{
-        %e=tensor.empty() : tensor<2xf32>
-        %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,
-          affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-          ins(%x,%y,%z:tensor<2xf32>,tensor<2xf32>,tensor<2xf32>) outs(%e:tensor<2xf32>) {{
-          ^bb0(%a:f32,%b:f32,%c:f32,%unused:f32):
-            %fma=math.fma %a,%b,%c : f32
-            %nan=arith.cmpf {predicate},%a,{right} : f32
-            %v=arith.select %nan,{choices} : f32
-            linalg.yield %v : f32
-        }} -> tensor<2xf32>
+        {computation}
         return %r,%x,%y,%z : tensor<2xf32>,tensor<2xf32>,tensor<2xf32>,tensor<2xf32>
       }} }}""")
     (tmp_path / "model.mlir").write_text(str(module) + "\n")
@@ -231,18 +215,9 @@ def test_nan_classification_after_conversion_has_no_arithmetic_witness():
 
 @pytest.mark.parametrize("width", [8, 32, 64])
 def test_storage_copy_does_not_cover_a_retained_host_threshold(tmp_path, width):
-    module = parse_mlir_text(f"""module {{func.func @forward(%x:tensor<4xi{width}>) -> tensor<4xi{width}> {{
-      %empty=tensor.empty() : tensor<4xi{width}>
-      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-        ins(%x:tensor<4xi{width}>) outs(%empty:tensor<4xi{width}>) {{
-        ^bb0(%a:i{width},%unused:i{width}):
-        %z=arith.constant 0 : i{width}
-        %p=arith.cmpi slt,%a,%z : i{width}
-        %v=arith.select %p,%z,%a : i{width}
-        linalg.yield %v : i{width}
-      }} -> tensor<4xi{width}>
-      return %r : tensor<4xi{width}>
-    }} }}""")
+    typ = f"tensor<4xi{width}>"
+    body = f"%z=arith.constant 0 : i{width}\n%p=arith.cmpi slt,%a,%z : i{width}\n%v=arith.select %p,%z,%a : i{width}"
+    module = pointwise([typ], typ, body)
     original = str(module) + "\n"
     (tmp_path / "model.mlir").write_text(original)
     np.savez(tmp_path / "inputs.npz", in0=np.array([-1, 0, 1, 127], dtype=f"int{width}"))

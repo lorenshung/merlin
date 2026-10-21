@@ -1,6 +1,7 @@
 """Dropping an identity selector must preserve the source's NaN-quieting path."""
 
 import pytest
+from mlir_fixtures import assert_unchanged
 
 
 @pytest.mark.parametrize("dtype,bits", [("f16", 16), ("bf16", 16), ("f32", 32), ("f64", 64)])
@@ -76,6 +77,4 @@ def test_nan_path_keeps_the_original_unit_multiply(predicate, swapped):
 
 @pytest.mark.parametrize("options", [dict(predicate="ugt"), dict(factor="2.0"), dict(unknown=True)])
 def test_different_nan_path_arithmetic_or_unknown_carrier_is_retained(options):
-    module = source(**options)
-    before = str(module)
-    assert fold_ieee_identity_selectors(module) == 0 and str(module) == before
+    assert_unchanged(source(**options), fold_ieee_identity_selectors)

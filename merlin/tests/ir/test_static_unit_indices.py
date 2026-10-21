@@ -1,6 +1,7 @@
 """Shape-one coordinates are literal; other index payloads stay unproved."""
 
 import pytest
+from mlir_fixtures import assert_unchanged, returned
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.static_unit_indices import fold_static_unit_indices
@@ -25,14 +26,10 @@ def test_unit_axis_is_a_uniform_zero_fill():
     module = source(1)
     assert fold_static_unit_indices(module) > 0
     module.verify()
-    result = next(op for op in module.walk() if op.name == "func.return").operands[0]
-    assert result.owner.name == "tensor.splat"
-    assert result.owner.operands[0].owner.value.value.data == 0
+    assert returned(module).owner.name == "tensor.splat"
+    assert returned(module).owner.operands[0].owner.value.value.data == 0
 
 
 @pytest.mark.parametrize("axis", [0, 2])
 def test_nontrivial_coordinate_is_not_a_literal(axis):
-    module = source(axis)
-    before = str(module)
-    assert fold_static_unit_indices(module) == 0
-    assert str(module) == before
+    assert_unchanged(source(axis), fold_static_unit_indices)

@@ -4,8 +4,8 @@
 import struct
 
 import pytest
+from mlir_fixtures import forward, generic
 
-from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.fixed_point_ir import FORMAT
 from merlin.llvmlower.floating_components import rewrite_floating_components
 from merlin.llvmlower.ieee_zero_division import rewrite_zero_division
@@ -62,19 +62,10 @@ def module(token, operation, divisor=None):
         if divisor is not None
         else ""
     )
+    typ = f"tensor<1x{token}>"
     rhs = "%constant" if divisor is not None else "%y"
-    return parse_mlir_text(f"""module {{
-      func.func @forward(%x: tensor<1x{token}>, %y: tensor<1x{token}>) -> tensor<1x{token}> {{
-        {literal}
-        %e=tensor.empty() : tensor<1x{token}>
-        %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-          ins(%x,{rhs} : tensor<1x{token}>,tensor<1x{token}>) outs(%e : tensor<1x{token}>) {{
-        ^bb0(%a:{token},%b:{token},%unused:{token}):
-          %v=arith.{operation} %a,%b : {token}
-          linalg.yield %v : {token}
-        }} -> tensor<1x{token}>
-        return %r : tensor<1x{token}>
-      }} }}""")
+    computation = generic([("%x", typ), (rhs, typ)], typ, f"%v=arith.{operation} %a,%b : {token}")
+    return forward(f"%x:{typ},%y:{typ}", typ, literal + "\n" + computation)
 
 
 @pytest.mark.parametrize("token", ["f16", "bf16", "f32", "f64"])

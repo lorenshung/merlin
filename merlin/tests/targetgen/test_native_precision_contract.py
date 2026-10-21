@@ -3,6 +3,7 @@
 import copy
 
 import pytest
+from mlir_fixtures import pointwise
 
 from merlin.targetgen.native_precision_contract import proves_quantized_model, requires_quantized_model
 
@@ -20,17 +21,8 @@ def software():
 
 
 def elementwise(source, output, body):
-    from merlin.frontends.linalg_mlir import parse_mlir_text
-
-    return parse_mlir_text(f"""module {{func.func @forward(%x:tensor<4x{source}>) -> tensor<4x{output}> {{
-      %e=tensor.empty() : tensor<4x{output}>
-      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-        ins(%x:tensor<4x{source}>) outs(%e:tensor<4x{output}>) {{
-        ^bb0(%a:{source},%u:{output}):
-        {body}
-      }} -> tensor<4x{output}>
-      return %r : tensor<4x{output}>
-    }} }}""")
+    ops, _, yielded = body.rpartition("linalg.yield ")
+    return pointwise([f"tensor<4x{source}>"], f"tensor<4x{output}>", ops, yields=yielded.split(" :")[0])
 
 
 @pytest.mark.parametrize(

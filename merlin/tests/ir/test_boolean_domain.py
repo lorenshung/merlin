@@ -1,26 +1,16 @@
 """Only uniform or identity behavior over the complete Boolean domain is admitted."""
 
 import pytest
+from mlir_fixtures import assert_unchanged, forward, generic, returned
 
-from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.boolean_domain import fold_boolean_domain
 
 
 def source(operator, constant, extension="extui"):
-    return parse_mlir_text(f"""module {{func.func @forward(%x:tensor<4xi1>) -> tensor<4xi64> {{
-      %c=arith.constant {constant} : i64
-      %s=tensor.splat %c : tensor<4xi64>
-      %e=tensor.empty() : tensor<4xi64>
-      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,
-        affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-        ins(%x,%s:tensor<4xi1>,tensor<4xi64>) outs(%e:tensor<4xi64>) {{
-        ^bb0(%a:i1,%b:i64,%unused:i64):
-          %wide=arith.{extension} %a : i1 to i64
-          %v=arith.{operator} %wide,%b : i64
-          linalg.yield %v : i64
-        }} -> tensor<4xi64>
-      func.return %r : tensor<4xi64>
-    }} }}""")
+    body = f"%wide=arith.{extension} %a : i1 to i64\n%v=arith.{operator} %wide,%b : i64"
+    computation = generic([("%x", "tensor<4xi1>"), ("%s", "tensor<4xi64>")], "tensor<4xi64>", body)
+    prelude = f"%c=arith.constant {constant} : i64\n%s=tensor.splat %c : tensor<4xi64>\n"
+    return forward("%x:tensor<4xi1>", "tensor<4xi64>", prelude + computation)
 
 
 @pytest.mark.parametrize(
@@ -42,9 +32,8 @@ def test_literal_integer_operations_fold_to_identity_widening_or_uniform_fill(op
     if kind == "identity":
         assert any(op.name == "arith.extui" for op in module.walk())
     else:
-        returned = next(op for op in module.walk() if op.name == "func.return").operands[0]
-        assert returned.owner.name == "tensor.splat"
-        assert returned.owner.operands[0].owner.value.value.data == expected
+        assert returned(module).owner.name == "tensor.splat"
+        assert returned(module).owner.operands[0].owner.value.value.data == expected
     assert fold_boolean_domain(module) == 0
 
 
@@ -52,10 +41,7 @@ def test_literal_integer_operations_fold_to_identity_widening_or_uniform_fill(op
     "operator,constant,extension", [("xori", 1, "extui"), ("andi", 3, "extsi"), ("ori", 2, "extui")]
 )
 def test_nonuniform_nonidentity_table_is_not_synthesized(operator, constant, extension):
-    module = source(operator, constant, extension)
-    original = str(module)
-    assert fold_boolean_domain(module) == 0
-    assert str(module) == original
+    assert_unchanged(source(operator, constant, extension), fold_boolean_domain)
 
 
 def test_runtime_self_product_or_self_or_cannot_hide_their_construction_class():
@@ -64,9 +50,7 @@ def test_runtime_self_product_or_self_or_cannot_hide_their_construction_class():
         generic = next(op for op in module.walk() if op.name == "linalg.generic")
         arithmetic = next(op for op in generic.body.block.ops if op.name == "arith." + operator)
         arithmetic.operands = [arithmetic.operands[0], arithmetic.operands[0]]
-        original = str(module)
-        assert fold_boolean_domain(module) == 0
-        assert str(module) == original
+        assert_unchanged(module, fold_boolean_domain)
 
 
 def test_unknown_input_carrier_cannot_be_erased_by_a_uniform_boolean_result():
@@ -81,9 +65,7 @@ def test_unknown_input_carrier_cannot_be_erased_by_a_uniform_boolean_result():
     function.body.block.insert_op_before(unknown, function.body.block.first_op)
     generic = next(op for op in module.walk() if op.name == "linalg.generic")
     generic.operands[0] = unknown.results[0]
-    original = str(module)
-    assert fold_boolean_domain(module) == 0
-    assert str(module) == original
+    assert_unchanged(module, fold_boolean_domain)
 
 
 @pytest.mark.parametrize("operator,divisor", [("floordivsi", 2), ("divsi", -2)])
@@ -94,10 +76,7 @@ def test_complete_boolean_integer_quotient_is_a_shape_only_zero_fill(operator, d
 
 
 def test_literal_zero_divisor_keeps_its_undefined_operation():
-    module = source("floordivsi", 0)
-    original = str(module)
-    assert fold_boolean_domain(module) == 0
-    assert str(module) == original
+    assert_unchanged(source("floordivsi", 0), fold_boolean_domain)
 
 
 @pytest.mark.parametrize("condition,folded", [(0, False), (1, True)])

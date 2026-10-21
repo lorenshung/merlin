@@ -1,6 +1,7 @@
 """Actual encoded activation instructions must satisfy the raw-readout contract."""
 
 import pytest
+from mlir_fixtures import pointwise
 
 from merlin.targetgen.native_byte_activation import audit_program
 
@@ -56,22 +57,13 @@ def test_changed_weights_os_scales_mesh_d_or_narrow_readout_refuse(mutate):
     [("i8", "0", "slt"), ("i64", "0", "slt"), ("f16", "0.0", "olt"), ("bf16", "0.0", "olt"), ("f32", "0.0", "olt")],
 )
 def test_a_native_zero_constant_needs_no_intermediate_integer_cast(dtype, zero, predicate):
-    from merlin.frontends.linalg_mlir import parse_mlir_text
     from merlin.xdsl_dialects.lowering.contraction_coverage import is_compare_select_relu
 
     compare = "cmpi" if dtype.startswith("i") else "cmpf"
-    module = parse_mlir_text(f"""module {{func.func @forward(%x:tensor<4x{dtype}>) -> tensor<4x{dtype}> {{
-      %e=tensor.empty() : tensor<4x{dtype}>
-      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}}
-        ins(%x:tensor<4x{dtype}>) outs(%e:tensor<4x{dtype}>) {{
-        ^bb0(%a:{dtype},%out:{dtype}):
-        %zero=arith.constant {zero} : {dtype}
-        %p=arith.{compare} {predicate},%a,%zero : {dtype}
-        %v=arith.select %p,%zero,%a : {dtype}
-        linalg.yield %v : {dtype}
-      }} -> tensor<4x{dtype}>
-      return %r : tensor<4x{dtype}>
-    }} }}""")
+    body = f"""%zero=arith.constant {zero} : {dtype}
+      %p=arith.{compare} {predicate},%a,%zero : {dtype}
+      %v=arith.select %p,%zero,%a : {dtype}"""
+    module = pointwise([f"tensor<4x{dtype}>"], f"tensor<4x{dtype}>", body)
     root = next(op for op in module.walk() if op.name == "linalg.generic")
     assert is_compare_select_relu(root)
     constant = next(op for op in root.body.block.ops if op.name == "arith.constant")

@@ -3,6 +3,7 @@
 from fractions import Fraction
 
 import pytest
+from mlir_fixtures import assert_unchanged
 
 from merlin.common.mlir_query import op_name
 from merlin.frontends.linalg_mlir import parse_mlir_text
@@ -89,9 +90,7 @@ def test_live_guard_with_different_results_refuses():
     module = source(live=True)
     with pytest.raises(Unproved, match="live guard"):
         prove_affine(generic(module))
-    original = str(module)
-    assert canonicalize_quantized_affine(module, exact_rational=True) == []
-    assert str(module) == original
+    assert_unchanged(module, lambda m: canonicalize_quantized_affine(m, exact_rational=True), [])
 
 
 def test_qparam_metadata_must_match_executable_scale():
@@ -122,10 +121,7 @@ def test_floating_escape_prevents_rational_signed_zero_canonicalization():
 
 
 def test_default_has_no_native_ieee_reassociation_permission():
-    module = source()
-    original = str(module)
-    assert canonicalize_quantized_affine(module) == []
-    assert str(module) == original
+    assert_unchanged(source(), canonicalize_quantized_affine, [])
 
 
 def summed_guard(*, divisor="3.0", add="arith.addf", scale="0.03125", metadata=True):
@@ -195,10 +191,7 @@ def test_quantized_nan_guard_after_sum_literal_divisor_and_reshape():
 
 @pytest.mark.parametrize("options", [dict(divisor="0.0"), dict(add="arith.mulf"), dict(metadata=False)])
 def test_reduction_guard_requires_complete_finite_linear_domain(options):
-    module = summed_guard(**options)
-    original = str(module)
-    assert canonicalize_quantized_affine(module, exact_rational=True) == []
-    assert str(module) == original
+    assert_unchanged(summed_guard(**options), lambda m: canonicalize_quantized_affine(m, exact_rational=True), [])
 
 
 def test_large_declared_reduction_domain_refuses_before_guard_removal():

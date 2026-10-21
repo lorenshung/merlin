@@ -2,6 +2,7 @@
 """A private scalar extraction/pack must retain the closed quantized island."""
 
 import pytest
+from mlir_fixtures import assert_unchanged
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.scalar_tensor_carriers import fold_scalar_tensor_roundtrips
@@ -43,7 +44,4 @@ def test_private_pack_remains_a_quantized_tensor_island():
 @pytest.mark.parametrize("extra_use", ["%keep = tensor.extract %n[] : tensor<f32>", "%keep = arith.negf %v : f32"])
 def test_shared_carriers_are_not_rewritten(extra_use):
     source = _SOURCE.replace("    %p =", "    " + extra_use + "\n    %p =")
-    module = parse_mlir_text(source)
-    before = str(module)
-    assert fold_scalar_tensor_roundtrips(module) == 0
-    assert str(module) == before
+    assert_unchanged(parse_mlir_text(source), fold_scalar_tensor_roundtrips)

@@ -1,6 +1,7 @@
 """Coupled tuple initializers remain distinct from current source contributions."""
 
 import pytest
+from mlir_fixtures import assert_unchanged
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.singleton_tuple_regions import expose_singleton_tuple_regions
@@ -53,7 +54,4 @@ def test_single_contribution_keeps_coupled_seed_words_and_scalar_operation_order
 
 @pytest.mark.parametrize("options", [dict(size=2), dict(unknown=True)])
 def test_repeated_recurrences_or_unknown_effects_remain_untouched(options):
-    module = source(**options)
-    original = str(module)
-    assert expose_singleton_tuple_regions(module) == 0
-    assert str(module) == original
+    assert_unchanged(source(**options), expose_singleton_tuple_regions)

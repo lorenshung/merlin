@@ -3,8 +3,8 @@
 from fractions import Fraction
 
 import pytest
+from mlir_fixtures import pointwise
 
-from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.native_dtype_domain import component_semantics, dtype_domain
 
 
@@ -32,19 +32,7 @@ def test_finite_grid_covers_full_dtype_without_omitting_special_values(dtype, mi
 
 
 def unary(dtype, expression):
-    return parse_mlir_text(
-        """module {
-      func.func @forward(%x:tensor<4xTYPE>) -> tensor<4xTYPE> {
-        %e=tensor.empty() : tensor<4xTYPE>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types=["parallel"]} ins(%x:tensor<4xTYPE>) outs(%e:tensor<4xTYPE>) {
-        ^bb0(%a:TYPE,%unused:TYPE):
-          EXPR
-          linalg.yield %v : TYPE
-        } -> tensor<4xTYPE>
-        return %r : tensor<4xTYPE>
-      }}""".replace("TYPE", dtype).replace("EXPR", expression)
-    )
+    return pointwise([f"tensor<4x{dtype}>"], f"tensor<4x{dtype}>", expression)
 
 
 @pytest.mark.parametrize("dtype", ["f32", "f64"])

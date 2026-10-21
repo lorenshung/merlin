@@ -1,6 +1,7 @@
 """A NaN-class guard cannot license an observable NaN payload change."""
 
 import pytest
+from mlir_fixtures import assert_unchanged
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.nan_guarded_neutral import fold_nan_guarded_neutral
@@ -36,10 +37,7 @@ def test_every_use_observes_only_the_non_nan_word_or_nan_class(operation, litera
 
 @pytest.mark.parametrize("options", [dict(escape=True), dict(bits=True), dict(predicate="ord"), dict(reverse=True)])
 def test_a_nan_payload_escape_or_nan_word_selection_refuses(options):
-    module = source("maximumf", "0xff800000", **options)
-    original = str(module)
-    assert fold_nan_guarded_neutral(module) == 0
-    assert str(module) == original
+    assert_unchanged(source("maximumf", "0xff800000", **options), fold_nan_guarded_neutral)
 
 
 @pytest.mark.parametrize(

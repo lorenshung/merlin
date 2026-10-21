@@ -1,6 +1,7 @@
 """Only a fully checked additive backedge gains rational reassociation."""
 
 import pytest
+from mlir_fixtures import assert_unchanged
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.exact_additive_recurrences import expose_exact_additive_recurrences
@@ -59,17 +60,11 @@ def test_exact_contract_exposes_every_prefix_dependency(stride, extent, element,
 
 @pytest.mark.parametrize("options", [dict(decrement=2), dict(extra="%hidden = arith.addf %sum, %wide : f64")])
 def test_unproved_backedge_or_extra_computation_is_retained(options):
-    module = source(**options)
-    original = str(module)
-    assert expose_exact_additive_recurrences(module, quantized_contract={}) == 0
-    assert str(module) == original
+    assert_unchanged(source(**options), lambda module: expose_exact_additive_recurrences(module, quantized_contract={}))
 
 
 def test_ordered_ieee_loop_never_gains_an_exact_contraction():
-    module = source()
-    original = str(module)
-    assert expose_exact_additive_recurrences(module) == 0
-    assert str(module) == original
+    assert_unchanged(source(), expose_exact_additive_recurrences)
 
 
 def test_rational_oracle_keeps_the_exact_prefix_before_output_rounding():

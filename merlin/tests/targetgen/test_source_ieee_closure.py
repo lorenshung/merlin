@@ -6,6 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import pytest
+from mlir_fixtures import generic
 
 
 def test_unproved_native_source_refuses_without_reading_eager_or_inputs(tmp_path):
@@ -15,20 +16,14 @@ def test_unproved_native_source_refuses_without_reading_eager_or_inputs(tmp_path
     from merlin.frontends.linalg_mlir import parse_mlir_text
     from merlin.targetgen.core_aten_components import prepare_integer_components
 
-    source = """module {
-      func.func @forward(%x:tensor<1xf16>) -> (tensor<1xf16>,tensor<1xf16>) {
-        %z=arith.constant 0.0 : f16
-        %zeros=tensor.splat %z : tensor<1xf16>
-        %e=tensor.empty() : tensor<1xf16>
-        %r=linalg.generic {
-          indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]
-        } ins(%x,%zeros:tensor<1xf16>,tensor<1xf16>) outs(%e:tensor<1xf16>) {
-        ^bb0(%a:f16,%b:f16,%unused:f16):
-          %v=arith.subf %a,%b : f16
-          linalg.yield %v : f16
-        } -> tensor<1xf16>
-        return %r,%x : tensor<1xf16>,tensor<1xf16>
-      }}"""
+    typ = "tensor<1xf16>"
+    body = generic([("%x", typ), ("%zeros", typ)], typ, "%v=arith.subf %a,%b : f16")
+    source = f"""module {{func.func @forward(%x:{typ}) -> ({typ},{typ}) {{
+      %z=arith.constant 0.0 : f16
+      %zeros=tensor.splat %z : {typ}
+      {body}
+      return %r,%x : {typ},{typ}
+    }} }}"""
     (tmp_path / "model.mlir").write_text(source)
     value = np.array([-0.0], np.float16)
     np.savez(tmp_path / "inputs.npz", in0=value)
@@ -72,18 +67,9 @@ def test_native_reduced_storage_requires_complete_source_observation(tmp_path):
     from merlin.frontends.linalg_mlir import parse_mlir_text
     from merlin.targetgen.core_aten_components import prepare_integer_components
 
-    source = """module {
-      func.func @forward(%x:tensor<1xf16>,%y:tensor<1xf16>,%z:tensor<1xf16>) -> tensor<1xf16> {
-        %e=tensor.empty() : tensor<1xf16>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,
-          affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x,%y,%z:tensor<1xf16>,tensor<1xf16>,tensor<1xf16>) outs(%e:tensor<1xf16>) {
-          ^bb0(%a:f16,%b:f16,%c:f16,%unused:f16):
-            %v=math.fma %a,%b,%c : f16
-            linalg.yield %v : f16
-        } -> tensor<1xf16>
-        return %r : tensor<1xf16>
-      }}"""
+    typ = "tensor<1xf16>"
+    body = generic([("%x", typ), ("%y", typ), ("%z", typ)], typ, "%v=math.fma %a,%b,%c : f16")
+    source = f"module {{func.func @forward(%x:{typ},%y:{typ},%z:{typ}) -> {typ} {{\n{body}\nreturn %r : {typ}\n}} }}"
     (tmp_path / "model.mlir").write_text(source)
     np.savez(tmp_path / "inputs.npz", **{f"in{i}": np.array([1], np.float16) for i in range(3)})
 

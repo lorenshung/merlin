@@ -1,6 +1,7 @@
 """The generated storage codecs preserve ReLU for every signed word."""
 
 import pytest
+from mlir_fixtures import generic
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen import native_byte_activation
@@ -9,22 +10,15 @@ from merlin.targetgen.native_wide_activation import prepare
 
 def source(width, *, threshold=0, effect=False, scalar=False):
     typ = f"tensor<{'4x' if not scalar else ''}i{width}>"
-    amap = "affine_map<(d0)->(d0)>" if not scalar else "affine_map<()->()>"
-    return parse_mlir_text(
-        f"""module {{func.func @forward(%x:{typ}) -> ({typ},{typ}) {{
-      %e=tensor.empty() : {typ}
-      %r=linalg.generic {{indexing_maps=[{amap},{amap}],iterator_types={["parallel"] if not scalar else []!r}}}
-        ins(%x:{typ}) outs(%e:{typ}) {{
-        ^bb0(%a:i{width},%unused:i{width}):
-        %zero=arith.constant {threshold} : i{width}
-        %p=arith.cmpi slt,%a,%zero : i{width}
-        %v=arith.select %p,%zero,%a : i{width}
-        linalg.yield %v : i{width}
-      }} -> {typ}
-      {'"fixture.effect"() : () -> ()' if effect else ""}
+    body = f"""%zero=arith.constant {threshold} : i{width}
+      %p=arith.cmpi slt,%a,%zero : i{width}
+      %v=arith.select %p,%zero,%a : i{width}"""
+    effect_op = '"fixture.effect"() : () -> ()' if effect else ""
+    return parse_mlir_text(f"""module {{func.func @forward(%x:{typ}) -> ({typ},{typ}) {{
+      {generic([("%x", typ)], typ, body)}
+      {effect_op}
       return %r,%x : {typ},{typ}
-    }} }}""".replace("'parallel'", '"parallel"')
-    )
+    }} }}""")
 
 
 def evaluate(block, arguments):

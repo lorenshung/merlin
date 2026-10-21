@@ -4,6 +4,7 @@ from itertools import product
 from math import prod
 
 import pytest
+from mlir_fixtures import assert_unchanged
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.static_reshape_movement import expose_static_reshape_movement
@@ -36,6 +37,4 @@ def test_runtime_shape_is_not_assumed_to_equal_the_result_annotation():
       %r=tensor.reshape %x(%s) : (tensor<2x3xf32>,tensor<1xi64>) -> tensor<6xf32>
       return %r : tensor<6xf32>
     }}""")
-    original = str(module)
-    assert expose_static_reshape_movement(module) == 0
-    assert str(module) == original
+    assert_unchanged(module, expose_static_reshape_movement)

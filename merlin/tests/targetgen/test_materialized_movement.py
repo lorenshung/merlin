@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from mlir_fixtures import assert_unchanged
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.result_layout import ATTRIBUTE, module_attribute
@@ -142,6 +143,4 @@ def test_folded_argument_result_gets_real_boundary_movement(dtype, shape):
     assert returned.operands[0].owner.name == "linalg.generic"
     assert returned.operands[1] is function.body.block.args[0]
     assert len([op for op in module.walk() if op.name == "linalg.generic"]) == 1
-    before = str(module)
-    assert expose_alias_results(module, report) == [0]
-    assert str(module) == before
+    assert_unchanged(module, lambda m: expose_alias_results(m, report), [0])

@@ -4,6 +4,7 @@ import json
 
 import numpy as np
 import pytest
+from mlir_fixtures import assert_unchanged, forward, generic, pointwise
 from xdsl.dialects.builtin import IntegerType
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
@@ -12,21 +13,8 @@ from merlin.llvmlower.integer_components import rewrite_integer_components
 
 
 def module(dtype, expression):
-    return parse_mlir_text(
-        """builtin.module {
-    func.func @forward(%x: tensor<4xTYPE>, %y: tensor<4xTYPE>) -> tensor<4xTYPE> {
-      %empty = tensor.empty() : tensor<4xTYPE>
-      %result = linalg.generic {
-        indexing_maps = [affine_map<(d0)->(d0)>, affine_map<(d0)->(d0)>, affine_map<(d0)->(d0)>],
-        iterator_types = ["parallel"]
-      } ins(%x, %y : tensor<4xTYPE>, tensor<4xTYPE>) outs(%empty : tensor<4xTYPE>) {
-      ^bb0(%a: TYPE, %b: TYPE, %c: TYPE):
-        EXPR
-        linalg.yield %v : TYPE
-      } -> tensor<4xTYPE>
-      func.return %result : tensor<4xTYPE>
-    }}""".replace("TYPE", dtype).replace("EXPR", expression)
-    )
+    typ = f"tensor<4x{dtype}>"
+    return pointwise([typ, typ], typ, expression)
 
 
 def evaluate(module, arrays):
@@ -161,19 +149,11 @@ def test_boolean_or_stays_in_the_host_source():
 
 
 def test_widening_keeps_the_carry_above_the_original_storage_width():
-    source = parse_mlir_text("""builtin.module {
-      func.func @forward(%x: tensor<4xi64>, %unused: tensor<4xi64>) -> tensor<4xi128> {
-        %e = tensor.empty() : tensor<4xi128>
-        %r = linalg.generic {
-          indexing_maps = [affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types = ["parallel"]
-        } ins(%x : tensor<4xi64>) outs(%e : tensor<4xi128>) {
-        ^bb0(%a: i64, %b: i128):
-          %v = arith.extsi %a : i64 to i128
-          linalg.yield %v : i128
-        } -> tensor<4xi128>
-        func.return %r : tensor<4xi128>
-      }}""")
+    source = forward(
+        "%x:tensor<4xi64>,%y:tensor<4xi64>",
+        "tensor<4xi128>",
+        generic([("%x", "tensor<4xi64>")], "tensor<4xi128>", "%v = arith.extsi %a : i64 to i128"),
+    )
     values = [(1 << 63) - 1, -(1 << 63), 32767, -32768]
     plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[1 << 63, 0])
     assert len(plans) == 8  # Source-width storage is normalized before the signed extension.
@@ -183,19 +163,7 @@ def test_widening_keeps_the_carry_above_the_original_storage_width():
 def test_native_sign_transform_keeps_all_ieee_payload_bits_in_integer_literals():
     from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
 
-    source = parse_mlir_text("""builtin.module {
-      func.func @forward(%x: tensor<4xf16>) -> tensor<4xf16> {
-        %e = tensor.empty() : tensor<4xf16>
-        %r = linalg.generic {
-          indexing_maps = [affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types = ["parallel"]
-        } ins(%x : tensor<4xf16>) outs(%e : tensor<4xf16>) {
-        ^bb0(%a: f16, %b: f16):
-          %v = arith.negf %a : f16
-          linalg.yield %v : f16
-        } -> tensor<4xf16>
-        func.return %r : tensor<4xf16>
-      }}""")
+    source = pointwise(["tensor<4xf16>"], "tensor<4xf16>", "%v = arith.negf %a : f16")
     bounds, proofs = rewrite_native_sign_components(source)
     assert proofs == [
         dict(
@@ -217,24 +185,13 @@ def test_native_sign_transform_keeps_all_ieee_payload_bits_in_integer_literals()
 def test_clamp_epilogue_preserves_source_comparison_and_payloads(dtype, predicate, zero):
     from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
 
-    source = parse_mlir_text(
-        """builtin.module {
-      func.func @forward(%x: tensor<4xTYPE>) -> tensor<4xTYPE> {
-        %e = tensor.empty() : tensor<4xTYPE>
-        %r = linalg.generic {
-          indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>], iterator_types=["parallel"]
-        } ins(%x : tensor<4xTYPE>) outs(%e : tensor<4xTYPE>) {
-        ^bb0(%a: TYPE,%unused: TYPE):
-          %zero=arith.constant ZERO : TYPE
-          %p=arith.CMP PRED,%a,%zero : TYPE
-          %v=arith.select %p,%zero,%a : TYPE
-          linalg.yield %v : TYPE
-        } -> tensor<4xTYPE>
-        func.return %r : tensor<4xTYPE>
-      }}""".replace("TYPE", dtype)
-        .replace("ZERO", zero)
-        .replace("PRED", predicate)
-        .replace("CMP", "cmpf" if dtype == "f16" else "cmpi")
+    cmp = "cmpf" if dtype == "f16" else "cmpi"
+    source = pointwise(
+        [f"tensor<4x{dtype}>"],
+        f"tensor<4x{dtype}>",
+        f"""%zero=arith.constant {zero} : {dtype}
+        %p=arith.{cmp} {predicate},%a,%zero : {dtype}
+        %v=arith.select %p,%zero,%a : {dtype}""",
     )
     bounds, proofs = rewrite_native_sign_components(source)
     assert proofs[0]["arithmetic"] == "source_compare_select_retained_host"
@@ -288,17 +245,7 @@ def test_window_reduction_ignores_unread_shape_operand():
 def test_declared_bfloat_nan_negation_uses_device_words_then_cpu_canonicalization():
     from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
 
-    source = parse_mlir_text("""module {
-      func.func @forward(%x: tensor<4xbf16>) -> tensor<4xbf16> {
-        %e=tensor.empty() : tensor<4xbf16>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x : tensor<4xbf16>) outs(%e : tensor<4xbf16>) {
-        ^bb0(%a:bf16,%b:bf16):
-          %v=arith.negf %a : bf16
-          linalg.yield %v : bf16
-        } -> tensor<4xbf16>
-        return %r : tensor<4xbf16>
-      }}""")
+    source = pointwise(["tensor<4xbf16>"], "tensor<4xbf16>", "%v=arith.negf %a : bf16")
     bounds, proofs = rewrite_native_sign_components(source, canonical_bf16_nan=True)
     assert proofs[0]["nan_payload"] == "canonical_positive_quiet"
     assert rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
@@ -310,17 +257,7 @@ def test_declared_bfloat_nan_negation_uses_device_words_then_cpu_canonicalizatio
 def test_binary32_sign_words_preserve_nonfinite_payloads_without_quantization():
     from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
 
-    source = parse_mlir_text("""module {
-      func.func @forward(%x:tensor<4xf32>) -> tensor<4xf32> {
-        %e=tensor.empty() : tensor<4xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x:tensor<4xf32>) outs(%e:tensor<4xf32>) {
-        ^bb0(%a:f32,%unused:f32):
-          %v=arith.negf %a : f32
-          linalg.yield %v : f32
-        } -> tensor<4xf32>
-        return %r : tensor<4xf32>
-      }}""")
+    source = pointwise(["tensor<4xf32>"], "tensor<4xf32>", "%v=arith.negf %a : f32")
     bounds, proofs = rewrite_native_sign_components(source)
     assert proofs[0]["nan_payload"] == "preserved"
     assert rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
@@ -339,20 +276,7 @@ def test_width_changes_observe_the_source_ring(bits, cast, wrap):
     limit = 1 << (bits - 1)
     body = f"%s=arith.addi %a,%b : i{bits}\n" if wrap else ""
     body += f"%v=arith.{cast} " + ("%s" if wrap else "%a") + f" : i{bits} to i64"
-    source = parse_mlir_text(
-        """module {
-      func.func @forward(%x:tensor<4xI>,%y:tensor<4xI>) -> tensor<4xi64> {
-        %e=tensor.empty() : tensor<4xi64>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,
-                      affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-        ins(%x,%y:tensor<4xI>,tensor<4xI>) outs(%e:tensor<4xi64>) {
-          ^bb0(%a:I,%b:I,%unused:i64):
-          BODY
-          linalg.yield %v : i64
-        } -> tensor<4xi64>
-        func.return %r : tensor<4xi64>
-      }}""".replace("BODY", body).replace("I", f"i{bits}")
-    )
+    source = pointwise([f"tensor<4xi{bits}>"] * 2, "tensor<4xi64>", body)
     values = [-1, -limit, 0, limit - 1]
     other = [1, -1, limit - 1, 1]
     expected = evaluate(source, [values, other])
@@ -397,9 +321,7 @@ def test_late_width_pass_does_not_split_generated_quotient_plumbing():
     source = module(
         "i64", "%q=arith.divsi %a,%b : i64\n%t=arith.trunci %q : i64 to i32\n%v=arith.extsi %t : i32 to i64"
     )
-    before = str(source)
-    assert preserve_integer_width_boundaries(source) == 0
-    assert str(source) == before
+    assert_unchanged(source, preserve_integer_width_boundaries)
 
 
 @pytest.mark.parametrize("coefficient", [(1 << 40) + 3, -(1 << 63) + 1, (1 << 63) - 1])
