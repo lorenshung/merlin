@@ -2,6 +2,8 @@
 
 import pytest
 from mlir_fixtures import assert_unchanged, forward, generic, returned
+from xdsl.dialects import arith, cf
+from xdsl.dialects.builtin import IntegerAttr, UnregisteredOp, i1
 
 from merlin.llvmlower.image_folds import fold_boolean_domain
 
@@ -56,8 +58,6 @@ def test_runtime_self_product_or_self_or_cannot_hide_their_construction_class():
 
 
 def test_unknown_input_carrier_cannot_be_erased_by_a_uniform_boolean_result():
-    from xdsl.dialects.builtin import UnregisteredOp
-
     module = source("ori", 3)
     function = next(op for op in module.walk() if op.name == "func.func")
     original_input = function.body.block.args[0]
@@ -79,9 +79,6 @@ def test_complete_boolean_integer_quotient_is_a_shape_only_zero_fill(operator, d
 
 @pytest.mark.parametrize("condition,folded", [(0, False), (1, True)])
 def test_assertions_are_removed_only_when_true_for_the_entire_domain(condition, folded):
-    from xdsl.dialects import arith, cf
-    from xdsl.dialects.builtin import IntegerAttr, i1
-
     module = source("floordivsi", 2)
     block = next(op for op in module.walk() if op.name == "linalg.generic").body.block
     constant = arith.ConstantOp(IntegerAttr(condition, i1))

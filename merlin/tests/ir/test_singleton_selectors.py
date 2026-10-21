@@ -2,9 +2,10 @@
 
 import pytest
 from mlir_fixtures import assert_unchanged, pointwise, returned
+from xdsl.dialects import arith
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.structural_folds import fold_singleton_selectors
+from merlin.llvmlower.structural_folds import fold_singleton_selectors, normalize_singleton_boundaries
 from merlin.targetgen.native_unit_policy import construction_evidence
 
 
@@ -98,7 +99,6 @@ def test_unproved_predicate_or_larger_reduction_is_not_folded(options):
 def test_unknown_data_arithmetic_cannot_be_licensed_by_singleton_shape():
     module = source()
     generic = next(op for op in module.walk() if op.name == "linalg.generic")
-    from xdsl.dialects import arith
 
     generic.body.block.insert_op_before(
         arith.MuliOp(generic.body.block.args[0], generic.body.block.args[0]), generic.body.block.last_op
@@ -128,8 +128,6 @@ def test_a_real_parallel_clamp_is_not_a_storage_selector():
 
 @pytest.mark.parametrize("floating", [False, True])
 def test_boundary_exposure_proves_a_closed_index_fill_before_splitting_its_tuple(floating):
-    from merlin.llvmlower.structural_folds import normalize_singleton_boundaries
-
     module = source("f32", "0xFF800000", "cmpf ogt", "cmpf oeq", nan=True) if floating else source()
     assert normalize_singleton_boundaries(module) == 1
     assert returned(module).owner.name == "tensor.splat"
@@ -138,6 +136,4 @@ def test_boundary_exposure_proves_a_closed_index_fill_before_splitting_its_tuple
 
 
 def test_boundary_exposure_does_not_erase_repeated_index_arithmetic():
-    from merlin.llvmlower.structural_folds import normalize_singleton_boundaries
-
     assert_unchanged(source(extent=2), normalize_singleton_boundaries)

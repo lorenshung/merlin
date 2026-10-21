@@ -6,6 +6,9 @@ import pytest
 from mlir_fixtures import forward, generic
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
+from merlin.llvmlower.fixed_point_ir import finite_grid
+from merlin.llvmlower.floating_components import rewrite_floating_components
+from merlin.llvmlower.integer_components import rewrite_integer_components
 from merlin.llvmlower.static_polynomials import PolynomialRefusal, analyze_static_polynomial
 
 
@@ -81,10 +84,6 @@ def test_projected_bilinear_domain_keeps_seed_and_output_permutation():
 
 
 def test_wide_polynomial_gathers_retain_full_fixed_point_width():
-    from merlin.llvmlower.fixed_point_ir import finite_grid
-    from merlin.llvmlower.floating_components import rewrite_floating_components
-    from merlin.llvmlower.integer_components import rewrite_integer_components
-
     op = source("%p=arith.mulf %af,%bf : f32")
     module = op
     while module.parent_op() is not None:

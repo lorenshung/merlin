@@ -4,6 +4,7 @@ import pytest
 from mlir_fixtures import forward, generic
 
 from merlin.frontends.linalg_mlir import parse_mlir_file
+from merlin.targetgen.closed_scalar import evaluate
 from merlin.targetgen.source_power_specialization import specialize
 
 
@@ -209,8 +210,6 @@ def unit_power(chain, output):
     ],
 )
 def test_unit_power_copy_keeps_the_programs_conversion_chain(tmp_path, source, chain, ops, word, value):
-    from merlin.targetgen.closed_scalar import evaluate
-
     fixture(tmp_path, unit_power(chain, "f32"), source=source)
     assert specialize(tmp_path, report())["family"] == "storage_copy_or_declared_conversion"
     body = rewritten_body(tmp_path)

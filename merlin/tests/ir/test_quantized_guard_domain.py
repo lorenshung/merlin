@@ -5,6 +5,8 @@ from fractions import Fraction
 import pytest
 from mlir_fixtures import assert_unchanged, forward
 from mlir_fixtures import generic as build_generic
+from xdsl.dialects import tensor
+from xdsl.dialects.builtin import ArrayAttr, FloatAttr, StringAttr, f64
 
 from merlin.common.mlir_query import op_name
 from merlin.llvmlower.quantized_guard_domain import Unproved, canonicalize_quantized_affine, prove_affine
@@ -97,7 +99,6 @@ def test_missing_domain_is_conditional_only_and_never_a_rewrite():
 
 def test_floating_escape_prevents_rational_signed_zero_canonicalization():
     module = source()
-    from xdsl.dialects import tensor
 
     op = generic(module)
     # A native floating consumer observes signed zeros / intermediate RNE.
@@ -166,12 +167,10 @@ def test_reduction_guard_requires_complete_finite_linear_domain(options):
 
 def test_large_declared_reduction_domain_refuses_before_guard_removal():
     module = summed_guard()
-    from xdsl.dialects.builtin import FloatAttr, StringAttr, f64
 
     dq = next(o for o in module.walk() if op_name(o) == "quant_ext.dequantize_per_tensor")
     scale = 2**120
     dq.operands[1].owner.operands[0].owner.properties["value"] = FloatAttr(float(scale), f64)
-    from xdsl.dialects.builtin import ArrayAttr
 
     dq.attributes["prov.quant.scale_numerator"] = ArrayAttr([StringAttr(str(scale))])
     dq.attributes["prov.quant.scale_denominator"] = ArrayAttr([StringAttr("1")])

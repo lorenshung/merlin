@@ -3,7 +3,8 @@
 from mlir_fixtures import forward, generic, returned
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.targetgen.closed_scalar import fold_closed_generics, fold_unit_scales
+from merlin.targetgen.closed_scalar import evaluate, fold_closed_generics, fold_unit_scales, interval
+from merlin.targetgen.core_aten_numeric import normalize_closed_identities
 
 
 def program(body, ins="%c"):
@@ -44,8 +45,6 @@ def test_unit_scale_is_an_exact_identity():
 
 
 def test_round_trip_through_a_copied_unit_scale_is_the_input():
-    from merlin.targetgen.core_aten_numeric import normalize_closed_identities
-
     # Frontend form of f16 x * 1.0: widen (and scale) in one generic, narrow in the next.
     prelude = "%one = arith.constant 1.0 : f32\n%s = tensor.splat %one : tensor<4xf32>\n"
     widen = generic(
@@ -66,7 +65,6 @@ def test_round_trip_through_a_copied_unit_scale_is_the_input():
 
 def test_integer_conversions_reinterpret_the_source_word():
     # sitofp/extsi read the word as two's complement (i1 true is -1); uitofp/extui read it unsigned.
-    from merlin.targetgen.closed_scalar import evaluate, interval
 
     module = parse_mlir_text("""module { func.func @f(%b: i1, %w: i8) -> (f32, i32, f32, i32, f32, f32) {
       %s = arith.sitofp %b : i1 to f32

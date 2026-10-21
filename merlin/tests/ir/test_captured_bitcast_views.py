@@ -1,8 +1,13 @@
 """Storage views need typed trace identity and may not change visible aliases."""
-import hashlib,json
+import hashlib
+import json
+
 import pytest
-from merlin.frontends.linalg_mlir import parse_mlir_text
+from xdsl.dialects import arith, memref
+from xdsl.dialects.builtin import IndexType, IntegerType, MemRefType
+
 from merlin.frontends.bitcast_views import lower_captured_bitcast_views
+from merlin.frontends.linalg_mlir import parse_mlir_text
 
 
 def fixture(tmp_path,*,source='f32',destination='i32',dtype='int32',escape=False,target='aten.view.dtype'):
@@ -43,9 +48,6 @@ def test_unproved_views_stay_opaque(tmp_path,case):
 
 def test_effectful_tensor_clients_cannot_hide_a_storage_alias(tmp_path):
     module,meta=fixture(tmp_path)
-    from xdsl.dialects import arith,memref
-    from xdsl.dialects.builtin import IndexType,IntegerType,MemRefType
-    from xdsl.ir import BlockArgument
     function=next(op for op in module.walk() if op.name=='func.func' and op.sym_name.data=='forward')
     block=function.body.block;pointer=block.insert_arg(MemRefType(IntegerType(32),[1]),len(block.args))
     function.update_function_type()

@@ -2,7 +2,7 @@
 
 import pytest
 
-from merlin.targetgen.native_ieee_certificate import convert_word, verify_outputs
+from merlin.targetgen.native_ieee_certificate import boundary_words, convert_word, verify_outputs
 from merlin.targetgen.native_ieee_ir_check import conversion_function
 
 
@@ -17,8 +17,6 @@ from merlin.targetgen.native_ieee_ir_check import conversion_function
 )
 def test_emitted_conversion_matches_complete_storage_or_rounding_cells(source, target, policy):
     if source == "f32":
-        from merlin.targetgen.native_ieee_certificate import boundary_words
-
         words = boundary_words(target)
     else:
         words = range(65536)

@@ -5,6 +5,7 @@ from mlir_fixtures import forward, generic, pointwise, run_block
 
 from merlin.llvmlower.floating_components import rewrite_floating_components
 from merlin.llvmlower.integer_components import rewrite_integer_components
+from merlin.llvmlower.integer_float_boundaries import rewrite_integer_float_boundaries
 from merlin.targetgen.core_aten_components import unlowered_data_reductions
 
 
@@ -45,8 +46,6 @@ def test_fma_has_full_integer_producers_and_one_final_rounding(grids):
 @pytest.mark.parametrize("token", ["f16", "bf16"])
 @pytest.mark.parametrize("coefficient", [0, 257])
 def test_reduced_storage_scalar_coefficients_keep_their_finite_grid(token, coefficient):
-    from merlin.llvmlower.integer_float_boundaries import rewrite_integer_float_boundaries
-
     typ = f"tensor<1x{token}>"
     prelude = f"""%one=arith.constant 1.0 : f32
       %raw=arith.truncf %one : f32 to {token}

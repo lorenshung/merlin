@@ -4,7 +4,7 @@ import pytest
 from mlir_fixtures import assert_unchanged
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.structural_folds import fold_singleton_reductions
+from merlin.llvmlower.structural_folds import fold_singleton_reductions, normalize_singleton_boundaries
 
 
 def source(element, arithmetic, seed, *, extent=1, flags=""):
@@ -52,16 +52,12 @@ def test_non_singleton_non_identity_float_or_promised_reduction_is_retained(elem
 
 @pytest.mark.parametrize("element,bits", [("i1", 1), ("i8", 8), ("i32", 32), ("i64", 64)])
 def test_boundary_normalization_preserves_the_closed_integer_identity(element, bits):
-    from merlin.llvmlower.structural_folds import normalize_singleton_boundaries
-
     module = source(element, "maxui", 0)
     assert normalize_singleton_boundaries(module) == 1
     assert not any(op.name in {"linalg.reduce", "linalg.generic", "arith.maxui"} for op in module.walk())
 
 
 def test_boundary_normalization_retains_a_nonidentity_integer_computation():
-    from merlin.llvmlower.structural_folds import normalize_singleton_boundaries
-
     module = source("i8", "maxsi", 0)
     assert normalize_singleton_boundaries(module) == 1
     assert sum(op.name == "arith.maxsi" for op in module.walk()) == 1

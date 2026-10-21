@@ -6,6 +6,7 @@ from mlir_fixtures import forward, generic, run_block
 
 from merlin.llvmlower.fixed_point_ir import FORMAT
 from merlin.llvmlower.floating_components import rewrite_floating_components
+from merlin.llvmlower.ieee_aggregate import propagation_source
 from merlin.llvmlower.ieee_zero_division import rewrite_zero_division
 from merlin.targetgen.core_aten_components import unlowered_data_reductions
 
@@ -62,8 +63,6 @@ def test_zero_divisor_overlay_depends_on_the_computed_numerator(token, divisor):
 
 @pytest.mark.parametrize("token", ["f16", "bf16", "f32", "f64"])
 def test_aggregate_propagation_keeps_special_words_and_discards_finite_terms(token):
-    from merlin.llvmlower.ieee_aggregate import propagation_source
-
     source = module(token, "addf")
     op = next(op for op in source.walk() if op.name == "linalg.generic")
     propagation, proof = propagation_source(op, lambda value: (0, 2))
@@ -80,8 +79,6 @@ def test_aggregate_propagation_keeps_special_words_and_discards_finite_terms(tok
 
 
 def test_aggregate_finite_overflow_requires_host_instruction_order():
-    from merlin.llvmlower.ieee_aggregate import propagation_source
-
     source = module("f32", "addf")
     op = next(op for op in source.walk() if op.name == "linalg.generic")
     with pytest.raises(ValueError, match="host instruction order"):

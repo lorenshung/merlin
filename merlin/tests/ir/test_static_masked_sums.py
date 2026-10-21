@@ -6,6 +6,7 @@ from mlir_fixtures import assert_unchanged, forward, generic
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.integer_components import rewrite_integer_components
 from merlin.llvmlower.static_masked_sums import expose_static_masked_sums
+from merlin.llvmlower.structural_folds import fold_static_unit_indices
 from merlin.targetgen.native_unit_policy import construction_evidence
 
 
@@ -49,8 +50,6 @@ def test_float_order_nonzero_seed_and_overflow_promises_remain_unchanged(dtype, 
 
 @pytest.mark.parametrize("dtype", ["i8", "i32", "i64"])
 def test_unit_index_masks_are_exposed_before_their_coordinates_are_folded(dtype):
-    from merlin.llvmlower.structural_folds import fold_static_unit_indices
-
     module = parse_mlir_text(str(source(dtype)).replace("2x3", "1x3"))
     assert expose_static_masked_sums(module) == 1
     fold_static_unit_indices(module)

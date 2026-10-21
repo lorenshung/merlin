@@ -1,32 +1,37 @@
 """Plain exact rational readouts: extremes, ties, subnormals, executable arithmetic, literal and runtime biases."""
 
 import json
+import math
 import random
+import struct
 from fractions import Fraction
 
 import numpy as np
 import pytest
 from exact_readout_source import build_readout
 from mlir_fixtures import native_library, run_block
+from xdsl.dialects import arith, func
+from xdsl.dialects.builtin import (
+    ArrayAttr,
+    DenseIntOrFPElementsAttr,
+    FloatAttr,
+    IntegerAttr,
+    ModuleOp,
+    StringAttr,
+    TensorType,
+    UnitAttr,
+    f32,
+    f64,
+    i32,
+    i64,
+)
+from xdsl.ir import Block, Region
+
+from merlin.targetgen.exact_arithmetic import round_binary
+from merlin.tests.ir.test_fixed_point_ir import reference_bits
 
 
 def fixture(scales, *, size=513, floating=False, bias=False, **kwargs):
-    import math
-
-    from xdsl.dialects import func
-    from xdsl.dialects.builtin import (
-        ArrayAttr,
-        IntegerAttr,
-        ModuleOp,
-        StringAttr,
-        TensorType,
-        UnitAttr,
-        f32,
-        i32,
-        i64,
-    )
-    from xdsl.ir import Block, Region
-
     denominator = math.lcm(*(s.denominator // (s.denominator & -s.denominator) for s in scales))
     output_scale = None if floating else float(denominator)
     block = Block(arg_types=[TensorType(i32, [size, len(scales)]), *([TensorType(f32, [len(scales)])] if bias else [])])
@@ -47,8 +52,6 @@ def fixture(scales, *, size=513, floating=False, bias=False, **kwargs):
         }
     )
     if not floating:
-        from xdsl.dialects.builtin import FloatAttr, f64
-
         reader.attributes["prov.quant.output_scale"] = FloatAttr(output_scale, f64)
         for k, default in (("zero_point", 0), ("quant_min", -128), ("quant_max", 127)):
             reader.attributes[f"prov.quant.{k}"] = IntegerAttr(kwargs.get(k, default), i64)
@@ -111,10 +114,6 @@ def test_complete_small_numerator_domain():
     ],
 )
 def test_float_readout_bits(scale, bias):
-    import struct
-
-    from merlin.tests.ir.test_fixed_point_ir import reference_bits
-
     m, r = fixture([scale], floating=True, bias=bias)
     m.verify()
     rng = random.Random(731)
@@ -134,8 +133,6 @@ def test_float_readout_bits(scale, bias):
 
 @pytest.mark.parametrize("floating,bias", [(False, False), (True, False), (True, True)])
 def test_native_readout_against_rational_reference(tmp_path, floating, bias):
-    from merlin.targetgen.exact_arithmetic import round_binary
-
     scales = [
         Fraction(float(np.float32(0.03))) * Fraction(float(np.float32(0.02))),
         Fraction(float(np.float32(-0.017))),
@@ -160,8 +157,6 @@ def test_native_readout_against_rational_reference(tmp_path, floating, bias):
 
 @pytest.mark.parametrize("floating", [False, True])
 def test_captured_trace_annotations_do_not_change_scalar_semantics(floating):
-    from xdsl.dialects.builtin import ArrayAttr, StringAttr
-
     module, reader = fixture([Fraction(1, 2)], floating=floating)
     for inner in reader.body.walk():
         inner.attributes.update(
@@ -175,9 +170,6 @@ def test_captured_trace_annotations_do_not_change_scalar_semantics(floating):
 
 
 def freeze(module, reader, tmp_path, values, literal):
-    from xdsl.dialects import arith
-    from xdsl.dialects.builtin import DenseIntOrFPElementsAttr, StringAttr
-
     values = np.asarray(values, np.float32)
     if literal:
         old = reader.inputs[1]
@@ -198,8 +190,6 @@ def freeze(module, reader, tmp_path, values, literal):
 @pytest.mark.parametrize("floating", [False, True])
 @pytest.mark.parametrize("literal", [False, True])
 def test_frozen_per_channel_bias_native_and_changed_parameter(tmp_path, floating, literal):
-    from merlin.targetgen.exact_arithmetic import round_binary
-
     scales = [Fraction(1, 2), Fraction(17, 31) if not floating else Fraction(float(np.float32(0.03))), Fraction(-3, 8)]
     module, reader = fixture(scales, size=129, bias=True, floating=floating)
     biases = np.array([0.0, -0.25, 1.0], np.float32)

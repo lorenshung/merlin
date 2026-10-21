@@ -6,9 +6,11 @@ from fractions import Fraction
 import pytest
 from mlir_fixtures import forward, generic, pointwise
 
+from merlin.llvmlower.entry_weight_projection import _pure_dce
 from merlin.llvmlower.fixed_point_ir import finite_grid
 from merlin.llvmlower.floating_components import rewrite_floating_components
 from merlin.llvmlower.integer_components import rewrite_integer_components
+from merlin.targetgen.core_aten_components import unlowered_data_reductions
 
 
 @pytest.mark.parametrize("divisor", [0.5, 2.0, 3.0, -0.5])
@@ -108,9 +110,6 @@ def test_odd_division_retains_a_rounded_dyadic_grid_through_a_reshape(reassociat
 
 @pytest.mark.parametrize("values", [[0.0, 0.0], [2.0**-133, 2.0**127]])
 def test_bilinear_numerator_survives_reshape_and_following_scalar_arithmetic(values):
-    from merlin.llvmlower.entry_weight_projection import _pure_dce
-    from merlin.targetgen.core_aten_components import unlowered_data_reductions
-
     t = "tensor<1xf32>"
     prelude = f"""%z=arith.constant 0.0 : f32
         %seed=tensor.splat %z : tensor<1x1xf32>
@@ -140,8 +139,6 @@ def test_bilinear_numerator_survives_reshape_and_following_scalar_arithmetic(val
 
 
 def test_ieee_bit_epilogue_does_not_hide_the_complete_arithmetic_producer():
-    from merlin.targetgen.core_aten_components import unlowered_data_reductions
-
     module = pointwise(
         ["tensor<2xf32>"] * 2,
         "tensor<2xf32>",

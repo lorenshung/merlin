@@ -4,13 +4,14 @@
 import math
 import random
 
+import numpy as np
 import pytest
 from mlir_fixtures import emitter, float_value, forward, generic, pointwise, run_ops
 from xdsl.dialects.builtin import bf16, f16, f32, f64
 from xdsl.ir import Block
 
 from merlin.llvmlower.floating_components import rewrite_floating_components
-from merlin.llvmlower.ieee_pointwise import special
+from merlin.llvmlower.ieee_pointwise import dependence_proof, overlay, special
 
 
 @pytest.mark.parametrize("typ", [f16, bf16, f32, f64])
@@ -71,8 +72,6 @@ def test_explicit_special_words_match_native_cpu(typ, operation):
 
 
 def test_special_readout_does_not_taint_an_unread_shape_operand():
-    from merlin.llvmlower.ieee_pointwise import dependence_proof, overlay
-
     module = pointwise(["tensor<2xf32>"] * 3, "tensor<2xf32>", "%v=arith.addf %a,%b : f32")
     source = next(op for op in module.walk() if op.name == "linalg.generic")
     proof = dependence_proof(source)
@@ -84,10 +83,6 @@ def test_special_readout_does_not_taint_an_unread_shape_operand():
 
 
 def test_overlay_dependence_follows_permuted_and_broadcast_input_maps():
-    import numpy as np
-
-    from merlin.llvmlower.ieee_pointwise import dependence_proof
-
     maps = [f"affine_map<(d0,d1)->({m})>" for m in ("d1,d0", "d1", "d0,d1", "d0,d1")]
     ins = [("%x", "tensor<3x2xf32>"), ("%y", "tensor<3xf32>"), ("%unread", "tensor<2x3xf32>")]
     params = "%x: tensor<3x2xf32>, %y: tensor<3xf32>, %unread: tensor<2x3xf32>"
@@ -108,8 +103,6 @@ def test_overlay_dependence_follows_permuted_and_broadcast_input_maps():
 
 
 def test_overlay_refuses_reduction_dependence_without_a_closed_proof():
-    from merlin.llvmlower.ieee_pointwise import dependence_proof
-
     maps = ["affine_map<(d0)->(d0)>", "affine_map<(d0)->()>"]
     total = generic([("%x", "tensor<3xf32>")], "tensor<f32>", "%v=arith.addf %a,%acc : f32", maps=maps, iterators=["reduction"], out="%seed", acc="%acc")
     module = forward("%x: tensor<3xf32>,%seed: tensor<f32>", "tensor<f32>", total)

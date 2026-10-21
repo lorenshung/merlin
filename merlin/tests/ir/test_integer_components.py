@@ -6,10 +6,13 @@ import numpy as np
 import pytest
 from mlir_fixtures import assert_unchanged, forward, generic, pointwise, run_ops, signed
 from xdsl.dialects.builtin import IntegerType
+from xdsl.ir.affine import AffineDimExpr
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.boolean_components import rewrite_boolean_components
 from merlin.llvmlower.integer_components import rewrite_integer_components
+from merlin.llvmlower.integer_width_boundaries import preserve_integer_width_boundaries
+from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
 
 
 def module(dtype, expression):
@@ -19,7 +22,6 @@ def module(dtype, expression):
 
 def evaluate(module, arrays):
     """Small integer tensor interpreter over storage words; all generated tensors have identity maps."""
-    from xdsl.ir.affine import AffineDimExpr
 
     function = next(op for op in module.walk() if op.name == "func.func")
     values = {
@@ -112,8 +114,6 @@ def test_widening_keeps_the_carry_above_the_original_storage_width():
 
 
 def test_native_sign_transform_keeps_all_ieee_payload_bits_in_integer_literals():
-    from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
-
     source = pointwise(["tensor<4xf16>"], "tensor<4xf16>", "%v = arith.negf %a : f16")
     bounds, proofs = rewrite_native_sign_components(source)
     assert proofs == [
@@ -134,8 +134,6 @@ def test_native_sign_transform_keeps_all_ieee_payload_bits_in_integer_literals()
 
 @pytest.mark.parametrize("dtype,predicate,zero", [("f16", "olt", "0.0"), ("i64", "slt", "0")])
 def test_clamp_epilogue_preserves_source_comparison_and_payloads(dtype, predicate, zero):
-    from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
-
     cmp = "cmpf" if dtype == "f16" else "cmpi"
     source = pointwise(
         [f"tensor<4x{dtype}>"],
@@ -192,8 +190,6 @@ def test_window_reduction_ignores_unread_shape_operand():
 
 
 def test_declared_bfloat_nan_negation_uses_device_words_then_cpu_canonicalization():
-    from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
-
     source = pointwise(["tensor<4xbf16>"], "tensor<4xbf16>", "%v=arith.negf %a : bf16")
     bounds, proofs = rewrite_native_sign_components(source, canonical_bf16_nan=True)
     assert proofs[0]["nan_payload"] == "canonical_positive_quiet"
@@ -204,8 +200,6 @@ def test_declared_bfloat_nan_negation_uses_device_words_then_cpu_canonicalizatio
 
 
 def test_binary32_sign_words_preserve_nonfinite_payloads_without_quantization():
-    from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
-
     source = pointwise(["tensor<4xf32>"], "tensor<4xf32>", "%v=arith.negf %a : f32")
     bounds, proofs = rewrite_native_sign_components(source)
     assert proofs[0]["nan_payload"] == "preserved"
@@ -262,8 +256,6 @@ def test_real_frontend_uint8_cast_review_repro():
 
 
 def test_late_width_pass_does_not_split_generated_quotient_plumbing():
-    from merlin.llvmlower.integer_width_boundaries import preserve_integer_width_boundaries
-
     source = module(
         "i64", "%q=arith.divsi %a,%b : i64\n%t=arith.trunci %q : i64 to i32\n%v=arith.extsi %t : i32 to i64"
     )

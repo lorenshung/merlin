@@ -1,10 +1,12 @@
 """Uniform quantized zero needs a complete integral image and an exact divisor, read from the IR."""
 
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from merlin.frontends.linalg_mlir import parse_mlir_file
+from merlin.targetgen.quantized_literal_reference import qualify
 from merlin.targetgen.source_integer_remainder import specialize
 
 SPEC = Path(__file__).resolve().parents[3] / "examples/gemmini/target/software-spec.yaml"
@@ -87,10 +89,6 @@ def test_special_divisor_unproved_domain_or_effect_refuses(tmp_path, divisor, op
 
 
 def test_oracle_qualification_failure_does_not_turn_into_a_payload_dependent_host_choice(tmp_path, monkeypatch):
-    from types import SimpleNamespace
-
-    from merlin.targetgen.quantized_literal_reference import qualify
-
     monkeypatch.setattr(
         "merlin.targetgen.core_aten_numeric._source_reference",
         lambda *a: SimpleNamespace(returncode=1, stderr="oracle unavailable"),
