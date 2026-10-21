@@ -285,20 +285,6 @@ def test_window_reduction_ignores_unread_shape_operand():
             )
 
 
-def test_proved_zero_digits_can_be_omitted_without_changing_exact_values():
-    source = module("i64", "%v = arith.addi %a, %b : i64")
-    function = next(op for op in source.walk() if op.name == "func.func")
-    values = [1 << 48, -(1 << 48), 0, 1]
-    plans = rewrite_integer_components(
-        source,
-        limb_attribute="test.limb",
-        input_bounds=[1 << 48, 0],
-        known_zero_limbs={function.body.block.args[0]: set(range(1, 6))},
-    )
-    assert len(plans) == 3
-    assert evaluate(source, [values, [0] * 4]) == values
-
-
 def test_declared_bfloat_nan_negation_uses_device_words_then_cpu_canonicalization():
     from merlin.llvmlower.native_sign_components import rewrite_native_sign_components
 

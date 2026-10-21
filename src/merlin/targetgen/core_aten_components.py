@@ -554,7 +554,7 @@ def prepare_integer_components(
         )
         signature = dict(
             family=family,
-            numerical_family="F5" if boolean_count else "F4" if any(p["family"] == "F4" for p in plans) else "F2",
+            numerical_family="F5" if boolean_count else "F2",
             operand_dtype="i8",
             accum_dtype="i32",
             readout_dtype="i32",
@@ -590,7 +590,7 @@ def prepare_integer_components(
         )
     plan = dict(
         status="admitted",
-        numerical_family="F5" if boolean_count else "F4" if any(p["family"] == "F4" for p in plans) else "F2",
+        numerical_family="F5" if boolean_count else "F2",
         literal_zero_producers_folded=folded_zero_producers,
         quantized_contractions=0,
         native_contractions=0,

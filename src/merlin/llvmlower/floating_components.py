@@ -13,11 +13,8 @@ def rewrite_floating_components(
     module,
     input_grids,
     *,
-    complex_inputs=(),
     allow_reassociation=False,
     known_grids=None,
-    input_values=None,
-    zero_limbs=None,
     ieee_pointwise=False,
     quantized_contract=None,
 ):
@@ -83,17 +80,9 @@ def rewrite_floating_components(
     packing_limit = i64.width.data - 1 if wide_packing else 52
     reconstruction_limit = i128.width.data - 8
 
-    complex_sources = {function.body.block.args[i] for i in complex_inputs}
-    components = {}
     bounds = {}
     proofs = []
     raw_forms = {}
-
-    from merlin.llvmlower.floating_component_ir import payload_zero_limb_recorder
-
-    record_zero_limbs = payload_zero_limb_recorder(
-        function.body.block.args, input_values or (), zero_limbs, i64, wide_packing
-    )
 
     def floating(value):
         return hasattr(value.type, "element_type") and str(value.type.element_type) in FORMAT
@@ -105,10 +94,6 @@ def rewrite_floating_components(
         exponent = min((e for e, b in items if b), default=0)
         bound = max((b * (1 << (e - exponent)) for e, b in items if b), default=0)
         return (exponent, bound) if bound.bit_length() <= packing_limit else None
-
-    from merlin.llvmlower.floating_component_ir import component_taggers
-
-    product_component, linear_component = component_taggers(components, complex_sources)
 
     def scalar_constant(value):
         """Interpret closed scalar coefficient conversions at their typed RNE boundaries."""
@@ -268,8 +253,6 @@ def rewrite_floating_components(
 
         result = point([value], TensorType(i64, value.type.get_shape()), scalar, operations)
         bounds[result] = aligned
-        if not ieee_pointwise:
-            record_zero_limbs(result, value, exponent)
         return result, aligned
 
     def zero(shape, operations):
@@ -287,8 +270,6 @@ def rewrite_floating_components(
         operations.extend([literal, changed])
         if value in bounds:
             bounds[changed.result] = bounds[value]
-        if zero_limbs is not None and value in zero_limbs:
-            zero_limbs[changed.result] = zero_limbs[value]
         return changed.result
 
     from merlin.kernels.shapes import observe_contractions
@@ -300,7 +281,6 @@ def rewrite_floating_components(
         contractions=contractions,
         grids=grids,
         raw_forms=raw_forms,
-        components=components,
         proofs=proofs,
         packing_limit=packing_limit,
         wide_packing=wide_packing,
@@ -501,11 +481,6 @@ def rewrite_floating_components(
                 iterator_types=op.get_iterator_types(),
                 result_types=[seed.type],
             )
-            from xdsl.dialects.builtin import StringAttr
-
-            tag = product_component(operands)
-            if tag:
-                integer.attributes["merlin.exact_component"] = StringAttr(tag)
             operations.append(integer)
             bounds[integer.results[0]] = bound
             publish(op, integer.results[0], exponent, bound, operations)
@@ -633,8 +608,6 @@ def rewrite_floating_components(
                 operations.extend([empty, carrier])
                 expanded.append(carrier.results[0])
                 bounds[carrier.results[0]] = bound
-                if zero_limbs is not None and value in zero_limbs:
-                    zero_limbs[carrier.results[0]] = zero_limbs[value]
             batch_shape = [prod(shape), 1, 1]
             expanded = [reshape(v, batch_shape, operations) for v in expanded]
             batch_seed = zero(batch_shape, operations)
@@ -659,11 +632,6 @@ def rewrite_floating_components(
                 ),
                 result_types=[batch_seed.type],
             )
-            from xdsl.dialects.builtin import StringAttr
-
-            tag = product_component(input_values)
-            if tag:
-                integer.attributes["merlin.exact_component"] = StringAttr(tag)
             operations.append(integer)
             bounds[integer.results[0]] = integer_bound
             result = reshape(integer.results[0], shape, operations)
@@ -724,11 +692,6 @@ def rewrite_floating_components(
             iterator_types=op.get_iterator_types(),
             result_types=[seed.type],
         )
-        from xdsl.dialects.builtin import StringAttr
-
-        tag = linear_component(input_values, arithmetic.name)
-        if tag:
-            integer.attributes["merlin.exact_component"] = StringAttr(tag)
         operations.append(integer)
         bounds[integer.results[0]] = integer_bound
         publish(

@@ -12,7 +12,7 @@ from __future__ import annotations
 from math import prod
 
 
-def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known_bounds=None, known_zero_limbs=None):
+def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known_bounds=None):
     import json
 
     from xdsl.dialects import arith, tensor
@@ -43,10 +43,8 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
     expose_reduce_domains(module)
     preserve_integer_width_boundaries(module, mathematical_sources=bounds)
 
-    def indices(value, digits):
-        omitted = (known_zero_limbs or {}).get(value, set())
-        selected = [j for j in range(digits) if j not in omitted]
-        return selected or [0]
+    def indices(digits):
+        return list(range(digits)) or [0]
 
     def width(value):
         typ = value.type
@@ -125,7 +123,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
 
         return point([source], TensorType(i8, source.type.get_shape()), scalar)
 
-    def mark(producer, entries, component=None):
+    def mark(producer, entries):
         from merlin.llvmlower.additive_regions import positive_zero_seed
 
         entries = list(entries)
@@ -144,8 +142,6 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
                 # Scaling zero by that exponent is exact for every limb index.
                 entries.append(dict(operand=index, index=0, count=1, exponent=zero_exponent))
         plan = dict(version=1, family="F2", radix=256, inputs=entries)
-        if component is not None:
-            plan.update(family="F4", component=component)
         producer.attributes[limb_attribute] = StringAttr(json.dumps(plan, sort_keys=True))
         plans.append(plan)
 
@@ -258,7 +254,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         digits = []
         for source, n in zip(op.operands[:2], counts, strict=True):
             values = {}
-            for index in indices(source, n):
+            for index in indices(n):
                 split_ops, limb = digit(source, index)
                 operations.extend(split_ops)
                 values[index] = limb
@@ -288,7 +284,6 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
                 mark(
                     producer,
                     [dict(operand=i, index=index, count=counts[i], exponent=0) for i, index in enumerate((j, k))],
-                    getattr(op.attributes.get("merlin.exact_component"), "data", None),
                 )
                 operations.append(producer)
                 result = weighted(result, producer.results[0], exponent, operations)
@@ -323,7 +318,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
         bits = width(op.results[0])
         digits = count(source, mathematical=bits > width(source))
         operations, result = [], seed
-        for index in indices(source, digits):
+        for index in indices(digits):
             if 8 * index >= bits:
                 continue
             split_ops, limb = digit(source, index)
@@ -353,7 +348,6 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
             mark(
                 producer,
                 [dict(operand=source_index, index=index, count=digits, exponent=0)],
-                getattr(op.attributes.get("merlin.exact_component"), "data", None),
             )
             operations.append(producer)
             result = weighted(result, producer.results[0], 8 * index, operations)
@@ -437,7 +431,7 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
                     remaining = (remaining - digit_coefficient) // 256
                     position += 1
             for index, plane, factor in (
-                (index, plane, factor) for index in indices(source, digits) for plane, factor in planes
+                (index, plane, factor) for index in indices(digits) for plane, factor in planes
             ):
                 exponent = 8 * (index + plane)
                 if exponent >= bits:
@@ -463,7 +457,6 @@ def rewrite_integer_components(module, *, limb_attribute, input_bounds=(), known
                 mark(
                     producer,
                     [dict(operand=0, index=index, count=digits, exponent=0)],
-                    getattr(op.attributes.get("merlin.exact_component"), "data", None),
                 )
                 operations.append(producer)
                 result = weighted(result, producer.results[0], exponent, operations)

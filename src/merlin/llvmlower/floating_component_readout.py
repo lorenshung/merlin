@@ -20,7 +20,6 @@ def component_readout(
     contractions,
     grids,
     raw_forms,
-    components,
     proofs,
     packing_limit,
     wide_packing,
@@ -200,9 +199,6 @@ def component_readout(
                 if largest.bit_length() <= packing_limit:
                     grids[result] = (quantum, largest)
         raw_forms[result] = (integer, exponent, integer_bound, denominator)
-        tag = getattr(integer.owner.attributes.get("merlin.exact_component"), "data", None)
-        if tag:
-            components[result] = tag
         proofs.append(
             dict(
                 source_operation=op.name,
