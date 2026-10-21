@@ -31,25 +31,16 @@ def test_fractional_and_unproved_images_keep_the_rounding(options):
     assert_unchanged(source(**options), fold_integral_float_rounding)
 
 
-@pytest.mark.parametrize("escape", [False, True])
-def test_unit_remainder_preserves_observable_negative_zero(escape):
-    module = parse_mlir_text(f"""module {{func.func @forward(%x:i64) -> f32 {{
-      %f=arith.sitofp %x : i64 to f32
-      %one=arith.constant 1.0 : f32
-      %r="arith.remf"(%f,%one) : (f32,f32)->f32
-      %sub=arith.subf %f,%r : f32
-      return {"%r" if escape else "%sub"} : f32
+# A remainder that escapes keeps its observable negative zero; an overflowing half conversion
+# cannot justify a zero remainder.
+@pytest.mark.parametrize("dtype,returned,folds", [("f32", "%sub", True), ("f32", "%r", False), ("f16", "%sub", False)])
+def test_unit_remainder_preserves_observable_negative_zero(dtype, returned, folds):
+    module = parse_mlir_text(f"""module {{func.func @forward(%x:i64) -> {dtype} {{
+      %f=arith.sitofp %x : i64 to {dtype}
+      %one=arith.constant 1.0 : {dtype}
+      %r="arith.remf"(%f,%one) : ({dtype},{dtype})->{dtype}
+      %sub=arith.subf %f,%r : {dtype}
+      return {returned} : {dtype}
     }} }}""")
-    assert fold_integral_float_rounding(module) == int(not escape)
-    assert any(getattr(getattr(op, "op_name", None), "data", op.name) == "arith.remf" for op in module.walk()) is escape
-
-
-def test_an_overflowing_half_conversion_cannot_justify_a_zero_remainder():
-    module = parse_mlir_text("""module {func.func @forward(%x:i64) -> f16 {
-      %f=arith.sitofp %x : i64 to f16
-      %one=arith.constant 1.0 : f16
-      %r="arith.remf"(%f,%one) : (f16,f16)->f16
-      %sub=arith.subf %f,%r : f16
-      return %sub : f16
-    }}""")
-    assert fold_integral_float_rounding(module) == 0
+    assert fold_integral_float_rounding(module) == int(folds)
+    assert any(getattr(getattr(op, "op_name", None), "data", op.name) == "arith.remf" for op in module.walk()) != folds

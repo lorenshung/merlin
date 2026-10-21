@@ -110,20 +110,29 @@ def test_source_literal_folding_preserves_typed_rne_and_zero_sign(operation, lef
     assert math.copysign(1.0, actual) == math.copysign(1.0, expected)
 
 
-def test_corrupted_double_rounding_certificate_refuses(tmp_path, monkeypatch):
+def resealed_certificate(tmp_path, monkeypatch, edit):
+    """Install a copy of the native IEEE certificate with ``edit`` applied and its digest resealed."""
     import json
     from pathlib import Path
 
     import merlin.targetgen.native_ieee_certificate as checker
 
     document = json.loads(Path(checker.__file__).with_suffix(".json").read_text())
-    document["double_rounding"]["f16"]["intermediate_precision"] = 23
+    edit(document)
     document.pop("content_sha256")
     document["content_sha256"] = checker.digest(document)
     fixture = tmp_path / "certificate.json"
     fixture.write_text(json.dumps(document))
     monkeypatch.setattr(checker, "__file__", str(fixture.with_suffix(".py")))
     monkeypatch.setattr(checker, "proof_sources", lambda: document["sources"])
+    return checker
+
+
+def test_corrupted_double_rounding_certificate_refuses(tmp_path, monkeypatch):
+    def corrupt(document):
+        document["double_rounding"]["f16"]["intermediate_precision"] = 23
+
+    checker = resealed_certificate(tmp_path, monkeypatch, corrupt)
     with pytest.raises(ValueError, match="double rounding precision"):
         checker.certificate()
 
@@ -234,22 +243,14 @@ def test_dropped_destination_layout_cannot_claim_a_copy_profile(tmp_path, monkey
 
 def test_library_is_hashed_once_per_process_until_it_changes(tmp_path, monkeypatch):
     import hashlib
-    import json
-    from pathlib import Path
-
-    import merlin.targetgen.native_ieee_certificate as checker
 
     library = tmp_path / "libtorch_cpu.so"
     library.write_bytes(b"certified library")
-    document = json.loads(Path(checker.__file__).with_suffix(".json").read_text())
-    document["host"]["library"] = str(library)
-    document["host"]["library_sha256"] = hashlib.sha256(library.read_bytes()).hexdigest()
-    document.pop("content_sha256")
-    document["content_sha256"] = checker.digest(document)
-    fixture = tmp_path / "certificate.json"
-    fixture.write_text(json.dumps(document))
-    monkeypatch.setattr(checker, "__file__", str(fixture.with_suffix(".py")))
-    monkeypatch.setattr(checker, "proof_sources", lambda: document["sources"])
+
+    def bind(document):
+        document["host"].update(library=str(library), library_sha256=hashlib.sha256(library.read_bytes()).hexdigest())
+
+    checker = resealed_certificate(tmp_path, monkeypatch, bind)
     hashed = []
     file_digest = hashlib.file_digest
 
