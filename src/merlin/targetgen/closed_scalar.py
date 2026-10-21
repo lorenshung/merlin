@@ -122,21 +122,17 @@ def _evaluate(value, environment, memo=None):
         return _evaluate(v, environment, memo)
 
     out = UNKNOWN
-    if name in {"arith.sitofp", "arith.uitofp"}:
+    if name in {"arith.sitofp", "arith.uitofp", "arith.extui", "arith.extsi", "arith.trunci"}:
         x = get(owner.operands[0])
         if x is not UNKNOWN:
             source = _element_type(owner.operands[0])
             integer = int(x)
-            if name == "arith.uitofp" and isinstance(source, IntegerType):
-                integer %= 1 << source.width.data
-            out = round_to(integer, result_type)
-    elif name in {"arith.extui", "arith.extsi", "arith.trunci"}:
-        x = get(owner.operands[0])
-        if x is not UNKNOWN:
-            source = _element_type(owner.operands[0])
-            integer = int(x)
-            if name == "arith.extui" and isinstance(source, IntegerType):
-                integer %= 1 << source.width.data
+            if isinstance(source, IntegerType) and name != "arith.trunci":
+                # Reinterpret the source word: unsigned, or two's complement (i1 true is -1).
+                width = source.width.data
+                integer %= 1 << width
+                if name in {"arith.sitofp", "arith.extsi"} and integer >= 1 << (width - 1):
+                    integer -= 1 << width
             out = round_to(integer, result_type)
     elif name in {"arith.extf", "arith.truncf"}:
         x = get(owner.operands[0])
@@ -290,7 +286,13 @@ def _interval(value, memo=None, active=None):
                     break
         elif name in {"arith.uitofp", "arith.sitofp"}:
             source = get(owner.operands[0])
-            if source is not None and (name == "arith.sitofp" or source.empty or source.lo >= 0):
+            typ = _element_type(owner.operands[0])
+            if source is not None and not source.empty and isinstance(typ, IntegerType):
+                # The interval must lie inside the range of the interpreted source word (i1 true is -1 signed).
+                width = typ.width.data
+                lo, hi = (0, (1 << width) - 1) if name == "arith.uitofp" else (-(1 << (width - 1)), (1 << (width - 1)) - 1)
+                source = source if lo <= source.lo and source.hi <= hi else None
+            if source is not None:
                 if source.empty:
                     out = source
                 else:

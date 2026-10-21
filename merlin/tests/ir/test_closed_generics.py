@@ -78,3 +78,25 @@ def test_round_trip_through_a_copied_unit_scale_is_the_input():
     normalize_closed_identities(module)
     returned = next(op for op in module.walk() if op.name == "func.return")
     assert returned.operands[0] is next(op for op in module.walk() if op.name == "func.func").body.block.args[0]
+
+
+def test_integer_conversions_reinterpret_the_source_word():
+    # sitofp/extsi read the word as two's complement (i1 true is -1); uitofp/extui read it unsigned.
+    from merlin.targetgen.closed_scalar import evaluate, interval
+
+    module = parse_mlir_text("""module { func.func @f(%b: i1, %w: i8) -> (f32, i32, f32, i32, f32, f32) {
+      %s = arith.sitofp %b : i1 to f32
+      %e = arith.extsi %b : i1 to i32
+      %u = arith.uitofp %b : i1 to f32
+      %z = arith.extui %w : i8 to i32
+      %n = arith.sitofp %w : i8 to f32
+      %t = arith.constant true
+      %k = arith.sitofp %t : i1 to f32
+      func.return %s, %e, %u, %z, %n, %k : f32, i32, f32, i32, f32, f32
+    } }""")
+    function = next(op for op in module.walk() if op.name == "func.func")
+    b, w = function.body.block.args
+    s, e, u, z, n, k = function.body.block.last_op.operands
+    assert [evaluate(v, {b: True, w: 255}) for v in (s, e, u, z, n)] == [-1.0, -1, 1.0, 255, -1.0]
+    assert [evaluate(v, {b: True, w: -1}) for v in (z, n)] == [255, -1.0]
+    assert interval(k) is None  # the literal word 1 is outside the signed i1 range; no unsound bound
