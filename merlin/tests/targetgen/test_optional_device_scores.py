@@ -33,54 +33,19 @@ def test_optional_host_correctness_and_device_evidence_remain_separate():
     assert not host_guards_pass(score)
 
 
+BINDINGS = "case source software_spec host_capabilities catalog target_ir object elf trace".split()
+CHECKS = "private_answers selected_policy admission source schedule partial_sums raw_i32 ordered_f32 full_call"
+
+
 def _qualified_row():
     # Synthetic trusted evaluator output, not an authenticated proof fixture.
-    bindings = {
-        name: "a" * 64
-        for name in (
-            "case_sha256",
-            "source_sha256",
-            "software_spec_sha256",
-            "host_capabilities_sha256",
-            "catalog_sha256",
-            "target_ir_sha256",
-            "object_sha256",
-            "elf_sha256",
-            "trace_sha256",
-        )
-    }
-    return {
-        "status": "pass",
-        "lane": "device",
-        "executed_instructions": 7,
-        "scored": True,
-        "full_call_execution_identity": {
-            name: bindings[name] for name in ("case_sha256", "source_sha256", "elf_sha256", "trace_sha256")
-        },
-        "spec_qualified_device": {
-            "schema": "merlin.spec_qualified_device.v1",
-            "status": "qualified",
-            "policy": "spec_int8",
-            "scope": "selected_software_spec",
-            "reasons": [],
-            "bindings": bindings,
-            "checks": {
-                name: True
-                for name in (
-                    "private_answers",
-                    "selected_policy",
-                    "admission",
-                    "source",
-                    "schedule",
-                    "partial_sums",
-                    "raw_i32",
-                    "ordered_f32",
-                    "full_call",
-                    "device_binding",
-                )
-            },
-        },
-    }
+    bindings = dict.fromkeys((f"{name}_sha256" for name in BINDINGS), "a" * 64)
+    identity = {name: bindings[name] for name in ("case_sha256", "source_sha256", "elf_sha256", "trace_sha256")}
+    receipt = dict(schema="merlin.spec_qualified_device.v1", status="qualified", policy="spec_int8")
+    receipt.update(scope="selected_software_spec", reasons=[], bindings=bindings)
+    receipt["checks"] = dict.fromkeys(CHECKS.split() + ["device_binding"], True)
+    row = {"status": "pass", "lane": "device", "executed_instructions": 7, "scored": True}
+    return {**row, "full_call_execution_identity": identity, "spec_qualified_device": receipt}
 
 
 def test_qualified_subset_survives_rollup_without_changing_correctness_or_guards():
