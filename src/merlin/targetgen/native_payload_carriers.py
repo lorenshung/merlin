@@ -145,15 +145,20 @@ class LiteralPayloads:
                 self.unknown_operators.add(name)
             nodes[value] = (seed, edges, arithmetic)
             pending.extend(edges)
+        # Only the new nodes and their memoized edges take part; copying the
+        # whole memo on every call made classification quadratic in program size.
         reverse = defaultdict(set)
-        masks = dict(self.memo)
-        anchored = set(self.memo)
+        masks = {}
+        anchored = set()
         for value, (seed, edges, _) in nodes.items():
             masks[value] = seed
             if not edges:
                 anchored.add(value)
             for edge in edges:
                 reverse[edge].add(value)
+                if edge in self.memo:
+                    masks[edge] = self.memo[edge]
+                    anchored.add(edge)
         work = deque(anchored)
         while work:
             for parent in reverse[work.popleft()]:
