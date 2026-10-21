@@ -6,10 +6,15 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from targetgen_fixtures import measured_routing
 
 from merlin.targetgen import capsule_common
 from merlin.targetgen import core_aten_capsules as C
 from merlin.targetgen.core_aten_capture import case_capture_name
+
+
+def synthetic_routing(case_id):
+    return measured_routing(case_id, "synthetic", 10, [{"source": "test"}])
 
 
 @pytest.fixture
@@ -585,19 +590,7 @@ def test_selected_numeric_flow_requires_exact_reference(packaged, monkeypatch, l
     }
     capsule["operation"]["attributes"]["numeric_flow"] = "spec_int8"
     monkeypatch.setattr(C, "load_private", lambda *args: copy.deepcopy(golden))
-    routing = dict(
-        lane="device",
-        routed=True,
-        target="synthetic",
-        routed_operations=[{"source": "test"}],
-        execution_evidence=dict(
-            status="measured",
-            attribution="single_case_shard",
-            executed_instructions=10,
-            target="synthetic",
-            case_id=record["case_id"],
-        ),
-    )
+    routing = synthetic_routing(record["case_id"])
     monkeypatch.setattr("merlin.targetgen.core_aten_device.verify_execution_evidence", lambda evidence: True)
     assert C.grade_readback(capsule, raw, semantic_readback=readback, routing=routing)["passed_count"] == 1
     assert C.grade_readback(capsule, raw, semantic_readback=readback)["passed_count"] == 0
@@ -611,19 +604,7 @@ def test_selected_numeric_flow_requires_exact_reference(packaged, monkeypatch, l
 
 def test_full_call_rejects_unattributed_device_execution(packaged, monkeypatch):
     capsule, raw, readback, _, _ = packaged
-    routing = dict(
-        lane="device",
-        routed=True,
-        target="synthetic",
-        routed_operations=[{"source": "test"}],
-        execution_evidence=dict(
-            status="measured",
-            attribution="single_case_shard",
-            executed_instructions=10,
-            target="synthetic",
-            case_id="wrong-case",
-        ),
-    )
+    routing = synthetic_routing("wrong-case")
     verdict = C.grade_readback(capsule, raw, semantic_readback=readback, routing=routing)
     assert verdict["passed_count"] == 0
     assert next(iter(verdict["cases"].values()))["evidence_error"]
@@ -707,19 +688,7 @@ def test_native_numeric_capsule_requires_complete_admission_and_independent_bits
     )
     capsule["operation"]["attributes"]["numeric_flow"] = "spec_int8"
     monkeypatch.setattr(C, "load_private", lambda *args: copy.deepcopy(golden))
-    routing = dict(
-        lane="device",
-        routed=True,
-        target="synthetic",
-        routed_operations=[{"source": "test"}],
-        execution_evidence=dict(
-            status="measured",
-            attribution="single_case_shard",
-            executed_instructions=10,
-            target="synthetic",
-            case_id=record["case_id"],
-        ),
-    )
+    routing = synthetic_routing(record["case_id"])
     monkeypatch.setattr("merlin.targetgen.core_aten_device.verify_execution_evidence", lambda evidence: True)
     verdict = C.grade_readback(capsule, raw, semantic_readback=readback, routing=routing)
     row = next(iter(verdict["cases"].values()))

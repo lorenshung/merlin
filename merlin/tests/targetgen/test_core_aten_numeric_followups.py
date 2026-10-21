@@ -5,6 +5,7 @@ import subprocess
 
 import numpy as np
 import pytest
+from targetgen_fixtures import measured_routing
 
 
 def run_torch(script):
@@ -133,19 +134,7 @@ def test_native_integer_grade_qualifies_only_exact_measured_device(monkeypatch, 
             host_int8_narrowing=narrowing,
             integer_reference=dict(status="prepared", engine="independent", expected_output_bytes={"0": raw.hex()}),
         ),
-        routing=dict(
-            lane="device",
-            routed=True,
-            target="gemmini",
-            routed_operations=[{}],
-            execution_evidence=dict(
-                case_id="aten._int_mm.default",
-                status="measured",
-                attribution="single_case_shard",
-                executed_instructions=1,
-                target="gemmini",
-            ),
-        ),
+        routing=measured_routing("aten._int_mm.default"),
     )
     result = grade_core_aten_batch(dict(cases=[record]), [raw])
     verdict = result["cases"][record["overload"]]
@@ -275,19 +264,7 @@ def test_contraction_free_quantized_execution_keeps_its_exact_reference_policy(m
             quantized_non_contraction_sites=1,
             integer_reference=dict(status="prepared", engine="independent", expected_output_bytes={"0": raw.hex()}),
         ),
-        routing=dict(
-            lane="device",
-            routed=True,
-            target="gemmini",
-            routed_operations=[{}],
-            execution_evidence=dict(
-                case_id="aten._to_copy.default",
-                status="measured",
-                attribution="single_case_shard",
-                executed_instructions=1,
-                target="gemmini",
-            ),
-        ),
+        routing=measured_routing("aten._to_copy.default"),
     )
     result = grade_core_aten_batch(dict(cases=[record]), [raw])
     assert result["cases"][record["overload"]]["numeric_execution_policy"] == "spec_int8"

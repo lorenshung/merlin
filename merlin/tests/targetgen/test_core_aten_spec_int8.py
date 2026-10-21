@@ -4,6 +4,7 @@ import copy
 
 import numpy as np
 import pytest
+from targetgen_fixtures import measured_routing
 from xdsl.parser import Parser
 
 from merlin.common.paths import repo_root
@@ -171,19 +172,7 @@ def test_capture_spec_grade_keeps_dynamic_gate_and_host_counts_separate(monkeypa
             quantized_contractions=1,
             integer_reference=dict(status="prepared", engine="independent", expected_output_bytes={"0": raw.hex()}),
         ),
-        routing=dict(
-            lane="device",
-            routed=True,
-            target="gemmini",
-            routed_operations=[{}],
-            execution_evidence=dict(
-                case_id="aten.mm.default",
-                status="measured",
-                attribution="single_case_shard",
-                executed_instructions=1,
-                target="gemmini",
-            ),
-        ),
+        routing=measured_routing("aten.mm.default"),
     )
     result = grade_core_aten_batch(dict(provenance={}, cases=[record]), [raw])
     row = result["cases"][record["overload"]]

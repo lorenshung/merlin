@@ -7,6 +7,7 @@ import subprocess
 
 import numpy as np
 import pytest
+from targetgen_fixtures import measured_routing
 
 from merlin.llvmlower import c_runtime
 from merlin.runtime.backends.spike_model import parse_console
@@ -200,19 +201,7 @@ def test_rational_reference_survives_full_semantic_evaluation(tmp_path, monkeypa
         quantized_non_contraction_sites=1,
         integer_reference=dict(status="prepared", engine="independent_source", expected_output_bytes=reference),
     )
-    record["routing"] = dict(
-        lane="device",
-        routed=True,
-        target="gemmini",
-        routed_operations=[{}],
-        execution_evidence=dict(
-            case_id="fixture",
-            status="measured",
-            attribution="single_case_shard",
-            executed_instructions=1,
-            target="gemmini",
-        ),
-    )
+    record["routing"] = measured_routing("fixture")
     monkeypatch.setattr("merlin.targetgen.core_aten_device.verify_execution_evidence", lambda _: True)
     if defect in {"output", "post"}:
         index = 0 if defect == "output" else 1

@@ -92,3 +92,11 @@ def selector_catalog(module, symbol, *bindings):
         bindings=[dict(root_ordinal=r, symbol=symbol, operands=o, numeric=dict(numeric)) for r, o in bindings],
         kernels=[dict(symbol=symbol, meta=dict(proof="closed_static_element_selectors", readout="scratchpad_bytes"))],
     )
+
+
+def measured_routing(case_id, target="gemmini", instructions=1, operations=({},)):
+    """Device routing with single-case measured execution evidence for ``case_id``."""
+    evidence = dict(case_id=case_id, status="measured", attribution="single_case_shard", target=target)
+    evidence["executed_instructions"] = instructions
+    routing = dict(lane="device", routed=True, target=target, routed_operations=list(operations))
+    return dict(routing, execution_evidence=evidence)
