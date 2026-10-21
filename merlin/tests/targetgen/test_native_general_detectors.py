@@ -24,32 +24,28 @@ def contraction(table):
     }} }}""")
 
 
+def decide(module, reason):
+    """The decision with only ``reason`` excluded; a host decision must cite exactly that reason."""
+    result = construction_evidence(module, excluded=[reason])
+    if result["status"] == "host":
+        assert {e["reason"] for e in result["evidence"]} == {reason}
+    return result["status"]
+
+
 @pytest.mark.parametrize(
-    "table",
+    "table,status",
     [
         # DFT twiddles (real part, n = 4): +-1/4 and 0.
-        "[[0.25,0.25,0.25],[0.25,0.0,-0.25],[0.25,-0.25,0.25],[0.25,0.0,-0.25]]",
+        ("[[0.25,0.25,0.25],[0.25,0.0,-0.25],[0.25,-0.25,0.25],[0.25,0.0,-0.25]]", "host"),
         # Interpolation weights.
-        "[[0.75,0.25,0.0],[0.25,0.75,0.0],[0.0,0.75,0.25],[0.0,0.25,0.75]]",
+        ("[[0.75,0.25,0.0],[0.25,0.75,0.0],[0.0,0.75,0.25],[0.0,0.25,0.75]]", "host"),
+        ("[[1.0,0.0,0.0],[1.0,1.0,0.0],[1.0,1.0,1.0],[0.0,1.0,1.0]]", "eligible"),  # 0/1 selection, prefix sums
+        ("[[0.5,0.0,0.0],[0.0,0.5,0.0],[0.0,0.0,0.5],[0.0,0.0,0.0]]", "eligible"),  # scaled identity
+        ("1.0", "eligible"),  # ones (window sums)
     ],
 )
-def test_contraction_against_a_multi_valued_literal_table_is_excluded(table):
-    result = construction_evidence(contraction(table), excluded=["nonuniform_literal_coefficient_contraction"])
-    assert result["status"] == "host"
-    assert {e["reason"] for e in result["evidence"]} == {"nonuniform_literal_coefficient_contraction"}
-
-
-@pytest.mark.parametrize(
-    "table",
-    [
-        "[[1.0,0.0,0.0],[1.0,1.0,0.0],[1.0,1.0,1.0],[0.0,1.0,1.0]]",  # 0/1 selection and prefix sums
-        "[[0.5,0.0,0.0],[0.0,0.5,0.0],[0.0,0.0,0.5],[0.0,0.0,0.0]]",  # scaled identity
-        "1.0",  # ones (window sums)
-    ],
-)
-def test_selection_sum_and_single_scale_tables_remain_eligible(table):
-    result = construction_evidence(contraction(table), excluded=["nonuniform_literal_coefficient_contraction"])
-    assert result["status"] == "eligible", result
+def test_only_a_multi_valued_literal_coefficient_table_is_excluded(table, status):
+    assert decide(contraction(table), "nonuniform_literal_coefficient_contraction") == status
 
 
 def division(divisor, op="arith.divf"):
@@ -60,17 +56,9 @@ def division(divisor, op="arith.divf"):
 
 
 @pytest.mark.parametrize("op", ["arith.divf", "arith.remf"])
-@pytest.mark.parametrize("divisor", ["0.0", "-0.0"])
-def test_division_by_a_closed_zero_forces_ieee_specials(op, divisor):
-    result = construction_evidence(division(divisor, op), excluded=["forced_ieee_special_division"])
-    assert result["status"] == "host"
-    assert {e["reason"] for e in result["evidence"]} == {"forced_ieee_special_division"}
-
-
-@pytest.mark.parametrize("op", ["arith.divf", "arith.remf"])
-def test_division_by_a_nonzero_literal_is_not_a_forced_special(op):
-    result = construction_evidence(division("2.0", op), excluded=["forced_ieee_special_division"])
-    assert result["status"] == "eligible"
+@pytest.mark.parametrize("divisor,status", [("0.0", "host"), ("-0.0", "host"), ("2.0", "eligible")])
+def test_only_division_by_a_closed_zero_forces_ieee_specials(op, divisor, status):
+    assert decide(division(divisor, op), "forced_ieee_special_division") == status
 
 
 def test_zero_divisor_in_a_discarded_branch_is_not_forced():
@@ -90,7 +78,7 @@ def test_zero_divisor_in_a_discarded_branch_is_not_forced():
     assert construction_evidence(module, excluded=["forced_ieee_special_division"])["status"] == "eligible"
 
 
-def reduction(body, accumulate="arith.mulf"):
+def reduction(accumulate):
     return parse_mlir_text(f"""module {{ func.func @forward(%x: tensor<2x3xf32>) -> tensor<3xf32> {{
       %one = arith.constant 1.0 : f32
       %init = tensor.splat %one : tensor<3xf32>
@@ -103,12 +91,6 @@ def reduction(body, accumulate="arith.mulf"):
     }} }}""")
 
 
-def test_product_reduction_over_runtime_elements_is_excluded():
-    result = construction_evidence(reduction(None), excluded=["runtime_product_reduction"])
-    assert result["status"] == "host"
-    assert {e["reason"] for e in result["evidence"]} == {"runtime_product_reduction"}
-
-
-def test_additive_reduction_is_not_a_product_reduction():
-    result = construction_evidence(reduction(None, "arith.addf"), excluded=["runtime_product_reduction"])
-    assert result["status"] == "eligible"
+@pytest.mark.parametrize("accumulate,status", [("arith.mulf", "host"), ("arith.addf", "eligible")])
+def test_only_a_product_reduction_over_runtime_elements_is_excluded(accumulate, status):
+    assert decide(reduction(accumulate), "runtime_product_reduction") == status
