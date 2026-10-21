@@ -16,6 +16,8 @@ import hashlib
 import json
 from fractions import Fraction
 
+from merlin.targetgen.native_payload_carriers import op_name
+
 
 def closed_private_state(module, function):
     from xdsl.dialects import arith
@@ -23,14 +25,14 @@ def closed_private_state(module, function):
 
     from merlin.targetgen.source_primitive_effects import pure_tensor_source
 
-    def name(op):
-        return getattr(getattr(op, "op_name", None), "data", op.name)
-
     globals_ = {}
     for op in module.body.block.ops:
         if op is function:
             continue
-        if name(op) != "ml_program.global" or getattr(op.properties.get("sym_visibility"), "data", None) != "private":
+        if (
+            op_name(op) != "ml_program.global"
+            or getattr(op.properties.get("sym_visibility"), "data", None) != "private"
+        ):
             return False
         symbol = getattr(op.properties.get("sym_name"), "data", None)
         if not symbol or symbol in globals_ or "value" not in op.properties:
@@ -38,14 +40,14 @@ def closed_private_state(module, function):
         globals_[symbol] = op
     clone = function.clone()
     for op in list(clone.walk()):
-        if name(op) not in {"ml_program.global_load", "ml_program.global_store"}:
+        if op_name(op) not in {"ml_program.global_load", "ml_program.global_store"}:
             continue
         ref = op.properties.get("global")
         symbol = getattr(getattr(ref, "root_reference", None), "data", None)
         if symbol not in globals_ or ref.nested_references:
             return False
         declared = globals_[symbol].properties
-        if name(op) == "ml_program.global_load":
+        if op_name(op) == "ml_program.global_load":
             if op.operands or len(op.results) != 1 or op.results[0].type != declared["type"]:
                 return False
             Rewriter.replace_op(op, arith.ConstantOp(declared["value"]))
@@ -157,14 +159,11 @@ def _erase_dead(function):
     """Erase unused, effect-free top-level operations, including dead loops."""
     from merlin.llvmlower.entry_weight_projection import _pure_dce
 
-    def name(op):
-        return getattr(getattr(op, "op_name", None), "data", op.name)
-
     def effect_free(op):
         # Pure reads of private state (closed_private_state) and value-only
         # arith/math/tensor/scf/linalg operations on tensors.
         for child in op.walk():
-            if name(child) == "ml_program.global_load":
+            if op_name(child) == "ml_program.global_load":
                 continue
             if type(child).__module__.startswith(
                 (
@@ -228,20 +227,17 @@ def specialize(directory, report):
         generic.results[0].replace_all_uses_with(filled.result)
         evidence.append(dict(mask=int(bit), **detail))
 
-    def name(op):
-        return getattr(getattr(op, "op_name", None), "data", op.name)
-
     # Private generator state is unobservable (closed_private_state): its
     # updates are dropped, after which unused generator work is dead code.
     for op in list(function.walk()):
-        if name(op) == "ml_program.global_store":
+        if op_name(op) == "ml_program.global_store":
             Rewriter.erase_op(op)
     _erase_dead(function)
     folded = fold_closed_scalars(function)
     _erase_dead(function)
     prune_unused_tensor_inputs(module)
     _erase_dead(function)
-    if any(name(op).startswith("ml_program.") for op in function.walk()):
+    if any(op_name(op).startswith("ml_program.") for op in function.walk()):
         return None  # Generator state still reaches an observable result.
     for op in list(module.body.block.ops):
         if op is not function:

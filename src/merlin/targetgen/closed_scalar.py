@@ -9,15 +9,10 @@ leaf or non-finite intermediate is UNKNOWN, so callers fail closed.
 import math
 from fractions import Fraction
 
+from merlin.targetgen.native_payload_carriers import op_name as _name
+
 UNKNOWN = object()
 FLOAT_BITS = {"f16": (16, False), "bf16": (16, True), "f32": (32, False), "f64": (64, False)}
-
-
-def _name(op):
-    """Operation name, including unregistered operations parsed from generic syntax."""
-    from merlin.targetgen.native_payload_carriers import op_name
-
-    return op_name(op)
 
 
 def _element_type(value):
