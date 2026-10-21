@@ -247,3 +247,53 @@ def test_static_assert_guard_uses_unsigned_word_semantics(tmp_path, predicate, a
     assert bool(specialize(tmp_path, report())) == allowed
     if not allowed:
         assert path.read_bytes() == original
+
+
+def rewritten_body(tmp_path):
+    module = parse_mlir_file(tmp_path / "model.mlir")
+    module.verify()
+    function = next(op for op in module.walk() if op.name == "func.func")
+    return function.body.block.last_op.operands[0].owner.body.block
+
+
+def unit_power(chain, output):
+    return chain + f"\n%k=arith.constant 1.0 : {output}\n%p=math.powf %f,%k : {output}\nlinalg.yield %p : {output}"
+
+
+# Review B2: the copy re-emits the program's own conversion chain, so every source word keeps its value.
+@pytest.mark.parametrize(
+    "source,chain,ops,word,value",
+    [
+        ("i8", "%f=arith.uitofp %a : i8 to f32", ["arith.uitofp"], -1, 255.0),
+        ("i8", "%w=arith.extui %a : i8 to i32\n%f=arith.sitofp %w : i32 to f32", ["arith.extui", "arith.sitofp"], -1, 255.0),
+        ("i8", "%f=arith.sitofp %a : i8 to f32", ["arith.sitofp"], -1, -1.0),
+        ("i1", "%f=arith.sitofp %a : i1 to f32", ["arith.sitofp"], True, -1.0),
+        ("i32", "%f=arith.sitofp %a : i32 to f32", ["arith.sitofp"], 2**24 + 1, float(2**24)),
+    ],
+)
+def test_unit_power_copy_keeps_the_programs_conversion_chain(tmp_path, source, chain, ops, word, value):
+    from merlin.targetgen.closed_scalar import evaluate
+
+    fixture(tmp_path, unit_power(chain, "f32"), source=source)
+    assert specialize(tmp_path, report())["family"] == "storage_copy_or_declared_conversion"
+    body = rewritten_body(tmp_path)
+    assert [op.name for op in body.ops][:-1] == ops
+    assert evaluate(body.last_op.operands[0], {body.args[0]: word}) == value
+
+
+def test_unit_power_copy_refuses_a_chain_that_rounds_before_widening(tmp_path):
+    path = fixture(
+        tmp_path,
+        unit_power("%n=arith.sitofp %a : i32 to f32\n%f=arith.extf %n : f32 to f64", "f64"),
+        source="i32",
+        output="f64",
+    )
+    before = path.read_bytes()
+    assert specialize(tmp_path, report()) is None
+    assert path.read_bytes() == before
+
+
+def test_boolean_signed_conversion_is_not_an_identity(tmp_path):
+    # sitofp maps i1 true to -1.0, so the complete Boolean table is (+0, -1): neither a copy nor a fill.
+    fixture(tmp_path, "%c=arith.sitofp %a : i1 to f32\nlinalg.yield %c : f32", source="i1")
+    assert specialize(tmp_path, report()) is None

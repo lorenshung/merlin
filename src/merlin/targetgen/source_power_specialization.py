@@ -42,18 +42,46 @@ def _elementwise_root(function, source):
     return root, root.body.block.args[runtime[0]]
 
 
+SIGNIFICAND = {"f16": 11, "bf16": 8, "f32": 24, "f64": 53}
+
+
+def _rounds(op):
+    """Can this integer-to-float conversion round (the source word exceeds the significand)?"""
+    from xdsl.dialects.builtin import IntegerType
+
+    source = op.operands[0].type
+    if op_name(op) not in {"arith.sitofp", "arith.uitofp"} or not isinstance(source, IntegerType):
+        return False
+    width = source.width.data
+    magnitude = width if op_name(op) == "arith.uitofp" or width == 1 else width - 1
+    return magnitude > SIGNIFICAND.get(str(op.results[0].type), 0)
+
+
 def _conversion_chain(value, argument):
-    """Is value the block argument after only value-preserving conversions?"""
+    """The program's own conversion ops from the block argument to value, in order, else None.
+
+    A chain whose integer-to-float step can round and is then converted again
+    is refused: only a final conversion may round, as the declared conversion
+    to the result type.
+    """
+    chain = []
     while value is not argument:
         owner = value.owner
         if op_name(owner) not in CONVERSIONS:
-            return False
+            return None
+        chain.insert(0, owner)
         value = owner.operands[0]
-    return True
+    if any(_rounds(op) for op in chain[:-1]):
+        return None
+    return chain
 
 
 def classify(function, source_type):
-    """Return ('fill', literal) or ('copy', None) read from the IR, else None."""
+    """Return ('fill', literal), ('copy', conversion ops) or ('copy', None) read from the IR, else None.
+
+    A power copy carries the program's own conversion chain; a Boolean-domain
+    copy (0 -> +0, 1 -> 1) carries None.
+    """
     from merlin.targetgen.closed_scalar import UNKNOWN, evaluate, literal
 
     found = _elementwise_root(function, function.body.block.args[0])
@@ -69,8 +97,9 @@ def classify(function, source_type):
             if exponent == 0:
                 value = evaluate(yielded, {argument: 0})
                 return None if value is UNKNOWN else ("fill", value)
-            if _conversion_chain(owner.operands[0], argument):
-                return ("copy", None)
+            chain = _conversion_chain(owner.operands[0], argument)
+            if chain is not None:
+                return ("copy", chain)
     if not boolean:
         return None
     # Complete Boolean domain: identity (0 -> +0, 1 -> 1) or a uniform fill only.
@@ -266,15 +295,21 @@ def specialize(directory, report):
         destination = tensor.EmptyOp([], result_type)
         scalar = Block(arg_types=[source_element, element])
         converted = scalar.args[0]
-        if source_element != element:
-            if isinstance(source_element, IntegerType) and not isinstance(element, IntegerType):
-                conversion = (arith.UIToFPOp if boolean else arith.SIToFPOp)(converted, element)
-            elif isinstance(source_element, IntegerType) and isinstance(element, IntegerType) and boolean:
-                conversion = arith.ExtUIOp(converted, element)
-            else:
+        if value is not None:
+            # Re-emit the program's own conversion chain unchanged.
+            for op in value:
+                conversion = op.clone({op.operands[0]: converted})
+                scalar.add_op(conversion)
+                converted = conversion.results[0]
+        elif source_element != element:
+            # Boolean-domain copy: the evaluated table is exactly 0 -> +0 and 1 -> 1.
+            if not boolean or not isinstance(source_element, IntegerType):
                 return None
+            conversion = (arith.ExtUIOp if isinstance(element, IntegerType) else arith.UIToFPOp)(converted, element)
             scalar.add_op(conversion)
             converted = conversion.result
+        if converted.type != element:
+            return None
         scalar.add_op(L.YieldOp(converted))
         identity = AffineMapAttr(AffineMap.identity(len(result_type.get_shape())))
         copied = L.GenericOp(
