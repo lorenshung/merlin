@@ -288,16 +288,17 @@ def bounded_unit_corpus():
     return corpus
 
 
+def evaluate_sealed(corpus, adapter=None, **options):
+    """Evaluate a sealed unit corpus on the host without the live-denominator and solver re-checks."""
+    options = dict(validate_live_denominator=False, validate_solver_certificate=False) | options
+    adapter = adapter or BoundedEagerSuiteAdapter()
+    return evaluate_bounded_core_aten_suite(adapter, corpus, required_execution_kind="host", **options)
+
+
 def test_one_call_bounded_evaluator_uses_case_ids(bounded_unit_corpus) -> None:
     corpus = bounded_unit_corpus
     case_id = corpus["selected_cases"][0]["case_id"]
-    result = evaluate_bounded_core_aten_suite(
-        BoundedEagerSuiteAdapter(),
-        corpus,
-        required_execution_kind="host",
-        validate_live_denominator=False,
-        validate_solver_certificate=False,
-    )
+    result = evaluate_sealed(corpus)
     assert result["status"] == "pass"
     assert result["status_counts"] == {"pass": 1}
     tampered = deepcopy(corpus)
@@ -306,31 +307,14 @@ def test_one_call_bounded_evaluator_uses_case_ids(bounded_unit_corpus) -> None:
     tampered["overloads"]["aten.add.Tensor"]["candidates"][case_id] = tampered_case
     tampered["suite_sha256"] = bounded_suite_digest(tampered)
     with pytest.raises(ValueError, match="eqsat fingerprint mismatch"):
-        evaluate_bounded_core_aten_suite(
-            BoundedEagerSuiteAdapter(),
-            tampered,
-            required_execution_kind="host",
-            validate_live_denominator=False,
-            validate_solver_certificate=False,
-        )
+        evaluate_sealed(tampered)
     tampered = deepcopy(corpus)
     tampered["overloads"]["aten.add.Tensor"]["cover"]["minimum_cardinality_lower_bound"] = 0
     tampered["suite_sha256"] = bounded_suite_digest(tampered)
     with pytest.raises(ValueError, match="invalid stored SMT certificate"):
-        evaluate_bounded_core_aten_suite(
-            BoundedEagerSuiteAdapter(),
-            tampered,
-            required_execution_kind="host",
-            validate_live_denominator=False,
-            validate_solver_certificate=False,
-        )
+        evaluate_sealed(tampered)
     with pytest.raises(ValueError, match="live Core ATen denominator"):
-        evaluate_bounded_core_aten_suite(
-            BoundedEagerSuiteAdapter(),
-            corpus,
-            required_execution_kind="host",
-            validate_solver_certificate=False,
-        )
+        evaluate_sealed(corpus, validate_live_denominator=True)
 
 
 @pytest.mark.parametrize("allow", [False, True])
@@ -382,14 +366,7 @@ def test_bounded_suite_requires_explicit_observed_scope(bounded_unit_corpus, all
                     doc["requires_grad"] = None
             return results
 
-    report = evaluate_bounded_core_aten_suite(
-        ReducedAdapter(),
-        corpus,
-        required_execution_kind="host",
-        validate_live_denominator=False,
-        validate_solver_certificate=False,
-        allow_unobserved_autograd=allow,
-    )
+    report = evaluate_sealed(corpus, ReducedAdapter(), allow_unobserved_autograd=allow)
     assert report["semantic_scope"] == ("values+mutation+observed-metadata" if allow else "full")
     assert report["status"] == ("pass" if allow else "fail")
     assert report["passed_count"] == (len(corpus["selected_cases"]) if allow else int(mixed))
@@ -399,14 +376,7 @@ def test_disk_backed_bounded_verdicts_use_the_same_sealed_checks(bounded_unit_co
     from merlin.targetgen.core_aten_bounded_runner import JsonRecordMapping
 
     store = JsonRecordMapping(tmp_path)
-    report = evaluate_bounded_core_aten_suite(
-        BoundedEagerSuiteAdapter(),
-        bounded_unit_corpus,
-        required_execution_kind="host",
-        validate_live_denominator=False,
-        validate_solver_certificate=False,
-        verdict_store=store,
-    )
+    report = evaluate_sealed(bounded_unit_corpus, verdict_store=store)
     assert report["cases"] is store
     assert report["status"] == "pass"
     assert report["passed_count"] == len(store)
