@@ -142,6 +142,16 @@ def expose_results(module, values):
     return count
 
 
+def bind_device_contraction(op, declarations, region_id):
+    """Bind a device contraction's declarations, region and transfer contracts, in this attribute order."""
+    from xdsl.dialects.builtin import StringAttr
+
+    op.attributes["prov.declarations"] = StringAttr(declarations)
+    op.attributes["prov.region_id"] = StringAttr(region_id)
+    for contract in ("operand_load", "accumulator_readout"):
+        op.attributes[f"prov.{contract}"] = StringAttr(f"transfer_contracts.{contract}")
+
+
 def scalarized_contraction_candidates(module):
     """Find frontend contraction families expressed as ordered scalar loops.
 
@@ -378,20 +388,14 @@ def _prepare_spec_int8(
             selected = []
             plan.update(status="refused", native_contractions=0)
         if selected:
-            from xdsl.dialects.builtin import StringAttr
-
             contractions = dict((list(module.walk()).index(op), op) for op, _ in observe_contractions(module))
             for site in selected:
-                op = contractions[site["source_operation_ordinal"]]
                 step = next(row for row in site["steps"] if row["step"] == 3)
-                op.attributes["prov.declarations"] = StringAttr(
-                    json.dumps({"software": step["software"]["declaration"]})
+                bind_device_contraction(
+                    contractions[site["source_operation_ordinal"]],
+                    json.dumps({"software": step["software"]["declaration"]}),
+                    f"native_int8_contraction_{site['source_operation_ordinal']}",
                 )
-                op.attributes["prov.region_id"] = StringAttr(
-                    f"native_int8_contraction_{site['source_operation_ordinal']}"
-                )
-                op.attributes["prov.operand_load"] = StringAttr("transfer_contracts.operand_load")
-                op.attributes["prov.accumulator_readout"] = StringAttr("transfer_contracts.accumulator_readout")
             from merlin.targetgen.core_aten_spec_int8 import covering_proof
 
             covered = [contractions[site["source_operation_ordinal"]] for site in selected]
@@ -680,20 +684,13 @@ def _prepare_spec_int8(
 
             contractions = [op for op, _ in observe_contractions(module)]
             for site, contraction, scale in zip(selected, contractions, reference["scales"], strict=True):
-                keys = declaration_keys(site)
+                keys, region = declaration_keys(site), f"spec_int8_contraction_{site['source_operation_ordinal']}"
                 if scale.get("readout", ()) is None:
                     # The reference states this GEMM's accumulator only: it reaches its readout through
                     # further exact integer work (a convolution_backward's tap accumulation or layout
                     # change), so there is no direct cast/multiply chain to bind, and the final outputs
                     # are compared exactly instead.
-                    contraction.attributes["prov.declarations"] = StringAttr(keys["contraction"])
-                    contraction.attributes["prov.region_id"] = StringAttr(
-                        f"spec_int8_contraction_{site['source_operation_ordinal']}"
-                    )
-                    contraction.attributes["prov.operand_load"] = StringAttr("transfer_contracts.operand_load")
-                    contraction.attributes["prov.accumulator_readout"] = StringAttr(
-                        "transfer_contracts.accumulator_readout"
-                    )
+                    bind_device_contraction(contraction, keys["contraction"], region)
                     site["host_readout_bridge"] = {"status": "composed_integer_readout"}
                     observations.append(() if site.get("readout") == "int32_host_exact" else (contraction.results[0],))
                     continue
@@ -705,15 +702,9 @@ def _prepare_spec_int8(
                 site["host_readout_operation_ordinals"] = [
                     list(module.walk()).index(o) for o in (first_readout, readout)
                 ]
-                for op, key in ((contraction, "contraction"), (cast, "cast"), (first_readout, "mul"), (readout, "mul")):
+                bind_device_contraction(contraction, keys["contraction"], region)
+                for op, key in ((cast, "cast"), (first_readout, "mul"), (readout, "mul")):
                     op.attributes["prov.declarations"] = StringAttr(keys[key])
-                contraction.attributes["prov.region_id"] = StringAttr(
-                    f"spec_int8_contraction_{site['source_operation_ordinal']}"
-                )
-                contraction.attributes["prov.operand_load"] = StringAttr("transfer_contracts.operand_load")
-                contraction.attributes["prov.accumulator_readout"] = StringAttr(
-                    "transfer_contracts.accumulator_readout"
-                )
                 readout.attributes["prov.role"] = StringAttr("spec_int8_host_readout")
                 observations.append((contraction.results[0], restored_readout))
             operations = list(module.walk())
