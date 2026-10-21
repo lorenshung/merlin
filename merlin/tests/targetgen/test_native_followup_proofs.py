@@ -77,9 +77,9 @@ def test_executable_checker_refuses_wrong_readout(kind):
     import os
     import subprocess
 
-    python = os.environ.get("M2M_PY")
+    python = os.environ.get("MERLIN_M2M_PYTHON")
     if not python:
-        pytest.skip("explicit CPU proof interpreter unavailable")
+        pytest.skip("MERLIN_M2M_PYTHON names no CPU proof interpreter (torch is not in the test environment)")
     if kind == "nan_priority":
         script = """import torch
 original = torch.add
