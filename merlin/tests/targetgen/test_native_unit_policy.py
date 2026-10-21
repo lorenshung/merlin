@@ -15,39 +15,112 @@ def source(expression, *, literal=False, reduction=False):
     return forward(f"%x:{typ},%y:{typ}", typ, ones + body)
 
 
-def test_parallel_runtime_product_is_not_a_native_contraction():
-    result = construction_evidence(source("%v=arith.mulf %a,%b : f32"))
-    assert result["status"] == "host"
-    assert result["evidence"][0]["reason"] == "parallel_runtime_product_construction"
+MUL = "%v=arith.mulf %a,%b : f32"
+RAMP = "%i=linalg.index 0 : index\n%j=arith.index_cast %i : index to i64\n%v=arith.sitofp %j : i64 to f32"
+CLAMP = "%z=arith.constant 0.0 : f32\n%capped=arith.maximumf %a,%z : f32\n"
+BIAS = "%half=arith.constant 0.5 : f32\n%biased=arith.addf %a,%half : f32\n"
+ROUNDING = ["readout_offset_rounding"]
+DAG = "\n".join(
+    ["%i=linalg.index 0 : index"]
+    + [f"%d{i}=arith.addi {f'%d{i - 1}' if i else '%i'},{f'%d{i - 1}' if i else '%i'} : index" for i in range(70)]
+    + ["%n=arith.index_cast %d69 : index to i64", "%v=arith.sitofp %n : i64 to f32"]
+)
+DEEP = "\n".join(
+    ["%c0=arith.constant 1.0 : f32"]
+    + [f"%c{i}=arith.addf %c{i - 1},%c{i - 1} : f32" for i in range(1, 1200)]
+    + ["%v=arith.mulf %a,%c1199 : f32"]
+)
 
 
-def test_literal_scale_and_own_linear_math_are_native():
-    assert construction_evidence(source("%v=arith.mulf %a,%b : f32", literal=True))["status"] == "eligible"
-    assert construction_evidence(source("%v=arith.addf %a,%b : f32"))["status"] == "eligible"
-
-
-def test_true_reduction_product_retains_contraction_role():
-    assert construction_evidence(source("%v=arith.mulf %a,%b : f32", reduction=True))["status"] == "eligible"
-
-
-def test_rounding_cannot_be_relabelled_as_component_math():
-    result = construction_evidence(source("%v=math.floor %a : f32"))
-    assert result["status"] == "host"
-    assert result["evidence"][0]["reason"] == "nonlinear_rounding_construction"
-
-
-def test_literal_expression_is_not_mistaken_for_runtime_multiplier():
-    assert (
-        construction_evidence(source("%n=arith.negf %b : f32\n%v=arith.mulf %a,%n : f32", literal=True))["status"]
-        == "eligible"
-    )
-
-
-def test_index_arithmetic_is_not_accelerated_by_copying_its_host_literal_table():
-    ramp = source("%i=linalg.index 0 : index\n%j=arith.index_cast %i : index to i64\n%v=arith.sitofp %j : i64 to f32")
-    literal = source("%i=linalg.index 0 : index\n%v=arith.constant 2.0 : f32")
-    assert construction_evidence(ramp)["evidence"][0]["reason"] == "index_generated_payload_arithmetic"
-    assert construction_evidence(literal)["status"] == "eligible"
+@pytest.mark.parametrize(
+    "body,options,status,reason",
+    [
+        pytest.param(MUL, {}, "host", "parallel_runtime_product_construction", id="parallel_runtime_product"),
+        pytest.param(MUL, {"literal": True}, "eligible", None, id="literal_scale"),
+        pytest.param("%v=arith.addf %a,%b : f32", {}, "eligible", None, id="own_linear_math"),
+        pytest.param(MUL, {"reduction": True}, "eligible", None, id="reduction_product"),
+        pytest.param("%v=math.floor %a : f32", {}, "host", "nonlinear_rounding_construction", id="rounding"),
+        pytest.param(
+            "%n=arith.negf %b : f32\n%v=arith.mulf %a,%n : f32", {"literal": True}, "eligible", None, id="literal_expr"
+        ),
+        pytest.param(RAMP, {}, "host", "index_generated_payload_arithmetic", id="index_ramp"),
+        pytest.param(
+            "%i=linalg.index 0 : index\n%v=arith.constant 2.0 : f32", {}, "eligible", None, id="index_literal"
+        ),
+        pytest.param(DAG, {}, "host", None, id="shared_index_dag"),
+        pytest.param(
+            CLAMP + "%p=arith.cmpf ogt,%capped,%z : f32\n%v=arith.uitofp %p : i1 to f32",
+            {},
+            "host",
+            "saturation_comparators",
+            id="saturation_comparator",
+        ),
+        pytest.param(CLAMP + "%v=arith.addf %capped,%z : f32", {}, "eligible", None, id="plain_clamp"),
+        pytest.param(
+            "%p=arith.cmpf ogt,%a,%b : f32\n%v=arith.select %p,%a,%b : f32", {}, "eligible", None, id="select"
+        ),
+        pytest.param(BIAS + "%v=math.floor %biased : f32", {}, "host", "readout_offset_rounding", id="biased_floor"),
+        pytest.param(
+            BIAS + "%n=arith.fptosi %biased : f32 to i32\n%v=arith.sitofp %n : i32 to f32",
+            {"excluded": ROUNDING},
+            "host",
+            None,
+            id="biased_narrowing",
+        ),
+        pytest.param(
+            "%half=arith.constant 0.5 : f32\n%v=arith.addf %a,%half : f32", {}, "eligible", None, id="affine_offset"
+        ),
+        pytest.param(
+            "%n=arith.fptosi %a : f32 to i32\n%v=arith.sitofp %n : i32 to f32", {}, "eligible", None, id="narrowing"
+        ),
+        pytest.param(
+            "%bias=arith.constant 16777216.0 : f32\n%shift=arith.addf %a,%bias : f32\n%v=arith.subf %shift,%bias : f32",
+            {"excluded": ROUNDING},
+            "host",
+            None,
+            id="magic_bias",
+        ),
+        pytest.param(
+            "%z=arith.constant 0.0 : f32\n%d=arith.subf %a,%b : f32\n%r=arith.maximumf %d,%z : f32\n"
+            "%v=arith.addf %r,%b : f32",
+            {"excluded": ["multi_op_identity"]},
+            "host",
+            None,
+            id="rectifier_identity",
+        ),
+        pytest.param(
+            "%z=arith.constant 0.0 : f32\n%v=arith.maximumf %a,%z : f32", {}, "eligible", None, id="native_relu"
+        ),
+        pytest.param("%v=arith.maximumf %a,%b : f32", {}, "eligible", None, id="maximum"),
+        pytest.param(DEEP, {}, "eligible", None, id="deep_shared_payload"),
+        pytest.param(
+            """%z=arith.constant 0.0 : f32
+        %nan=arith.cmpf uno, %a,%a : f32
+        %lhs=arith.select %nan,%z,%a : f32
+        %rhs=arith.select %nan,%z,%b : f32
+        %sum=arith.addf %lhs,%rhs : f32
+        %i=arith.fptosi %sum : f32 to i32
+        %v=arith.sitofp %i : i32 to f32""",
+            {"excluded": ROUNDING},
+            "eligible",
+            None,
+            id="runtime_ieee_selection",
+        ),
+        pytest.param(
+            "%sum=arith.addf %a,%b : f32\n%i=arith.fptosi %sum : f32 to i32\n%v=arith.sitofp %i : i32 to f32",
+            {"literal": True, "excluded": ROUNDING},
+            "host",
+            None,
+            id="dense_splat_offset",
+        ),
+    ],
+)
+def test_construction_role_follows_scalar_dataflow(body, options, status, reason):
+    options = dict(options)
+    excluded = {"excluded": options.pop("excluded")} if "excluded" in options else {}
+    decision = construction_evidence(source(body, **options), **excluded)
+    assert decision["status"] == status
+    assert reason is None or decision["evidence"][0]["reason"] == reason
 
 
 def test_structured_address_selection_is_movement_not_index_payload_math():
@@ -74,20 +147,8 @@ def test_structured_address_selection_is_movement_not_index_payload_math():
     assert construction_evidence(module)["status"] == "eligible"
 
 
-def test_shared_index_dag_is_analyzed_without_expanding_its_tree():
-    lines = ["%i=linalg.index 0 : index"]
-    previous = "%i"
-    for index in range(70):
-        current = f"%d{index}"
-        lines.append(f"{current}=arith.addi {previous},{previous} : index")
-        previous = current
-    lines.extend([f"%n=arith.index_cast {previous} : index to i64", "%v=arith.sitofp %n : i64 to f32"])
-    result = construction_evidence(source("\n".join(lines)))
-    assert result["status"] == "host"
-
-
 def test_exclusions_are_selected_by_the_targets_numeric_contract():
-    module = source("%v=arith.mulf %a,%b : f32")
+    module = source(MUL)
     assert construction_evidence(module, excluded=[])["status"] == "eligible"
     decision = construction_evidence(module, excluded=["parallel_runtime_product_construction"])
     assert decision["status"] == "host"
@@ -150,49 +211,6 @@ def test_literal_uniformity_uses_storage_bits_for_nan_and_zero():
     assert construction_evidence(table([]))["status"] == "eligible"
 
 
-def test_saturation_used_as_comparator_is_excluded_but_plain_clamp_is_native():
-    clamp = "%z=arith.constant 0.0 : f32\n%capped=arith.maximumf %a,%z : f32\n"
-    predicate = "%p=arith.cmpf ogt,%capped,%z : f32\n%v=arith.uitofp %p : i1 to f32"
-    result = construction_evidence(source(clamp + predicate))
-    assert "saturation_comparators" in {e["reason"] for e in result["evidence"]}
-    assert construction_evidence(source(clamp + "%v=arith.addf %capped,%z : f32"))["status"] == "eligible"
-    assert (
-        construction_evidence(source("%p=arith.cmpf ogt,%a,%b : f32\n%v=arith.select %p,%a,%b : f32"))["status"]
-        == "eligible"
-    )
-
-
-def test_biased_rounding_is_detected_without_excluding_an_ordinary_affine_offset():
-    bias = "%half=arith.constant 0.5 : f32\n%biased=arith.addf %a,%half : f32\n"
-    result = construction_evidence(source(bias + "%v=math.floor %biased : f32"))
-    assert "readout_offset_rounding" in {e["reason"] for e in result["evidence"]}
-    narrowing = "%n=arith.fptosi %biased : f32 to i32\n%v=arith.sitofp %n : i32 to f32"
-    assert construction_evidence(source(bias + narrowing), excluded=["readout_offset_rounding"])["status"] == "host"
-    assert (
-        construction_evidence(source("%half=arith.constant 0.5 : f32\n%v=arith.addf %a,%half : f32"))["status"]
-        == "eligible"
-    )
-    assert (
-        construction_evidence(source("%n=arith.fptosi %a : f32 to i32\n%v=arith.sitofp %n : i32 to f32"))["status"]
-        == "eligible"
-    )
-
-
-def test_magic_bias_rounding_is_detected():
-    module = source(
-        "%bias=arith.constant 16777216.0 : f32\n%shift=arith.addf %a,%bias : f32\n%v=arith.subf %shift,%bias : f32"
-    )
-    assert construction_evidence(module, excluded=["readout_offset_rounding"])["status"] == "host"
-
-
-def test_rectifier_extremum_identity_is_excluded_but_native_relu_is_not():
-    zero = "%z=arith.constant 0.0 : f32\n"
-    identity = "%d=arith.subf %a,%b : f32\n%r=arith.maximumf %d,%z : f32\n%v=arith.addf %r,%b : f32"
-    assert construction_evidence(source(zero + identity), excluded=["multi_op_identity"])["status"] == "host"
-    assert construction_evidence(source(zero + "%v=arith.maximumf %a,%z : f32"))["status"] == "eligible"
-    assert construction_evidence(source("%v=arith.maximumf %a,%b : f32"))["status"] == "eligible"
-
-
 def boolean_source():
     return pointwise(["tensor<3xi1>"] * 2, "tensor<3xi1>", "%v=arith.ori %a,%b : i1")
 
@@ -225,24 +243,10 @@ def test_boolean_add_truth_identity_is_detected_after_rewriting():
 def test_an_unrelated_reduction_does_not_license_parallel_products_or_index_payloads():
     from xdsl.dialects.builtin import ModuleOp
 
-    reduction = source("%v=arith.mulf %a,%b : f32", reduction=True)
-    for other, reason in [
-        (source("%v=arith.mulf %a,%b : f32"), "parallel_runtime_product_construction"),
-        (
-            source("%i=linalg.index 0 : index\n%j=arith.index_cast %i : index to i64\n%v=arith.sitofp %j : i64 to f32"),
-            "index_generated_payload_arithmetic",
-        ),
-    ]:
-        module = ModuleOp([op.clone() for m in [reduction, other] for op in m.body.block.ops])
+    reduction = source(MUL, reduction=True)
+    for other, reason in [(MUL, "parallel_runtime_product_construction"), (RAMP, "index_generated_payload_arithmetic")]:
+        module = ModuleOp([op.clone() for m in [reduction, source(other)] for op in m.body.block.ops])
         assert reason in {e["reason"] for e in construction_evidence(module)["evidence"]}
-
-
-def test_deep_shared_payloads_do_not_expand_exponentially_or_hit_python_recursion():
-    lines = ["%c0=arith.constant 1.0 : f32"]
-    for i in range(1, 1200):
-        lines.append(f"%c{i}=arith.addf %c{i - 1},%c{i - 1} : f32")
-    lines.append("%v=arith.mulf %a,%c1199 : f32")
-    assert construction_evidence(source("\n".join(lines)))["status"] == "eligible"
 
 
 def test_integer_offset_readout_is_rounding():
@@ -267,104 +271,71 @@ def test_readout_uses_only_the_current_module_during_prelude_rewriting():
     assert construction_evidence(module, excluded=["multi_op_identity"])["status"] == "host"
 
 
+SLICE = "static_offsets=array<i64:0,0>,static_sizes=array<i64:2,2>,static_strides=array<i64:1,1>"
+MAP2 = "affine_map<(d0,d1)->(d0,d1)>"
+PAR2 = 'iterator_types=["parallel","parallel"]'
+EXTRACT = "%i=arith.constant 0:index\n%a=tensor.extract %table[%i,%i]:tensor<2x2xi32>\n"
+COLLAPSE = "tensor.collapse_shape %table [[0,1]] : tensor<2x2xi32> into tensor<4xi32>"
+
+
 @pytest.mark.parametrize(
     "carrier,result_type",
     [
         (
-            (
-                "%r=linalg.generic {indexing_maps=[affine_map<(d0,d1)->(d0,d1)>],iterat"
-                'or_types=["parallel","parallel"]} outs(%table:tensor<2x2xi32>) { ^bb0('
-                "%old:i32): linalg.yield %old:i32 } -> tensor<2x2xi32>"
-            ),
+            f"%r=linalg.generic {{indexing_maps=[{MAP2}],{PAR2}}} outs(%table:tensor<2x2xi32>) {{ ^bb0("
+            "%old:i32): linalg.yield %old:i32 } -> tensor<2x2xi32>",
             "2x2xi32",
         ),
         (
-            (
-                "%r=linalg.generic {indexing_maps=[affine_map<(d0,d1)->(d0,d1)>,affine_"
-                'map<(d0,d1)->(d0,d1)>],iterator_types=["parallel","parallel"]} ins(%x:'
-                "tensor<2x2xi32>) outs(%table:tensor<2x2xi32>) { ^bb0(%unused:i32,%old:"
-                "i32): linalg.yield %old:i32 } -> tensor<2x2xi32>"
-            ),
+            f"%r=linalg.generic {{indexing_maps=[{MAP2},{MAP2}],{PAR2}}} ins(%x:tensor<2x2xi32>) "
+            "outs(%table:tensor<2x2xi32>) { ^bb0(%unused:i32,%old:i32): linalg.yield %old:i32 } -> tensor<2x2xi32>",
             "2x2xi32",
         ),
-        (
-            (
-                "%i=arith.constant 0:index\n%a=tensor.extract %table[%i,%i]:tensor<2x2xi"
-                "32>\n%r=tensor.insert %a into %x[%i,%i]:tensor<2x2xi32>"
-            ),
-            "2x2xi32",
-        ),
-        (
-            (
-                "%i=arith.constant 0:index\n%a=tensor.extract %table[%i,%i]:tensor<2x2xi"
-                "32>\n%r=tensor.from_elements %a:tensor<1xi32>"
-            ),
-            "1xi32",
-        ),
+        (EXTRACT + "%r=tensor.insert %a into %x[%i,%i]:tensor<2x2xi32>", "2x2xi32"),
+        (EXTRACT + "%r=tensor.from_elements %a:tensor<1xi32>", "1xi32"),
         (
             '%r="tensor.concat"(%x,%table) <{dim=0:i64}> : (tensor<2x2xi32>,tensor<2x2xi32>) -> tensor<4x2xi32>',
             "4x2xi32",
         ),
         (
-            (
-                '%r="tensor.insert_slice"(%table,%x) <{static_offsets=array<i64:0,0>,st'
-                "atic_sizes=array<i64:2,2>,static_strides=array<i64:1,1>,operandSegment"
-                "Sizes=array<i32:1,1,0,0,0>}> : (tensor<2x2xi32>,tensor<2x2xi32>) -> te"
-                "nsor<2x2xi32>"
-            ),
+            f'%r="tensor.insert_slice"(%table,%x) <{{{SLICE},operandSegmentSizes=array<i32:1,1,0,0,0>}}> : '
+            "(tensor<2x2xi32>,tensor<2x2xi32>) -> tensor<2x2xi32>",
             "2x2xi32",
         ),
         (
-            (
-                '%r="tensor.extract_slice"(%table) <{static_offsets=array<i64:0,0>,stat'
-                "ic_sizes=array<i64:2,2>,static_strides=array<i64:1,1>,operandSegmentSi"
-                "zes=array<i32:1,0,0,0>}> : (tensor<2x2xi32>) -> tensor<2x2xi32>"
-            ),
+            f'%r="tensor.extract_slice"(%table) <{{{SLICE},operandSegmentSizes=array<i32:1,0,0,0>}}> : '
+            "(tensor<2x2xi32>) -> tensor<2x2xi32>",
             "2x2xi32",
         ),
         ("%r=tensor.cast %table : tensor<2x2xi32> to tensor<?x2xi32>", "?x2xi32"),
-        ("%r=tensor.collapse_shape %table [[0,1]] : tensor<2x2xi32> into tensor<4xi32>", "4xi32"),
+        ("%r=" + COLLAPSE, "4xi32"),
         (
-            (
-                "%flat=tensor.collapse_shape %table [[0,1]] : tensor<2x2xi32> into tens"
-                "or<4xi32>\n%r=tensor.expand_shape %flat [[0,1]] output_shape [2,2] : te"
-                "nsor<4xi32> into tensor<2x2xi32>"
-            ),
+            f"%flat={COLLAPSE}\n"
+            "%r=tensor.expand_shape %flat [[0,1]] output_shape [2,2] : tensor<4xi32> into tensor<2x2xi32>",
             "2x2xi32",
         ),
         (
-            (
-                "%shape=arith.constant dense<[4]> : tensor<1xi64>\n%r=tensor.reshape %ta"
-                "ble(%shape) : (tensor<2x2xi32>,tensor<1xi64>) -> tensor<4xi32>"
-            ),
+            "%shape=arith.constant dense<[4]> : tensor<1xi64>\n"
+            "%r=tensor.reshape %table(%shape) : (tensor<2x2xi32>,tensor<1xi64>) -> tensor<4xi32>",
             "4xi32",
         ),
         (
-            (
-                "%e=tensor.empty() : tensor<2x2x2xi32>\n%r=linalg.broadcast ins(%table:t"
-                "ensor<2x2xi32>) outs(%e:tensor<2x2x2xi32>) dimensions=[0]"
-            ),
+            "%e=tensor.empty() : tensor<2x2x2xi32>\n"
+            "%r=linalg.broadcast ins(%table:tensor<2x2xi32>) outs(%e:tensor<2x2x2xi32>) dimensions=[0]",
             "2x2x2xi32",
         ),
         (
-            (
-                "%z=arith.constant 0:i32\n%r=tensor.pad %table low[1,1] high[1,1] { ^bb0"
-                "(%i:index,%j:index): tensor.yield %z:i32 } : tensor<2x2xi32> to tensor"
-                "<4x4xi32>"
-            ),
+            "%z=arith.constant 0:i32\n%r=tensor.pad %table low[1,1] high[1,1] { ^bb0(%i:index,%j:index): "
+            "tensor.yield %z:i32 } : tensor<2x2xi32> to tensor<4x4xi32>",
             "4x4xi32",
         ),
     ],
 )
 def test_nonuniform_literal_tables_cannot_hide_behind_movement(carrier, result_type):
     module = parse_mlir_text(
-        "module { func.func @forward(%x:tensor<2x2xi32>) -> tensor<"
-        + result_type
-        + "> {\n%table=arith.constant dense<[[1,2],[3,4]]> : tensor<2x2xi32>\n"
-        + carrier
-        + "\nfunc.return %r : tensor<"
-        + result_type
-        + ">\n}}"
+        f"module {{ func.func @forward(%x:tensor<2x2xi32>) -> tensor<{result_type}> {{\n"
+        f"%table=arith.constant dense<[[1,2],[3,4]]> : tensor<2x2xi32>\n{carrier}\n"
+        f"func.return %r : tensor<{result_type}>\n}}}}"
     )
     module.verify()
     # prepare() applies this same structural classifier to both source and
@@ -373,27 +344,6 @@ def test_nonuniform_literal_tables_cannot_hide_behind_movement(carrier, result_t
         proof = construction_evidence(screened)
         assert proof["status"] == "host"
         assert any(e["reason"] == "nonuniform_literal_result_construction" for e in proof["evidence"])
-
-
-def test_runtime_ieee_selection_with_literal_ancestry_is_not_an_offset():
-    module = source("""%z=arith.constant 0.0 : f32
-        %nan=arith.cmpf uno, %a,%a : f32
-        %lhs=arith.select %nan,%z,%a : f32
-        %rhs=arith.select %nan,%z,%b : f32
-        %sum=arith.addf %lhs,%rhs : f32
-        %i=arith.fptosi %sum : f32 to i32
-        %v=arith.sitofp %i : i32 to f32""")
-    assert construction_evidence(module, excluded=["readout_offset_rounding"])["status"] == "eligible"
-
-
-def test_dense_splat_literal_offset_still_refuses():
-    module = source(
-        """%sum=arith.addf %a,%b : f32
-        %i=arith.fptosi %sum : f32 to i32
-        %v=arith.sitofp %i : i32 to f32""",
-        literal=True,
-    )
-    assert construction_evidence(module, excluded=["readout_offset_rounding"])["status"] == "host"
 
 
 @pytest.mark.parametrize("seed,host", [("%half", True), ("%x", False)])
