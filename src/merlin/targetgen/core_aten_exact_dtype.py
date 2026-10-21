@@ -234,12 +234,24 @@ def prepare_bitwise(directory, report, selection, provider, package, module):
             source_sha256=manifest["source_sha256"],
             output_indices=materialized_aliases,
         )
-    document = {"selection": selection, **plan}
     (directory / "model.mlir").write_text(source + "\n")
+    return publish_plan(directory, report["cases"], selection, plan)
+
+
+def publish_plan(directory, records, selection, plan):
+    """Write spec-int8-admission.json (selection first) and bind plan to each record."""
+    document = dict(selection=selection, **plan)
     (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
-    for record in report["cases"]:
+    for record in records:
         record.update(numeric_admission=plan, numeric_selection=selection["identities"])
     return document
+
+
+def _host_plan(directory, records, selection, code, reason, **details):
+    """A complete host placement with no device sites."""
+    plan = dict(status="host", refusal_code=code, **details, host_reason=reason)
+    plan.update(quantized_contractions=0, native_contractions=0, quantized_non_contraction_sites=0, sites=[])
+    return publish_plan(directory, records, selection, plan)
 
 
 def empty_host_plan(directory, report, selection):
@@ -254,20 +266,8 @@ def empty_host_plan(directory, report, selection):
         empty_outputs = bool(outputs) and all(prod(abi["shape"]) == 0 for abi in outputs)
         if not empty_outputs:
             return None
-    plan = dict(
-        status="host",
-        refusal_code="empty_tensor_no_device_work",
-        host_reason="empty_tensor_no_device_work",
-        quantized_contractions=0,
-        native_contractions=0,
-        quantized_non_contraction_sites=0,
-        sites=[],
-    )
-    document = dict(selection=selection, **plan)
-    (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
-    for record in cases:
-        record.update(numeric_admission=plan, numeric_selection=selection["identities"])
-    return document
+    code = "empty_tensor_no_device_work"
+    return _host_plan(directory, cases, selection, code, code)
 
 
 def native_dtype_request(report):
@@ -286,18 +286,5 @@ def retain_native_host(directory, report, selection):
     path = directory / "exact-dtype-refusal.json"
     if path.exists():
         reason = json.loads(path.read_text())
-    plan = dict(
-        status="host",
-        refusal_code="native_dtype_exact_components_unavailable",
-        refusal_details=reason,
-        host_reason=reason["reason"],
-        quantized_contractions=0,
-        native_contractions=0,
-        quantized_non_contraction_sites=0,
-        sites=[],
-    )
-    document = dict(selection=selection, **plan)
-    (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
-    for record in report["cases"]:
-        record.update(numeric_admission=plan, numeric_selection=selection["identities"])
-    return document
+    code = "native_dtype_exact_components_unavailable"
+    return _host_plan(directory, report["cases"], selection, code, reason["reason"], refusal_details=reason)

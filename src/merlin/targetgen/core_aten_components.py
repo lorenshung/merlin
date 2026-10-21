@@ -544,9 +544,7 @@ def prepare_integer_components(
             host_floor=dict(status="not_applicable", comparison="independent_quantized_exact_rational"),
             quantized_non_contraction_sites=len(sites),
         )
-    document = dict(selection=selection, **plan)
+    from merlin.targetgen.core_aten_exact_dtype import publish_plan
+
     (directory / "model.mlir").write_text(source + "\n")
-    (directory / "spec-int8-admission.json").write_text(json.dumps(document, indent=2) + "\n")
-    for record in records:
-        record.update(numeric_admission=plan, numeric_selection=selection["identities"])
-    return document
+    return publish_plan(directory, records, selection, plan)
