@@ -1,6 +1,39 @@
 """A declared observer domain grants no access to graded input values."""
-import copy
 import pytest
+
+NONFINITE='byte_storage_zero_nan_saturating_infinity'
+STEP=.015625
+RECIPE=dict(schema='quant_recipe_v1',status='derived',families=['contraction'],
+    weight=dict(dtype='int8',granularity='tensor',symmetric=True,quant_min=-127,quant_max=127),
+    activation=dict(dtype='int8',granularity='tensor',symmetric=True,quant_min=-128,quant_max=127,mode='static'),
+    calibration_domain=dict(schema='merlin.declared_observer_domain.v1',minimum=-1.,maximum=1.,evaluation_inputs='never_read',scale_policy='enclosing_power_of_two'))
+
+
+def qdq(graph,node,scale=STEP,quantize=True):
+    """``node`` through an int8 quantize/dequantize pair at ``scale`` (only the dequantize if not ``quantize``)."""
+    import torch
+    import torch.ao.quantization.fx._decomposed
+    ops=torch.ops.quantized_decomposed;args=(scale,0,-128,127,torch.int8)
+    if quantize:node=graph.call_function(ops.quantize_per_tensor.default,(node,*args))
+    return graph.call_function(ops.dequantize_per_tensor.default,(node,*args))
+
+
+def module(graph,result):
+    import torch
+    graph.output(result);return torch.fx.GraphModule(torch.nn.Module(),graph)
+
+
+def declare(model,**policy):
+    """Declare the byte-storage nonfinite contract (plus ``policy``) as ``model``'s capture policy."""
+    model._recipe_quantization_stats={'framework_capture_policy':{'quantization_nonfinite':NONFINITE,**policy}}
+    return model
+
+
+def readout(*args):
+    """A model of one ``m2m_q.exact_readout(acc, STEP, [STEP], 1., bias, *args)``."""
+    import torch
+    graph=torch.fx.Graph();acc=graph.placeholder('acc');bias=graph.placeholder('bias')
+    return module(graph,graph.call_function(torch.ops.m2m_q.exact_readout.default,(acc,STEP,[STEP],1.,bias,*args)))
 
 
 def test_program_qparams_and_integer_kernel_are_payload_independent():
@@ -12,11 +45,7 @@ def test_program_qparams_and_integer_kernel_are_payload_independent():
         def forward(self,x,y):
             return x @ y
 
-    recipe=dict(schema='quant_recipe_v1',status='derived',families=['contraction'],
-        weight=dict(dtype='int8',granularity='tensor',symmetric=True,quant_min=-127,quant_max=127),
-        activation=dict(dtype='int8',granularity='tensor',symmetric=True,quant_min=-128,quant_max=127,mode='static'),
-        quantization_nonfinite='byte_storage_zero_nan_saturating_infinity',
-        calibration_domain=dict(schema='merlin.declared_observer_domain.v1',minimum=-1.,maximum=1.,evaluation_inputs='never_read',scale_policy='enclosing_power_of_two'))
+    recipe=dict(RECIPE,quantization_nonfinite=NONFINITE)
     graphs=[];qparams=[]
     class ForbiddenStream:
         def __iter__(self):raise AssertionError('evaluation calibration stream was inspected')
@@ -44,11 +73,7 @@ def test_nonexact_affine_intermediate_refuses_before_payload_agreement(code):
     class Model(torch.nn.Module):
         def forward(self, x):return x * 1.1
 
-    recipe = dict(schema='quant_recipe_v1', status='derived', families=['contraction', 'affine_map'],
-        weight=dict(dtype='int8', granularity='tensor', symmetric=True, quant_min=-127, quant_max=127),
-        activation=dict(dtype='int8', granularity='tensor', symmetric=True, quant_min=-128, quant_max=127, mode='static'),
-        calibration_domain=dict(schema='merlin.declared_observer_domain.v1', minimum=-1., maximum=1.,
-            evaluation_inputs='never_read', scale_policy='enclosing_power_of_two'))
+    recipe = dict(RECIPE, families=['contraction', 'affine_map'])
     # Code 1 happened to agree, whereas code 15 rounds the exact 16.5+epsilon
     # to an intermediate f32 tie. Both programs must receive the same refusal.
     with pytest.raises(NoEligibleRecipeOperations) as caught:
@@ -96,21 +121,13 @@ def test_declared_nonfinite_byte_boundary_matches_every_half_nan_word(token,low,
 
 def test_rational_aggregate_can_feed_a_declared_nan_selector():
     torch=pytest.importorskip('torch')
-    import torch.ao.quantization.fx._decomposed
     from merlin.targetgen.exact_quantized_reference import run
     graph=torch.fx.Graph()
-    source=graph.placeholder('x')
-    quant=graph.call_function(torch.ops.quantized_decomposed.quantize_per_tensor.default,(source,.015625,0,-128,127,torch.int8))
-    real=graph.call_function(torch.ops.quantized_decomposed.dequantize_per_tensor.default,(quant,.015625,0,-128,127,torch.int8))
-    pooled=graph.call_function(torch.ops.aten.avg_pool2d.default,(real,[2,2]))
+    pooled=graph.call_function(torch.ops.aten.avg_pool2d.default,(qdq(graph,graph.placeholder('x')),[2,2]))
     mask=graph.call_function(torch.ops.aten.isnan.default,(pooled,))
     fill=graph.call_function(torch.ops.aten.full_like.default,(pooled,0.))
     selected=graph.call_function(torch.ops.aten.where.self,(mask,fill,pooled))
-    quant=graph.call_function(torch.ops.quantized_decomposed.quantize_per_tensor.default,(selected,.015625,0,-128,127,torch.int8))
-    result=graph.call_function(torch.ops.quantized_decomposed.dequantize_per_tensor.default,(quant,.015625,0,-128,127,torch.int8))
-    graph.output(result)
-    model=torch.fx.GraphModule(torch.nn.Module(),graph)
-    model._recipe_quantization_stats={'framework_capture_policy':{'quantization_nonfinite':'byte_storage_zero_nan_saturating_infinity'}}
+    model=declare(module(graph,qdq(graph,selected)))
     for value in (0.,1.e30,float('inf'),float('nan')):
         inputs=(torch.full((1,1,2,2),value),)
         expected=run(model,inputs).output
@@ -160,10 +177,8 @@ def test_readout_special_overlay_is_only_the_broadcast_bias_dependence(beta,relu
     pytest.importorskip('m2m.capture.integer_readout')
     from fractions import Fraction
     from merlin.targetgen.declared_readout_specials import retain_special_readouts
-    graph=torch.fx.Graph();acc=graph.placeholder('acc');bias=graph.placeholder('bias')
-    result=graph.call_function(torch.ops.m2m_q.exact_readout.default,(acc,.015625,[.015625],1.,bias,beta,.015625,3,-128,127,relu,False))
-    graph.output(result);model=torch.fx.GraphModule(torch.nn.Module(),graph)
-    assert retain_special_readouts(model,'byte_storage_zero_nan_saturating_infinity')==1
+    model=readout(beta,STEP,3,-128,127,relu,False)
+    assert retain_special_readouts(model,NONFINITE)==1
     values=torch.tensor([[64,-64,0,128]],dtype=torch.int32)
     residual=torch.tensor([float('nan'),float('inf'),-float('inf'),1.25])
     got=model(values,residual)
@@ -180,22 +195,16 @@ def test_readout_special_overlay_is_only_the_broadcast_bias_dependence(beta,relu
 
 def test_declared_special_bias_is_discarded_only_at_the_final_quantizer():
     torch=pytest.importorskip('torch')
-    import torch.ao.quantization.fx._decomposed
     from merlin.targetgen.exact_quantized_reference import run
     graph=torch.fx.Graph();x=graph.placeholder('x');bias=graph.placeholder('bias')
-    q=graph.call_function(torch.ops.quantized_decomposed.quantize_per_tensor.default,(x,.015625,0,-128,127,torch.int8))
-    real=graph.call_function(torch.ops.quantized_decomposed.dequantize_per_tensor.default,(q,.015625,0,-128,127,torch.int8))
-    result=graph.call_function(torch.ops.aten.add.Tensor,(real,bias))
-    result=graph.call_function(torch.ops.aten.relu.default,(result,))
-    q=graph.call_function(torch.ops.quantized_decomposed.quantize_per_tensor.default,(result,.015625,0,-128,127,torch.int8))
-    result=graph.call_function(torch.ops.quantized_decomposed.dequantize_per_tensor.default,(q,.015625,0,-128,127,torch.int8))
-    graph.output(result);model=torch.fx.GraphModule(torch.nn.Module(),graph)
-    model._recipe_quantization_stats={'framework_capture_policy':{'quantization_nonfinite':'byte_storage_zero_nan_saturating_infinity'}}
+    result=graph.call_function(torch.ops.aten.add.Tensor,(qdq(graph,x),bias))
+    relu=graph.call_function(torch.ops.aten.relu.default,(result,))
+    model=declare(module(graph,qdq(graph,relu)))
     inputs=(torch.ones(4),torch.tensor([float('nan'),float('inf'),-float('inf'),.25]))
     actual=run(model,inputs).output;expected=model(*inputs)
     assert torch.equal(actual.view(torch.uint8),expected.view(torch.uint8))
     # Removing the Q boundary must not manufacture an IEEE NaN payload claim.
-    output=next(n for n in graph.nodes if n.op=='output');output.args=(next(n for n in graph.nodes if n.target==torch.ops.aten.relu.default),)
+    output=next(n for n in graph.nodes if n.op=='output');output.args=(relu,)
     graph.eliminate_dead_code();model.recompile()
     with pytest.raises(ValueError,match='final byte quantizer'):run(model,inputs)
 
@@ -207,10 +216,8 @@ def test_floating_residual_overlay_preserves_single_nan_words(beta,relu):
     torch=pytest.importorskip('torch')
     pytest.importorskip('m2m.capture.integer_readout')
     from merlin.targetgen.declared_readout_specials import retain_special_readouts
-    graph=torch.fx.Graph();acc=graph.placeholder('acc');bias=graph.placeholder('bias')
-    result=graph.call_function(torch.ops.m2m_q.exact_readout.default,(acc,.015625,[.015625],1.,bias,beta,None,0,-128,127,relu))
-    graph.output(result);model=torch.fx.GraphModule(torch.nn.Module(),graph)
-    assert retain_special_readouts(model,'byte_storage_zero_nan_saturating_infinity',floating_policy='single_residual_quiet_word_f32')==1
+    model=readout(beta,None,0,-128,127,relu)
+    assert retain_special_readouts(model,NONFINITE,floating_policy='single_residual_quiet_word_f32')==1
     original=torch.tensor([0x7f800001,0xffc00023,0x7f800000,0xff800000,0x3fa00000],dtype=torch.uint32)
     residual=original.view(torch.float32);accumulator=torch.full((2,5),64,dtype=torch.int32)
     actual=model(accumulator,residual)
@@ -225,29 +232,21 @@ def test_floating_residual_overlay_preserves_single_nan_words(beta,relu):
 
 def test_floating_reference_needs_a_declared_single_nan_word_contract():
     torch=pytest.importorskip('torch')
-    import torch.ao.quantization.fx._decomposed
     from merlin.targetgen.exact_quantized_reference import run
     graph=torch.fx.Graph();x=graph.placeholder('x');bias=graph.placeholder('bias')
-    q=graph.call_function(torch.ops.quantized_decomposed.quantize_per_tensor.default,(x,.015625,0,-128,127,torch.int8))
-    real=graph.call_function(torch.ops.quantized_decomposed.dequantize_per_tensor.default,(q,.015625,0,-128,127,torch.int8))
-    result=graph.call_function(torch.ops.aten.add.Tensor,(real,bias));graph.output(result)
-    model=torch.fx.GraphModule(torch.nn.Module(),graph)
-    model._recipe_quantization_stats={'framework_capture_policy':{'quantization_nonfinite':'byte_storage_zero_nan_saturating_infinity','readout_specials':'single_residual_quiet_word_f32'}}
+    model=declare(module(graph,graph.call_function(torch.ops.aten.add.Tensor,(qdq(graph,x),bias))),readout_specials='single_residual_quiet_word_f32')
     bias=torch.tensor([0x7f800001,0xffc00023,0x7f800000,0xff800000],dtype=torch.uint32).view(torch.float32)
     inputs=(torch.ones(4),bias)
     assert torch.equal(run(model,inputs).output.view(torch.uint32),model(*inputs).view(torch.uint32))
 
 
 def test_ambiguous_floating_residual_coefficient_refuses_statically():
-    torch=pytest.importorskip('torch')
+    pytest.importorskip('torch')
     pytest.importorskip('m2m.capture.integer_readout')
     from merlin.targetgen.declared_readout_specials import retain_special_readouts
     from merlin.targetgen.capture_refusals import NumericCaptureRefused
-    graph=torch.fx.Graph();acc=graph.placeholder('acc');bias=graph.placeholder('bias')
-    result=graph.call_function(torch.ops.m2m_q.exact_readout.default,(acc,.015625,[.015625],1.,bias,-1.))
-    graph.output(result);model=torch.fx.GraphModule(torch.nn.Module(),graph)
     with pytest.raises(NumericCaptureRefused,match='single-NaN word proof'):
-        retain_special_readouts(model,'byte_storage_zero_nan_saturating_infinity',floating_policy='single_residual_quiet_word_f32')
+        retain_special_readouts(readout(-1.),NONFINITE,floating_policy='single_residual_quiet_word_f32')
 
 
 def test_exact_capture_agreement_compares_nonfinite_storage_words():
@@ -274,14 +273,11 @@ def test_static_readout_refusal_has_a_machine_readable_capture_receipt(tmp_path,
 
 def test_selected_f32_overflow_is_declared_without_changing_legacy_default():
     torch=pytest.importorskip('torch')
-    import torch.ao.quantization.fx._decomposed
     from merlin.targetgen.exact_quantized_reference import run
-    graph=torch.fx.Graph();x=graph.placeholder('x');y=graph.placeholder('y')
-    scale=float(torch.tensor(1.e38,dtype=torch.float32))
-    a=graph.call_function(torch.ops.quantized_decomposed.dequantize_per_tensor.default,(x,scale,0,-128,127,torch.int8))
-    b=graph.call_function(torch.ops.quantized_decomposed.dequantize_per_tensor.default,(y,scale,0,-128,127,torch.int8))
-    result=graph.call_function(torch.ops.aten.mm.default,(a,b));graph.output(result)
-    model=torch.fx.GraphModule(torch.nn.Module(),graph);inputs=(torch.tensor([[3]],dtype=torch.int8),torch.tensor([[5]],dtype=torch.int8))
+    graph=torch.fx.Graph();scale=float(torch.tensor(1.e38,dtype=torch.float32))
+    a,b=(qdq(graph,graph.placeholder(name),scale,quantize=False) for name in 'xy')
+    model=module(graph,graph.call_function(torch.ops.aten.mm.default,(a,b)))
+    inputs=(torch.tensor([[3]],dtype=torch.int8),torch.tensor([[5]],dtype=torch.int8))
     with pytest.raises(ValueError,match='boundary overflows'):run(model,inputs)
-    model._recipe_quantization_stats={'framework_capture_policy':{'quantization_nonfinite':'byte_storage_zero_nan_saturating_infinity','f32_boundary_overflow':'ieee_infinity'}}
+    declare(model,f32_boundary_overflow='ieee_infinity')
     assert run(model,inputs).output.view(torch.uint32).tolist()==[[0x7f800000]]
