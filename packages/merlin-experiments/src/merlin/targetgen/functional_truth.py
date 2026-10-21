@@ -1,5 +1,7 @@
 """User-reviewed Phase 0 (functional, all native ops) semantic rules."""
 
+import math
+
 from .functional_truth_linear import (
     r_add_scalar,
     r_add_tensor,
@@ -281,6 +283,33 @@ def derive(c):
 
 
 # ----------------------------------------------------------------------------------------------
+def exact_identity(c):
+    """Ruling 2026-10-20 ("exact identities are bit-exact"): a must_accelerate computation that is exactly the
+    identity on its input bits is movement, graded "bit_exact_vs_eager" whatever its op family.
+
+    Decided from the schema arguments and dtypes only (never tensor values or case ids). Only computations
+    whose eager result equals the input bits for every finite value, infinity, signed zero and NaN qualify:
+      * real floating x * 1 and x / 1 (mul.Scalar, div.Scalar, div.Scalar_mode with rounding_mode None);
+      * complex addmm with alpha = 0 and beta = 1 (the alpha = 0 contract reads neither matrix, and beta = 1
+        does not scale the input).
+    Not identities: x + 0.0 (-0 + 0 = +0), eager f16/bf16 x - 0.0 (also returns +0 for -0), a complex scale by
+    (1+0j) (eager's full complex product keeps 0*inf terms), and real addmm with alpha = 0 (eager still forms
+    0 * (m1 @ m2), so inf/NaN in the matrices propagate)."""
+    if not c.ins or not c.outs:
+        return False
+    x, o = c.ins[0], c.outs[0]
+    if x.dtype != o.dtype:
+        return False
+    other = scalar_val(c.a.get("other"))
+    if c.ov in ("aten.mul.Scalar", "aten.div.Scalar") or (
+        c.ov == "aten.div.Scalar_mode" and c.a.get("rounding_mode") is None
+    ):
+        return dclass(x.dtype) == "float" and isinstance(other, (int, float)) and other == 1
+    if c.ov == "aten.addmm.default" and dclass(x.dtype) == "complex":
+        return scalar_val(c.a.get("alpha", 1)) == 0 and scalar_val(c.a.get("beta", 1)) == 1
+    return False
+
+
 def precision_class(c, v):
     """(b) quantized_exact for float/complex arithmetic; bit_exact_vs_eager for integer/bool arithmetic,
     movement (incl. float movement), literal fills and identity specializations."""
@@ -292,6 +321,8 @@ def precision_class(c, v):
         return "quantized_exact"  # float result of float arithmetic on converted integers (ruling 5)
     if v.truth != MUST:
         return "n/a_host"
+    if exact_identity(c):
+        return "bit_exact_vs_eager"
     fp_in = any(dclass(t.dtype) in ("float", "complex") for t in c.ins)
     if v.family[:2] in ("N1", "N2", "N3"):
         return "quantized_exact" if fp_in else "bit_exact_vs_eager"

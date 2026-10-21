@@ -4,7 +4,9 @@ The deterministic `merlin.targetgen.functional_truth.expectation` is vendored fr
 `/scratch/loren/core-aten-snap/phase0-release/truth/truth_rules.py`, including the
 2026-10-20 forced-zero-division ruling, scalar threshold promotion and quantized
 float widening. Reporting rosters, payload checking and run13 placement I/O are
-excluded. The rules inspect schema, scalar arguments, dtype and shapes only.
+excluded. The rules inspect schema, scalar arguments, dtype and shapes only. The
+2026-10-20 user ruling "exact identities are bit-exact" (`exact_identity`: real x*1 and x/1,
+complex addmm with alpha=0 and beta=1) is vendored as well.
 The specification remains primitive families and constraints; operation dispatch
 in the semantic classifier implements the user-reviewed truth derivations.
 
