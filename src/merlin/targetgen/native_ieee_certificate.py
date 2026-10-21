@@ -136,6 +136,7 @@ def proof_sources():
         "src/merlin/llvmlower/uniform_numeric_literals.py",
         "src/merlin/llvmlower/floating_component_readout.py",
         "src/merlin/llvmlower/fixed_point_ir.py",
+        "src/merlin/llvmlower/_ir.py",
     ]
     return {name: hashlib.sha256((root / name.removeprefix("src/")).read_bytes()).hexdigest() for name in names}
 
