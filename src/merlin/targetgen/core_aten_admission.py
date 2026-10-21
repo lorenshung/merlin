@@ -80,17 +80,18 @@ def prepare(directory, report, implementation, **kwargs):
         native_unit_operator_review=review_record(native_contract),
         native_unit_policy=native,
     )
+    # The first refusal names the reason; later native checks do not overwrite it.
     if native["status"] == "host":
         admission.update(status="host", reason_code="non_native_unit_construction")
-    if not admission["native_unit_operator_review"]["operator_accepted"]:
+    elif not admission["native_unit_operator_review"]["operator_accepted"]:
         admission.update(status="host", reason_code="native_unit_operator_acceptance_required")
     from merlin.targetgen.native_precision_contract import proves_quantized_model, requires_quantized_model
 
     if requires_quantized_model(parse_mlir_text(original_files["model.mlir"].decode())):
         admission["precision_class"] = "quantized_exact"
-        if not proves_quantized_model(plan, software):
+        if admission["status"] == "device" and not proves_quantized_model(plan, software):
             admission.update(status="host", reason_code="declared_quantized_precision_requires_quantized_model")
-    if plan.get("capture_recipe"):
+    if admission["status"] == "device" and plan.get("capture_recipe"):
         from merlin.targetgen.native_integer_work import uncovered
 
         missing = uncovered(parse_mlir_text((directory / "model.mlir").read_text()), plan.get("schedule_proof"))

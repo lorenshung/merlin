@@ -160,3 +160,25 @@ def test_wrong_model_rolls_back_source_abi_and_retained_record_identity(tmp_path
     assert report["output_count"] == 1
     assert report["cases"][0] is record
     assert record["input_abi"] == [dict(dtype="f32", shape=[2])]
+
+
+def test_first_native_refusal_keeps_its_reason(tmp_path, monkeypatch):
+    # A later precision check does not overwrite the reason of an earlier refusal.
+    import yaml
+
+    from merlin.targetgen import native_precision_contract, operator_review
+    from merlin.targetgen.core_aten_admission import prepare
+
+    (tmp_path / "model.mlir").write_text(
+        "module { func.func @forward(%x: tensor<2xf32>) -> tensor<2xf32> { return %x : tensor<2xf32> } }"
+    )
+    spec = software()
+    spec["numerical_semantics"]["native_unit_contract"] = dict(excluded_constructions=[])
+    path = tmp_path / "spec.yaml"
+    path.write_text(yaml.safe_dump(spec))
+    report = dict(cases=[dict(status="bundled", input_abi=[dict(dtype="f32", shape=[2])])], output_count=1)
+    monkeypatch.setattr(native_precision_contract, "requires_quantized_model", lambda _: True)
+    monkeypatch.setattr(operator_review, "review_record", lambda _: dict(operator_accepted=False))
+    plan = prepare(tmp_path, report, lambda *a, **k: dict(selection=dict(identities={}), exact_dtype_sites=1),
+                   software_spec=path)
+    assert plan["refusal_code"] == "native_unit_operator_acceptance_required"
