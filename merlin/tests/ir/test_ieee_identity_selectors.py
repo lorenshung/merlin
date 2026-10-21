@@ -1,15 +1,15 @@
 """Dropping an identity selector must preserve the source's NaN-quieting path."""
 
 import pytest
-from mlir_fixtures import assert_unchanged
+from mlir_fixtures import assert_unchanged, forward, generic
+
+from merlin.frontends.linalg_mlir import parse_mlir_text
+from merlin.llvmlower.image_folds import fold_ieee_identity_selectors, fold_zero_sign_selectors
 
 
 @pytest.mark.parametrize("dtype,bits", [("f16", 16), ("bf16", 16), ("f32", 32), ("f64", 64)])
 @pytest.mark.parametrize("correct", [False, True])
 def test_zero_sign_selector_is_identity_only_with_the_complete_sign_word(dtype, bits, correct):
-    from merlin.frontends.linalg_mlir import parse_mlir_text
-    from merlin.llvmlower.image_folds import fold_zero_sign_selectors
-
     mask = -(1 << (bits - 1)) if correct else (1 << (bits - 2))
     module = parse_mlir_text(f"""module {{func.func @forward(%x:{dtype}) -> {dtype} {{
       %zero=arith.constant 0.0 : {dtype}
@@ -25,46 +25,23 @@ def test_zero_sign_selector_is_identity_only_with_the_complete_sign_word(dtype, 
     module.verify()
 
 
-from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.image_folds import fold_ieee_identity_selectors
-
-
 def source(predicate="ogt", factor="1.0", *, swapped=False, unknown=False):
-    choices = "%m,%x" if swapped else "%x," + ("%opaque" if unknown else "%m")
-    return parse_mlir_text(f"""module {{func.func @forward(%x:tensor<4xf32>) -> tensor<4xf32> {{
-      %z=arith.constant 0.0 : f32
+    t, mask = "tensor<4xf32>", "tensor<4xi1>"
+    prelude = f"""%z=arith.constant 0.0 : f32
       %one=arith.constant {factor} : f32
-      %zt=tensor.splat %z : tensor<4xf32>
-      %ot=tensor.splat %one : tensor<4xf32>
-      %e=tensor.empty() : tensor<4xf32>
-      %be=tensor.empty() : tensor<4xi1>
-      %b=linalg.generic {{indexing_maps=[
-          affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types=["parallel"]}}
-        ins(%x,%zt:tensor<4xf32>,tensor<4xf32>) outs(%be:tensor<4xi1>) {{
-        ^bb0(%x0:f32,%z0:f32,%u:i1):
-        %p=arith.cmpf {predicate},%x0,%z0 : f32
-        linalg.yield %p : i1
-      }} -> tensor<4xi1>
-      %m=linalg.generic {{indexing_maps=[
-          affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types=["parallel"]}}
-        ins(%x,%ot:tensor<4xf32>,tensor<4xf32>) outs(%e:tensor<4xf32>) {{
-        ^bb1(%x1:f32,%one1:f32,%u:f32):
-        %p=arith.mulf %x1,%one1 : f32
-        linalg.yield %p : f32
-      }} -> tensor<4xf32>
-      {'%opaque="fixture.unknown"(%m) : (tensor<4xf32>) -> tensor<4xf32>' if unknown else ""}
-      %r=linalg.generic {{indexing_maps=[
-          affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],
-          iterator_types=["parallel"]}}
-        ins(%b,{choices}:tensor<4xi1>,tensor<4xf32>,tensor<4xf32>) outs(%e:tensor<4xf32>) {{
-        ^bb2(%condition:i1,%plain:f32,%changed:f32,%out:f32):
-        %s=arith.select %condition,%plain,%changed : f32
-        linalg.yield %s : f32
-      }} -> tensor<4xf32>
-      return %r : tensor<4xf32>
-    }} }}""")
+      %zt=tensor.splat %z : {t}
+      %ot=tensor.splat %one : {t}
+      %e=tensor.empty() : {t}
+      %be=tensor.empty() : {mask}
+"""
+    compare = generic(
+        [("%x", t), ("%zt", t)], mask, f"%p=arith.cmpf {predicate},%a,%b : f32", yields="%p", name="%cond", out="%be"
+    )
+    scale = generic([("%x", t), ("%ot", t)], t, "%p=arith.mulf %a,%b : f32", yields="%p", name="%m", out="%e")
+    carrier = '\n%opaque="fixture.unknown"(%m) : (tensor<4xf32>) -> tensor<4xf32>' if unknown else ""
+    choices = [("%m", t), ("%x", t)] if swapped else [("%x", t), ("%opaque" if unknown else "%m", t)]
+    select = generic([("%cond", mask), *choices], t, "%s=arith.select %a,%b,%c : f32", yields="%s", out="%e")
+    return forward(f"%x:{t}", t, f"{prelude}{compare}\n{scale}{carrier}\n{select}")
 
 
 @pytest.mark.parametrize("predicate,swapped", [("ogt", False), ("ole", False), ("ugt", True), ("uno", True)])

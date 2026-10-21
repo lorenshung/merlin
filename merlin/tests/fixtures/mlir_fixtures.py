@@ -47,8 +47,9 @@ def generic(
     out, typ = out or f"{name}_init", element(result)
     params = "".join(f"%{arg}:{element(t)}," for arg, (_, t) in zip(args, ins))
     attrs = f" attrs={attrs}" if attrs else ""
+    sources = f"ins({','.join(v for v, _ in ins)}:{','.join(t for _, t in ins)})" if ins else ""
     return f"""{init}{name}=linalg.generic {{indexing_maps=[{maps}],iterator_types=[{kinds}]}}
-  ins({",".join(v for v, _ in ins)}:{",".join(t for _, t in ins)}) outs({out}:{result}){attrs} {{
+  {sources} outs({out}:{result}){attrs} {{
 ^bb0({params}{acc}:{typ}):
 {body}
 linalg.yield {yields} : {typ}

@@ -1,7 +1,7 @@
 """Index-selected integer prefixes are exact masked contractions, not host scans."""
 
 import pytest
-from mlir_fixtures import assert_unchanged
+from mlir_fixtures import assert_unchanged, forward, generic
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.integer_components import rewrite_integer_components
@@ -10,22 +10,16 @@ from merlin.targetgen.native_unit_policy import construction_evidence
 
 
 def source(dtype="i64", *, seed="0", predicate="ule", flags=""):
-    return parse_mlir_text(f"""module {{ func.func @forward(%x:tensor<2x3x{dtype}>) -> tensor<2x3x{dtype}> {{
-      %z=arith.constant {seed} : {dtype}
-      %empty=tensor.splat %z : tensor<2x3x{dtype}>
-      %r=linalg.generic {{indexing_maps=[affine_map<(d0,d1,d2)->(d2,d1)>,
-            affine_map<(d0,d1,d2)->(d0,d1)>],iterator_types=["parallel","parallel","reduction"]}}
-        ins(%x:tensor<2x3x{dtype}>) outs(%empty:tensor<2x3x{dtype}>) {{
-        ^bb0(%a:{dtype},%acc:{dtype}):
-          %p=linalg.index 0 : index
+    t = f"tensor<2x3x{dtype}>"
+    body = f"""%p=linalg.index 0 : index
           %k=linalg.index 2 : index
           %cond=arith.cmpi {predicate},%k,%p : index
           %v=arith.select %cond,%a,%z : {dtype}
-          %s=arith.{"addf" if dtype == "f32" else "addi"} %acc,%v {flags} : {dtype}
-          linalg.yield %s : {dtype}
-        }} -> tensor<2x3x{dtype}>
-      func.return %r : tensor<2x3x{dtype}>
-    }} }}""")
+          %s=arith.{"addf" if dtype == "f32" else "addi"} %acc,%v {flags} : {dtype}"""
+    maps = ["affine_map<(d0,d1,d2)->(d2,d1)>", "affine_map<(d0,d1,d2)->(d0,d1)>"]
+    iterators = ["parallel", "parallel", "reduction"]
+    total = generic([("%x", t)], t, body, yields="%s", maps=maps, iterators=iterators, out="%empty", acc="%acc")
+    return forward(f"%x:{t}", t, f"%z=arith.constant {seed} : {dtype}\n%empty=tensor.splat %z : {t}\n{total}")
 
 
 @pytest.mark.parametrize("dtype", ["i8", "i32", "i64"])

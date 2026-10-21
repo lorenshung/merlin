@@ -3,37 +3,28 @@
 from fractions import Fraction
 
 import pytest
+from mlir_fixtures import forward, generic
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.static_polynomials import PolynomialRefusal, analyze_static_polynomial
 
 
 def source(expression):
-    module = parse_mlir_text(
-        """module {
-      func.func @forward(%x: tensor<3xf16>, %y: tensor<3xf16>) -> tensor<1xf32> {
-        %e = tensor.empty() : tensor<1xf32>
-        %r = linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          outs(%e : tensor<1xf32>) {
-        ^bb0(%unused:f32):
-          %lo=arith.constant 0 : index
+    body = f"""%lo=arith.constant 0 : index
           %hi=arith.constant 3 : index
           %step=arith.constant 1 : index
           %zero=arith.constant 0.0 : f32
-          %sum=scf.for %i=%lo to %hi step %step iter_args(%acc=%zero) -> (f32) {
+          %sum=scf.for %i=%lo to %hi step %step iter_args(%acc=%zero) -> (f32) {{
             %a=tensor.extract %x[%i] : tensor<3xf16>
             %b=tensor.extract %y[%i] : tensor<3xf16>
             %af=arith.extf %a : f16 to f32
             %bf=arith.extf %b : f16 to f32
-            EXPR
+            {expression}
             %s=arith.addf %acc,%p : f32
             scf.yield %s : f32
-          }
-          linalg.yield %sum : f32
-        } -> tensor<1xf32>
-        return %r : tensor<1xf32>
-      }}""".replace("EXPR", expression)
-    )
+          }}"""
+    loop = generic([], "tensor<1xf32>", body, yields="%sum")
+    module = forward("%x: tensor<3xf16>, %y: tensor<3xf16>", "tensor<1xf32>", loop)
     return next(op for op in module.walk() if op.name == "linalg.generic")
 
 
@@ -65,21 +56,13 @@ def test_linear_rational_coefficients_remain_exact():
 
 
 def test_projected_bilinear_domain_keeps_seed_and_output_permutation():
-    module = parse_mlir_text("""module {
-      func.func @forward(%a:tensor<2x3xf32>,%b:tensor<2x4xf32>) -> tensor<4x3xf32> {
-        %c=arith.constant 7.0 : f32
-        %seed=tensor.splat %c : tensor<4x3xf32>
-        %r=linalg.generic {
-          indexing_maps=[affine_map<(d0,d1,d2)->(d2,d0)>,affine_map<(d0,d1,d2)->(d2,d1)>,affine_map<(d0,d1,d2)->(d1,d0)>],
-          iterator_types=["parallel","parallel","reduction"]
-        } ins(%a,%b : tensor<2x3xf32>,tensor<2x4xf32>) outs(%seed:tensor<4x3xf32>) {
-        ^bb0(%x:f32,%y:f32,%acc:f32):
-          %p=arith.mulf %x,%y : f32
-          %s=arith.addf %acc,%p : f32
-          linalg.yield %s : f32
-        } -> tensor<4x3xf32>
-        return %r : tensor<4x3xf32>
-      }}""")
+    seed = "%c=arith.constant 7.0 : f32\n%seed=tensor.splat %c : tensor<4x3xf32>\n"
+    maps = [f"affine_map<(d0,d1,d2)->({m})>" for m in ("d2,d0", "d2,d1", "d1,d0")]
+    ins = [("%p", "tensor<2x3xf32>"), ("%q", "tensor<2x4xf32>")]
+    body = "%m=arith.mulf %a,%b : f32\n%s=arith.addf %acc,%m : f32"
+    iterators = ["parallel", "parallel", "reduction"]
+    total = generic(ins, "tensor<4x3xf32>", body, yields="%s", maps=maps, iterators=iterators, out="%seed", acc="%acc")
+    module = forward("%p:tensor<2x3xf32>,%q:tensor<2x4xf32>", "tensor<4x3xf32>", seed + total)
     op = next(op for op in module.walk() if op.name == "linalg.generic")
     atoms, rows = analyze_static_polynomial(op)
     order = list(dict.fromkeys(value for value, _ in atoms))
@@ -123,18 +106,13 @@ def test_wide_polynomial_gathers_retain_full_fixed_point_width():
 
 @pytest.mark.parametrize("word", ["0x7F800000", "0xFF800000", "0x7FC00000"])
 def test_nonfinite_tensor_seed_refuses_rational_polynomial(word):
-    module = parse_mlir_text(f"""module {{
-      func.func @forward(%x:tensor<1xf32>) -> tensor<f32> {{
-        %c=arith.constant {word} : f32
-        %seed=tensor.splat %c : tensor<f32>
-        %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->()>],
-          iterator_types=["reduction"]}} ins(%x:tensor<1xf32>) outs(%seed:tensor<f32>) {{
-          ^bb0(%a:f32,%acc:f32):
-            %v=arith.addf %acc,%a : f32
-            linalg.yield %v : f32
-        }} -> tensor<f32>
-        return %r : tensor<f32>
-      }} }}""")
+    seed = f"%c=arith.constant {word} : f32\n%seed=tensor.splat %c : tensor<f32>\n"
+    maps = ["affine_map<(d0)->(d0)>", "affine_map<(d0)->()>"]
+    add = "%v=arith.addf %acc,%a : f32"
+    total = generic(
+        [("%x", "tensor<1xf32>")], "tensor<f32>", add, maps=maps, iterators=["reduction"], out="%seed", acc="%acc"
+    )
+    module = forward("%x:tensor<1xf32>", "tensor<f32>", seed + total)
     op = next(op for op in module.walk() if op.name == "linalg.generic")
     with pytest.raises(PolynomialRefusal, match="nonfinite tensor literal"):
         analyze_static_polynomial(op, require_bilinear=False)

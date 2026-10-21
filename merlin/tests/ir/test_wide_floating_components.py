@@ -6,7 +6,6 @@ from fractions import Fraction
 import pytest
 from mlir_fixtures import forward, generic, pointwise
 
-from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.fixed_point_ir import finite_grid
 from merlin.llvmlower.floating_components import rewrite_floating_components
 from merlin.llvmlower.integer_components import rewrite_integer_components
@@ -55,23 +54,10 @@ def test_extreme_bfloat_payload_has_full_integer_producers():
 
 def test_exact_widening_keeps_extreme_finite_grids_for_following_arithmetic():
     values = [2.0**-133, -(2.0**127), 0.0]
-    module = parse_mlir_text("""module {
-      func.func @forward(%x: tensor<3xbf16>) -> tensor<3xf32> {
-        %e=tensor.empty() : tensor<3xf32>
-        %a=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x:tensor<3xbf16>) outs(%e:tensor<3xf32>) {
-        ^bb0(%v:bf16,%out:f32):
-          %w=arith.extf %v : bf16 to f32
-          linalg.yield %w : f32
-        } -> tensor<3xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%a:tensor<3xf32>) outs(%e:tensor<3xf32>) {
-        ^bb1(%v:f32,%out:f32):
-          %w=arith.addf %v,%v : f32
-          linalg.yield %w : f32
-        } -> tensor<3xf32>
-        return %r : tensor<3xf32>
-      }}""")
+    t16, t32 = "tensor<3xbf16>", "tensor<3xf32>"
+    widen = generic([("%x", t16)], t32, "%w=arith.extf %a : bf16 to f32", yields="%w", name="%wide", out="%e")
+    double = generic([("%wide", t32)], t32, "%w=arith.addf %a,%a : f32", yields="%w", out="%e")
+    module = forward(f"%x:{t16}", t32, f"%e=tensor.empty() : {t32}\n{widen}\n{double}")
     bounds, proofs = rewrite_floating_components(module, [finite_grid(values)])
     assert any(proof["source_data_arithmetic"] for proof in proofs)
     assert not any(op.name == "arith.addf" for op in module.walk())
@@ -107,27 +93,12 @@ def test_alignment_between_individually_short_grids_selects_wide_packing():
 
 @pytest.mark.parametrize("reassociate", [False, True])
 def test_odd_division_retains_a_rounded_dyadic_grid_through_a_reshape(reassociate):
-    module = parse_mlir_text("""module {
-      func.func @forward(%x:tensor<2xbf16>) -> tensor<2xbf16> {
-        %three=arith.constant 3.0 : bf16
-        %divisor=tensor.splat %three : tensor<2xbf16>
-        %e=tensor.empty() : tensor<2xbf16>
-        %v=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%x,%divisor:tensor<2xbf16>,tensor<2xbf16>) outs(%e:tensor<2xbf16>) {
-        ^bb0(%a:bf16,%b:bf16,%out:bf16):
-          %w=arith.divf %a,%b : bf16
-          linalg.yield %w : bf16
-        } -> tensor<2xbf16>
-        %shape=arith.constant dense<[2]> : tensor<1xi64>
-        %reshaped=tensor.reshape %v(%shape) : (tensor<2xbf16>,tensor<1xi64>) -> tensor<2xbf16>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%reshaped:tensor<2xbf16>) outs(%e:tensor<2xbf16>) {
-        ^bb1(%a:bf16,%out:bf16):
-          %w=arith.addf %a,%a : bf16
-          linalg.yield %w : bf16
-        } -> tensor<2xbf16>
-        return %r : tensor<2xbf16>
-      }}""")
+    t = "tensor<2xbf16>"
+    prelude = f"%three=arith.constant 3.0 : bf16\n%divisor=tensor.splat %three : {t}\n%e=tensor.empty() : {t}\n"
+    quotient = generic([("%x", t), ("%divisor", t)], t, "%w=arith.divf %a,%b : bf16", yields="%w", name="%v", out="%e")
+    reshape = f"%shape=arith.constant dense<[2]> : tensor<1xi64>\n%reshaped=tensor.reshape %v(%shape) : ({t},tensor<1xi64>) -> {t}"
+    double = generic([("%reshaped", t)], t, "%w=arith.addf %a,%a : bf16", yields="%w", out="%e")
+    module = forward(f"%x:{t}", t, f"{prelude}{quotient}\n{reshape}\n{double}")
     bounds, proofs = rewrite_floating_components(module, [finite_grid([1.0, 2.0])], allow_reassociation=reassociate)
     assert len(proofs) == 2 and all(p["source_data_arithmetic"] for p in proofs)
     assert not any(op.name in {"arith.addf", "arith.divf"} for op in module.walk())
@@ -140,30 +111,19 @@ def test_bilinear_numerator_survives_reshape_and_following_scalar_arithmetic(val
     from merlin.llvmlower.entry_weight_projection import _pure_dce
     from merlin.targetgen.core_aten_components import unlowered_data_reductions
 
-    module = parse_mlir_text("""module {
-      func.func @forward(%x:tensor<1x2xf32>,%y:tensor<2x1xf32>) -> tensor<1xf32> {
-        %z=arith.constant 0.0 : f32
+    t = "tensor<1xf32>"
+    prelude = f"""%z=arith.constant 0.0 : f32
         %seed=tensor.splat %z : tensor<1x1xf32>
         %dot=linalg.matmul ins(%x,%y:tensor<1x2xf32>,tensor<2x1xf32>) outs(%seed:tensor<1x1xf32>) -> tensor<1x1xf32>
         %shape=arith.constant dense<[1]> : tensor<1xi64>
-        %flat=tensor.reshape %dot(%shape) : (tensor<1x1xf32>,tensor<1xi64>) -> tensor<1xf32>
+        %flat=tensor.reshape %dot(%shape) : (tensor<1x1xf32>,tensor<1xi64>) -> {t}
         %one=arith.constant 1.5 : f32
-        %weight=tensor.splat %one : tensor<1xf32>
-        %e=tensor.empty() : tensor<1xf32>
-        %scaled=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%flat,%weight:tensor<1xf32>,tensor<1xf32>) outs(%e:tensor<1xf32>) {
-        ^bb0(%a:f32,%b:f32,%out:f32):
-          %v=arith.mulf %a,%b : f32
-          linalg.yield %v : f32
-        } -> tensor<1xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>,affine_map<(d0)->(d0)>],iterator_types=["parallel"]}
-          ins(%scaled,%scaled:tensor<1xf32>,tensor<1xf32>) outs(%e:tensor<1xf32>) {
-        ^bb1(%a:f32,%b:f32,%out:f32):
-          %v=arith.addf %a,%b : f32
-          linalg.yield %v : f32
-        } -> tensor<1xf32>
-        return %r : tensor<1xf32>
-      }}""")
+        %weight=tensor.splat %one : {t}
+        %e=tensor.empty() : {t}
+"""
+    scaled = generic([("%flat", t), ("%weight", t)], t, "%v=arith.mulf %a,%b : f32", name="%scaled", out="%e")
+    total = generic([("%scaled", t), ("%scaled", t)], t, "%v=arith.addf %a,%b : f32", out="%e")
+    module = forward("%x:tensor<1x2xf32>,%y:tensor<2x1xf32>", t, f"{prelude}{scaled}\n{total}")
     bounds, proofs = rewrite_floating_components(module, [finite_grid(values)] * 2, allow_reassociation=True)
     assert len(proofs) == 3
     if any(values):

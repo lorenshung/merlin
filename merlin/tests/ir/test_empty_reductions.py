@@ -1,8 +1,8 @@
 """Only zero-iteration domains are folded; nonempty outputs still need DMA."""
 
 import pytest
+from mlir_fixtures import forward, generic
 
-from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.structural_folds import fold_empty_reductions
 
 
@@ -13,17 +13,19 @@ from merlin.llvmlower.structural_folds import fold_empty_reductions
 @pytest.mark.parametrize("extent", [0, 1])
 def test_empty_reduction_returns_seed_for_every_storage_dtype(element, zero, extent):
     add = "addf" if element in {"f16", "bf16", "f32"} else "addi"
-    module = parse_mlir_text(f"""module {{ func.func @forward(%x: tensor<{extent}x{element}>) -> tensor<{element}> {{
-      %z=arith.constant {zero} : {element}
-      %seed=tensor.splat %z : tensor<{element}>
-      %r=linalg.generic {{indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->()>],iterator_types=["reduction"]}}
-        ins(%x:tensor<{extent}x{element}>) outs(%seed:tensor<{element}>) {{
-        ^bb0(%a:{element},%acc:{element}):
-          %v=arith.{add} %a,%acc : {element}
-          linalg.yield %v : {element}
-        }} -> tensor<{element}>
-      func.return %r : tensor<{element}>
-    }}}}""")
+    seed = f"%z=arith.constant {zero} : {element}\n%seed=tensor.splat %z : tensor<{element}>\n"
+    maps = ["affine_map<(d0)->(d0)>", "affine_map<(d0)->()>"]
+    add = f"%v=arith.{add} %a,%acc : {element}"
+    total = generic(
+        [("%x", f"tensor<{extent}x{element}>")],
+        f"tensor<{element}>",
+        add,
+        maps=maps,
+        iterators=["reduction"],
+        out="%seed",
+        acc="%acc",
+    )
+    module = forward(f"%x: tensor<{extent}x{element}>", f"tensor<{element}>", seed + total)
     assert fold_empty_reductions(module) == int(extent == 0)
     module.verify()
     assert any(op.name == "linalg.generic" for op in module.walk()) == bool(extent)
