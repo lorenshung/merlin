@@ -307,14 +307,34 @@ def _selected_rtl_facts(plan: dict, generated: Path) -> Path | None:
     return path
 
 
+def _typed_legacy_contract(plan: dict, exported: Path) -> Path:
+    """Recover typed bytes for a JSON-only export, whose object keys are always strings.
+
+    Historical runs exported only JSON. Their frozen, digest-pinned operator input
+    is the typed authority when the export is exactly that input's JSON image.
+    """
+    pin = (plan.get("inputs") or {}).get("phase0:operator:capability_contract")
+    if not exported.exists() or pin is None:
+        return exported
+    selected = Path(pin["path"])
+    ordinary_tree(exported)
+    ordinary_tree(selected)
+    if (
+        hashlib.sha256(selected.read_bytes()).hexdigest() != pin["sha256"]
+        or json.loads(json.dumps(read_yaml(selected))) != json.loads(exported.read_bytes())
+    ):
+        raise SpecError("selected Phase 0 capability contract differs from its frozen typed input; freeze a new run")
+    return selected
+
+
 def _selected_capability_contract(plan: dict, generated: Path) -> tuple[Path, str] | None:
     """Carry the effective Phase 0 view, never re-resolve a live provider contract."""
     location = plan.get("phase0_evidence_bundle")
     relative = Path("software/contract.json")
     if location is None:
-        if (generated / "software/contract.yaml").exists():
-            relative = Path("software/contract.yaml")
-        legacy = generated / relative
+        legacy = generated / "software/contract.yaml"
+        if not legacy.exists():
+            legacy = _typed_legacy_contract(plan, generated / relative)
         if not legacy.exists():
             if plan["phases"]["0"]["inputs"].get("capability_contract"):
                 raise SpecError("selected Phase 0 capability contract has no exported view; freeze a new run")

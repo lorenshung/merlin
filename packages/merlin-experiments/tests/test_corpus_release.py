@@ -1061,6 +1061,36 @@ def test_selected_capability_view_uses_verified_phase0_export(monkeypatch, tmp_p
         corpus_release._selected_capability_contract(plan, generated)
 
 
+def test_legacy_json_capability_view_recovers_pinned_typed_contract(tmp_path):
+    contract = {"name": "fixture-device", "encoding": {"classes": {0: "CONFIG", 7: "FLUSH"}}, "strings": {"12": "x"}}
+    pinned = tmp_path / "selected/target_contract.yaml"
+    pinned.parent.mkdir()
+    pinned.write_text(yaml.safe_dump(contract, sort_keys=False))
+    generated = tmp_path / "capsules"
+    exported = generated / "software/contract.json"
+    exported.parent.mkdir(parents=True)
+    exported.write_text(json.dumps(contract, sort_keys=True, indent=2) + "\n")
+    plan = {
+        "target": "fixture-device",
+        "phases": {"0": {"inputs": {"capability_contract": str(pinned)}}},
+        "inputs": {"phase0:operator:capability_contract": {"path": str(pinned), "sha256": fingerprint(pinned)}},
+    }
+    selected = corpus_release._selected_capability_contract(plan, generated)
+    assert selected == (pinned, fingerprint(pinned))
+    assert yaml.safe_load(selected[0].read_bytes()) == contract  # integer keys survive
+    typed = generated / "software/contract.yaml"
+    typed.write_bytes(pinned.read_bytes())
+    assert corpus_release._selected_capability_contract(plan, generated) == (typed, fingerprint(typed))
+    typed.unlink()
+    exported.write_text(json.dumps({**contract, "strings": {"12": "drifted"}}))
+    with pytest.raises(SpecError, match="frozen typed input"):
+        corpus_release._selected_capability_contract(plan, generated)
+    exported.write_text(json.dumps(contract))
+    pinned.write_text(yaml.safe_dump({**contract, "extra": 1}))
+    with pytest.raises(SpecError, match="frozen typed input"):
+        corpus_release._selected_capability_contract(plan, generated)
+
+
 def test_reviewed_phase1_refuses_missing_or_different_phase0_contract(tmp_path, monkeypatch):
     from merlin_experiments.phase0 import coverage_commitment
     from merlin_experiments.phase1.corpus_inputs import require_reviewed_bundle
