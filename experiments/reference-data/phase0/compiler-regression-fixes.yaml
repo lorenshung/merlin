@@ -4,7 +4,7 @@ specs:
 - experiments/reference-data/phase0/compiler-regression-overlap.yaml
 - experiments/reference-data/phase0/compiler-regression-input-layout.yaml
 - experiments/reference-data/phase0/compiler-regression-calls.yaml
-- examples/gemmini/phase0/compiler-regression-selection.yaml
+- experiments/reference-data/phase0/compiler-regression-selection.yaml
 - experiments/reference-data/phase0/compiler-regression-half-precision.yaml
 - experiments/reference-data/phase0/compiler-regression-numeric.yaml
 fixes:

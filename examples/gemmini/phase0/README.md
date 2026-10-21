@@ -40,7 +40,7 @@ exercise the historical OOT contract; they are not a generated Phase 0 release.
 Generated capsules, weights and goldens are artifacts, never committed examples.
 
 Compiler fixes have reviewed regression inputs in
-[`compiler-regression-selection.yaml`](compiler-regression-selection.yaml) and
+[`compiler-regression-selection.yaml`](../../../experiments/reference-data/phase0/compiler-regression-selection.yaml) and
 the shared [`compiler-regression-calls.yaml`](../../../experiments/reference-data/phase0/compiler-regression-calls.yaml).
 The shared [`compiler-regression-fixes.yaml`](../../../experiments/reference-data/phase0/compiler-regression-fixes.yaml)
 maps each fix to a call obligation or an infrastructure pytest. These are public
@@ -60,7 +60,7 @@ python -m merlin_experiments.phase0.regression_capsules \
 ```
 
 Choose a fresh `REGRESSION_OUTPUT` beneath `merlin.common.paths.artifacts_dir()`.
-For the device inputs, use `--selection examples/gemmini/phase0/compiler-regression-selection.yaml`
+For the device inputs, use `--selection experiments/reference-data/phase0/compiler-regression-selection.yaml`
 with explicit `--cases` and `--captures` owners from the retained public overlay.
 The existing writer packages the selected calls and keeps eager answers in a
 separate owner-only directory. Unavailable captures remain explicit in
