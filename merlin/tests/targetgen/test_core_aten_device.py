@@ -31,6 +31,17 @@ def _record():
     }
 
 
+def _device(evidence, region="fixture-contraction"):
+    """Device routing of one case with its execution ``evidence``."""
+    return dict(
+        lane="device",
+        routed=True,
+        target=evidence["target"],
+        execution_evidence=evidence,
+        routed_operations=[{"source_region": region}],
+    )
+
+
 def _elf(word):
     # Synthetic ELF64 with one executable section and one word; no toolchain required.
     hdr = bytearray(64)
@@ -44,14 +55,8 @@ def _elf(word):
     def section(name, kind, flags, address, offset, size):
         return struct.pack("<IIQQQQIIQQ", name, kind, flags, address, offset, size, 0, 0, 4, 0)
 
-    return (
-        bytes(hdr)
-        + struct.pack("<I", word)
-        + names
-        + bytes(64)
-        + section(1, 1, 6, 4096, 64, 4)
-        + section(7, 3, 0, 0, 68, len(names))
-    )
+    sections = section(1, 1, 6, 4096, 64, 4) + section(7, 3, 0, 0, 68, len(names))
+    return bytes(hdr) + struct.pack("<I", word) + names + bytes(64) + sections
 
 
 def _evidence(tmp_path, facts, *, count=1):
@@ -86,27 +91,12 @@ def test_device_evidence_missing_files_fail_closed(tmp_path, facts, missing):
         evidence[missing] = str(tmp_path / "absent-facts.json")
     else:
         Path(evidence[missing]).unlink()
-    record = _record()
-    record["routing"] = {
-        "lane": "device",
-        "routed": True,
-        "target": evidence["target"],
-        "execution_evidence": evidence,
-        "routed_operations": [{"source_region": "fixture-contraction"}],
-    }
+    record = dict(_record(), routing=_device(evidence))
     assert grade_core_aten_batch({"cases": [record]}, [np.array([7], np.int32).tobytes()])["passed_count"] == 0
 
 
 def test_device_pass_requires_nonzero_execution_and_numeric_match(tmp_path, facts):
-    record = _record()
-    evidence = _evidence(tmp_path, facts)
-    record["routing"] = {
-        "lane": "device",
-        "routed": True,
-        "target": evidence["target"],
-        "execution_evidence": evidence,
-        "routed_operations": [{"source_region": "fixture-contraction"}],
-    }
+    record = dict(_record(), routing=_device(_evidence(tmp_path, facts)))
     raw = np.array([7], np.int32).tobytes()
     verdict = grade_core_aten_batch({"cases": [record]}, [raw])
     assert verdict["passed_by_lane"] == {"host": 0, "device": 1}
@@ -205,12 +195,7 @@ def test_routing_admits_only_fact_eligible_source_and_source_bound_provider(tmp_
         assert result.catalog_builder is not None and "source-bound" in reason
         assert len(calls[0]["eligible"]) == 1
         # Same syntax with wider operands is a different, declined datapath.
-        module.write_text(
-            _SOURCE.replace("xi8>", "xi16>")
-            .replace(": i8", ": i16")
-            .replace("%x: i8", "%x: i16")
-            .replace("%y: i8", "%y: i16")
-        )
+        module.write_text(_SOURCE.replace("xi8>", "xi16>").replace(": i8", ": i16"))
         result, reason = D.routing_for_bundle(
             tmp_path, "synthetic_core_aten", package, SimpleNamespace(routing=routing), document
         )
@@ -281,15 +266,7 @@ def test_duplicate_case_ids_are_refused_before_capture_or_bundle(tmp_path):
 
 
 def test_device_evidence_cannot_be_reused_for_another_case_or_a_batch(tmp_path, facts):
-    record = _record()
-    evidence = _evidence(tmp_path, facts)
-    record["routing"] = {
-        "lane": "device",
-        "routed": True,
-        "target": evidence["target"],
-        "execution_evidence": evidence,
-        "routed_operations": [{"source_region": "fixture"}],
-    }
+    record = dict(_record(), routing=_device(_evidence(tmp_path, facts), "fixture"))
     raw = np.array([7], np.int32).tobytes()
     other = {**record, "case_id": "different-case"}
     assert grade_core_aten_batch({"cases": [other]}, [raw])["passed_count"] == 0
@@ -319,15 +296,9 @@ def test_cli_keeps_overlay_variants_separate_in_single_case_device_shards(tmp_pa
 
     def bundle(corpus, captures, directory, *, selected_overloads=None):
         directory.mkdir(parents=True, exist_ok=True)
-        cases = [
-            {
-                **case,
-                "status": "bundled"
-                if selected_overloads is None or case["case_id"] in selected_overloads
-                else "not_in_shard",
-            }
-            for case in corpus["cases"]
-        ]
+        selected = [selected_overloads is None or case["case_id"] in selected_overloads for case in corpus["cases"]]
+        statuses = ["bundled" if chosen else "not_in_shard" for chosen in selected]
+        cases = [{**case, "status": status} for case, status in zip(corpus["cases"], statuses)]
         count = sum(case["status"] == "bundled" for case in cases)
         return {"cases": cases, "bundled_count": count, "case_count": 2, "input_count": 0, "output_count": count}
 
@@ -340,24 +311,8 @@ def test_cli_keeps_overlay_variants_separate_in_single_case_device_shards(tmp_pa
     monkeypatch.setenv("MERLIN_CORE_ATEN_EXECUTION_PROVIDER", str(provider))
     monkeypatch.setattr(cli, "build_core_aten_batch", bundle)
     monkeypatch.setattr(cli, "_run_spike_bundle", run)
-    assert (
-        cli.main(
-            [
-                "--corpus",
-                str(corpus_path),
-                "--captures",
-                str(tmp_path),
-                "--output-dir",
-                str(output),
-                "--target",
-                "synthetic_core_aten",
-                "--device-package",
-                str(tmp_path),
-                "--run-spike",
-            ]
-        )
-        == 0
-    )
+    args = ["--corpus", str(corpus_path), "--captures", str(tmp_path), "--output-dir", str(output)]
+    assert cli.main(args + ["--target", "synthetic_core_aten", "--device-package", str(tmp_path), "--run-spike"]) == 0
     ledger = json.loads((output / "shard_executions.json").read_text())
     assert [row["case_ids"] for row in ledger] == [["fixture-a"], ["fixture-b"]]
     assert all(row["overloads"] == [first["overload"]] for row in ledger)
