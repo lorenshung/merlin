@@ -4,7 +4,7 @@ import json
 
 import numpy as np
 import pytest
-from mlir_fixtures import assert_unchanged, forward, generic, pointwise, run_ops, signed
+from mlir_fixtures import assert_unchanged, forward, generic, limbs, pointwise, run_ops, signed
 from xdsl.dialects.builtin import IntegerType
 from xdsl.ir.affine import AffineDimExpr
 
@@ -79,8 +79,7 @@ def test_linear_components_recombine_with_native_wraparound(bits, coefficient):
     )
     limit = 1 << (bits - 1)
     x, y = [-limit, limit - 1, -129 % limit, 128 % limit], [1, -1, 127, -128]
-    plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[limit, 128])
-    source.verify()
+    plans = limbs(source, [limit, 128])
     assert plans and all(p["radix"] == 256 for p in plans)
     assert all(
         json.loads(op.attributes["test.limb"].data)["family"] == "F2"
@@ -108,7 +107,7 @@ def test_widening_keeps_the_carry_above_the_original_storage_width():
         generic([("%x", "tensor<4xi64>")], "tensor<4xi128>", "%v = arith.extsi %a : i64 to i128"),
     )
     values = [(1 << 63) - 1, -(1 << 63), 32767, -32768]
-    plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[1 << 63, 0])
+    plans = limbs(source, [1 << 63, 0])
     assert len(plans) == 8  # Source-width storage is normalized before the signed extension.
     assert evaluate(source, [values, [0] * 4]) == values
 
@@ -126,8 +125,7 @@ def test_native_sign_transform_keeps_all_ieee_payload_bits_in_integer_literals()
         )
     ]
     assert not any(op.name == "arith.negf" for op in source.walk())
-    assert rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
-    source.verify()
+    limbs(source, [0], bounds)
     for words in [[0, 0x8000, 0x7C00, 0xFC00], [0x7E01, 0xFE7F, 0x7C01, 0xFC01], [0x0001, 0x8001, 0x3C00, 0xBC00]]:
         assert [value & 0xFFFF for value in evaluate(source, [words])] == [word ^ 0x8000 for word in words]
 
@@ -144,9 +142,7 @@ def test_clamp_epilogue_preserves_source_comparison_and_payloads(dtype, predicat
     )
     bounds, proofs = rewrite_native_sign_components(source)
     assert proofs[0]["arithmetic"] == "source_compare_select_retained_host"
-    plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[1 << 63], known_bounds=bounds)
-    assert plans
-    source.verify()
+    limbs(source, [1 << 63], bounds)
     if dtype == "f16":
         for words, expected in [
             ([0, 0x8000, 0x7C00, 0xFC00], [0, 0x8000, 0x7C00, 0]),
@@ -173,9 +169,7 @@ def test_window_reduction_ignores_unread_shape_operand():
         acc="%acc",
     )
     source = forward("%x: tensor<4xi64>", "tensor<2xi64>", prelude + window)
-    plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[128])
-    assert plans
-    source.verify()
+    limbs(source, [128])
     for op in source.walk():
         if "test.limb" in op.attributes:
             assert len(op.inputs) == 2
@@ -193,7 +187,7 @@ def test_declared_bfloat_nan_negation_uses_device_words_then_cpu_canonicalizatio
     source = pointwise(["tensor<4xbf16>"], "tensor<4xbf16>", "%v=arith.negf %a : bf16")
     bounds, proofs = rewrite_native_sign_components(source, canonical_bf16_nan=True)
     assert proofs[0]["nan_payload"] == "canonical_positive_quiet"
-    assert rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
+    limbs(source, [0], bounds)
     for payload in range(1, 128):
         words = [0x7F80 | payload, 0xFF80 | payload, 0, 0x8000]
         assert [value & 0xFFFF for value in evaluate(source, [words])] == [0x7FC0, 0x7FC0, 0x8000, 0]
@@ -203,7 +197,7 @@ def test_binary32_sign_words_preserve_nonfinite_payloads_without_quantization():
     source = pointwise(["tensor<4xf32>"], "tensor<4xf32>", "%v=arith.negf %a : f32")
     bounds, proofs = rewrite_native_sign_components(source)
     assert proofs[0]["nan_payload"] == "preserved"
-    assert rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
+    limbs(source, [0], bounds)
     for words in [
         [0, 0x80000000, 0x7F800000, 0xFF800000],
         [0x7FC00001, 0xFFC00012, 0x7F800001, 0xFF800001],
@@ -223,8 +217,7 @@ def test_width_changes_observe_the_source_ring(bits, cast, wrap):
     values = [-1, -limit, 0, limit - 1]
     other = [1, -1, limit - 1, 1]
     expected = evaluate(source, [values, other])
-    plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[limit, limit])
-    assert plans
+    limbs(source, [limit, limit])
     assert evaluate(source, [values, other]) == expected
     if not wrap and cast == "extui":
         assert expected == [(v % (1 << bits)) for v in values]
@@ -237,7 +230,7 @@ def test_truncation_before_signed_extension_keeps_its_modular_boundary(bits):
     source = module("i64", f"%t=arith.trunci %a : i64 to i{bits}\n%v=arith.extsi %t : i{bits} to i64")
     values = [-(1 << 63), (1 << bits) - 1, (1 << (bits - 1)), (1 << (bits - 1)) - 1]
     expected = evaluate(source, [values, [0] * 4])
-    assert rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[1 << 63, 0])
+    limbs(source, [1 << 63, 0])
     assert evaluate(source, [values, [0] * 4]) == expected
 
 
@@ -251,7 +244,7 @@ def test_real_frontend_uint8_cast_review_repro():
 
     values = torch.tensor([255, 128, 0, 127], dtype=torch.uint8)
     original = parse_mlir_text(str(m2m.convert(Cast(), (values,), backend="fx_importer", fully_standard=True).module))
-    assert rewrite_integer_components(original, limb_attribute="test.limb", input_bounds=[128])
+    limbs(original, [128])
     assert evaluate(original, [[-1, -128, 0, 127]]) == [255, 128, 0, 127]
 
 
@@ -267,8 +260,7 @@ def test_full_width_scalar_coefficients_use_exact_literal_planes(coefficient):
     source = module("i64", f"%s=arith.constant {coefficient}:i64\n%v=arith.muli %a,%s:i64")
     limit = 1 << 63
     values = [-limit, limit - 1, -129, 128]
-    plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[limit, limit])
-    assert plans
+    limbs(source, [limit, limit])
     expected = [((coefficient * a + limit) % (2 * limit)) - limit for a in values]
     assert evaluate(source, [values, [0] * 4]) == expected
 
@@ -288,7 +280,7 @@ def test_named_sum_exposes_full_width_limb_reduction_and_modular_wrap(bits):
     )
     limit = 1 << (bits - 1)
     values = [[limit - 1, -limit, 127, -128]] * 3
-    plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[limit])
+    plans = limbs(source, [limit])
     assert plans and not any(op.name == "linalg.reduce" for op in source.walk())
     assert max(p["inputs"][0]["count"] for p in plans) == bits // 8
     assert evaluate(source, [values]) == [((3 * a + limit) % (2 * limit)) - limit for a in values[0]]

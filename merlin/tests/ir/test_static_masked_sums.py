@@ -1,10 +1,9 @@
 """Index-selected integer prefixes are exact masked contractions, not host scans."""
 
 import pytest
-from mlir_fixtures import assert_unchanged, forward, generic
+from mlir_fixtures import assert_unchanged, forward, generic, limbs
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
-from merlin.llvmlower.integer_components import rewrite_integer_components
 from merlin.llvmlower.static_masked_sums import expose_static_masked_sums
 from merlin.llvmlower.structural_folds import fold_static_unit_indices
 from merlin.targetgen.native_unit_policy import construction_evidence
@@ -38,9 +37,7 @@ def test_mask_is_a_runtime_data_contraction_with_static_coefficients(dtype, pred
     )
     assert list(table.value.get_values()) == weights
     assert construction_evidence(module)["status"] == "eligible"
-    plans = rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[1 << (int(dtype[1:]) - 1)])
-    assert plans
-    module.verify()
+    limbs(module, [1 << (int(dtype[1:]) - 1)])
 
 
 @pytest.mark.parametrize("dtype,seed,flags", [("f32", "0.0", ""), ("i64", "1", ""), ("i64", "0", "overflow<nsw>")])
@@ -54,6 +51,4 @@ def test_unit_index_masks_are_exposed_before_their_coordinates_are_folded(dtype)
     assert expose_static_masked_sums(module) == 1
     fold_static_unit_indices(module)
     assert not any(op.name == "linalg.index" for op in module.walk())
-    plans = rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[1 << (int(dtype[1:]) - 1)])
-    assert plans
-    module.verify()
+    limbs(module, [1 << (int(dtype[1:]) - 1)])

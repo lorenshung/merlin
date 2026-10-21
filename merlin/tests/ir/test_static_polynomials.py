@@ -3,12 +3,11 @@
 from fractions import Fraction
 
 import pytest
-from mlir_fixtures import forward, generic
+from mlir_fixtures import forward, generic, limbs
 
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.fixed_point_ir import finite_grid
 from merlin.llvmlower.floating_components import rewrite_floating_components
-from merlin.llvmlower.integer_components import rewrite_integer_components
 from merlin.llvmlower.static_polynomials import PolynomialRefusal, analyze_static_polynomial
 
 
@@ -96,8 +95,7 @@ def test_wide_polynomial_gathers_retain_full_fixed_point_width():
     # Both full exponent extremes must survive without imposing minimal width.
     carrier_bits = int(proofs[0]["reconstruction"].removeprefix("bounded_i"))
     assert carrier_bits >= 1024 and carrier_bits & (carrier_bits - 1) == 0
-    plans = rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0, 0], known_bounds=bounds)
-    assert plans
+    limbs(module, [0, 0], bounds)
     marked = [op for op in module.walk() if "test.limb" in op.attributes]
     assert any(any(it.data.value == "reduction" for it in op.get_iterator_types()) for op in marked)
     module.verify()

@@ -2,10 +2,9 @@
 """Literal division retains an exact integer numerator and a rational readout."""
 
 import pytest
-from mlir_fixtures import forward, generic
+from mlir_fixtures import forward, generic, limbs
 
 from merlin.llvmlower.floating_components import rewrite_floating_components
-from merlin.llvmlower.integer_components import rewrite_integer_components
 
 
 # The literal reciprocal is carried as a normalized signed-byte significand
@@ -22,6 +21,4 @@ def test_literal_division_has_a_complete_numerator_producer(divisor, exponent, d
     assert len(proofs) == 1 and proofs[0]["source_data_arithmetic"]
     assert proofs[0]["common_exponent"] == exponent
     assert not any(op.name == "arith.divf" for op in module.walk())
-    plans = rewrite_integer_components(module, limb_attribute="test.limb", known_bounds=bounds, input_bounds=[0])
-    assert plans
-    module.verify()
+    limbs(module, [0], bounds)

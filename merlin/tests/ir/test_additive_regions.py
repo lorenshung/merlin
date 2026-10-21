@@ -1,12 +1,11 @@
 """Closed reductions carry data work, and never grant a conversion-only placement."""
 
 import pytest
-from mlir_fixtures import forward, generic
+from mlir_fixtures import forward, generic, limbs
 from xdsl.dialects.builtin import i128
 
 from merlin.llvmlower.additive_regions import positive_zero_seed, retype_additive
 from merlin.llvmlower.floating_components import rewrite_floating_components
-from merlin.llvmlower.integer_components import rewrite_integer_components
 
 
 def reduction(seed="0.0", operation="addf"):
@@ -23,8 +22,7 @@ def reduction(seed="0.0", operation="addf"):
 def test_additive_reduction_emits_integer_sum_and_valid_output_rank_maps():
     m = reduction()
     bounds, proofs = rewrite_floating_components(m, [(-12, 5120)])
-    plans = rewrite_integer_components(m, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
-    m.verify()
+    plans = limbs(m, [0], bounds)
     assert any(p["source_data_arithmetic"] for p in proofs)
     assert plans
     assert not any(op.name == "arith.addf" for op in m.walk())

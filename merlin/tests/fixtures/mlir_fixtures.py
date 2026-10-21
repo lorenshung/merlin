@@ -180,6 +180,18 @@ def run_block(block, arguments):
     return run_ops(block.ops, dict(zip(block.args, arguments, strict=True)))
 
 
+def limbs(module, input_bounds, bounds=None):
+    """Lower ``module`` into ``test.limb`` integer components; there must be a plan and a valid module."""
+    from merlin.llvmlower.integer_components import rewrite_integer_components
+
+    plans = rewrite_integer_components(
+        module, limb_attribute="test.limb", input_bounds=input_bounds, known_bounds=bounds
+    )
+    assert plans
+    module.verify()
+    return plans
+
+
 def emitter(block):
     """An ``emit`` callback that appends each op to ``block`` and returns its result."""
     return lambda op: (block.add_op(op), op.results[0])[1]

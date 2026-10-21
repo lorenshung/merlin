@@ -1,10 +1,9 @@
 """Fused floating products use integer MACs and one rational result boundary."""
 
 import pytest
-from mlir_fixtures import forward, generic, pointwise, run_block
+from mlir_fixtures import forward, generic, limbs, pointwise, run_block
 
 from merlin.llvmlower.floating_components import rewrite_floating_components
-from merlin.llvmlower.integer_components import rewrite_integer_components
 from merlin.llvmlower.integer_float_boundaries import rewrite_integer_float_boundaries
 from merlin.targetgen.core_aten_components import unlowered_data_reductions
 
@@ -37,8 +36,7 @@ def test_fma_has_full_integer_producers_and_one_final_rounding(grids):
     bounds, proofs = rewrite_floating_components(module, grids)
     assert proofs and proofs[0]["rounding"] == "integer_quotient_remainder_rne"
     assert not any(op.name == "math.fma" for op in module.walk())
-    plans = rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0] * 3, known_bounds=bounds)
-    assert plans
+    limbs(module, [0] * 3, bounds)
     assert not unlowered_data_reductions(module, "test.limb")
     module.verify()
 

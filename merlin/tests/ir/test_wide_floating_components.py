@@ -4,12 +4,11 @@
 from fractions import Fraction
 
 import pytest
-from mlir_fixtures import forward, generic, pointwise
+from mlir_fixtures import forward, generic, limbs, pointwise
 
 from merlin.llvmlower.entry_weight_projection import _pure_dce
 from merlin.llvmlower.fixed_point_ir import finite_grid
 from merlin.llvmlower.floating_components import rewrite_floating_components
-from merlin.llvmlower.integer_components import rewrite_integer_components
 from merlin.targetgen.core_aten_components import unlowered_data_reductions
 
 
@@ -29,8 +28,7 @@ def test_literal_division_has_a_nonidentity_native_numerator(divisor):
         )
     ]
     assert products and proofs
-    assert rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
-    module.verify()
+    limbs(module, [0], bounds)
 
 
 def test_extreme_bfloat_payload_has_full_integer_producers():
@@ -49,7 +47,7 @@ def test_extreme_bfloat_payload_has_full_integer_producers():
     assert all(
         op.operands[0].type.width.data <= 128 for op in module.walk() if op.name in {"arith.divui", "arith.remui"}
     )
-    plans = rewrite_integer_components(module, limb_attribute="test.limb", known_bounds=bounds, input_bounds=[0])
+    plans = limbs(module, [0], bounds)
     assert plans and max(entry["index"] for plan in plans for entry in plan["inputs"]) > 6
     module.verify()
 
@@ -63,9 +61,7 @@ def test_exact_widening_keeps_extreme_finite_grids_for_following_arithmetic():
     bounds, proofs = rewrite_floating_components(module, [finite_grid(values)])
     assert any(proof["source_data_arithmetic"] for proof in proofs)
     assert not any(op.name == "arith.addf" for op in module.walk())
-    plans = rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
-    assert plans
-    module.verify()
+    limbs(module, [0], bounds)
 
 
 def test_integer_promotion_grids_participate_in_the_packing_width_proof():
@@ -80,8 +76,7 @@ def test_integer_promotion_grids_participate_in_the_packing_width_proof():
     assert proofs and proofs[0]["source_data_arithmetic"]
     assert proofs[0]["packing"] == "exact_ieee_bit_fields"
     assert proofs[0]["reconstruction"] == "bounded_i1024"
-    assert rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
-    module.verify()
+    limbs(module, [0], bounds)
 
 
 def test_alignment_between_individually_short_grids_selects_wide_packing():
@@ -89,8 +84,7 @@ def test_alignment_between_individually_short_grids_selects_wide_packing():
     bounds, proofs = rewrite_floating_components(module, [finite_grid([2.0**-120]), finite_grid([2.0**100])])
     assert len(proofs) == 1 and proofs[0]["packing"] == "exact_ieee_bit_fields"
     assert not any(op.name == "arith.addf" for op in module.walk())
-    assert rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0, 0], known_bounds=bounds)
-    module.verify()
+    limbs(module, [0, 0], bounds)
 
 
 @pytest.mark.parametrize("reassociate", [False, True])
@@ -104,8 +98,7 @@ def test_odd_division_retains_a_rounded_dyadic_grid_through_a_reshape(reassociat
     bounds, proofs = rewrite_floating_components(module, [finite_grid([1.0, 2.0])], allow_reassociation=reassociate)
     assert len(proofs) == 2 and all(p["source_data_arithmetic"] for p in proofs)
     assert not any(op.name in {"arith.addf", "arith.divf"} for op in module.walk())
-    assert rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0], known_bounds=bounds)
-    module.verify()
+    limbs(module, [0], bounds)
 
 
 @pytest.mark.parametrize("values", [[0.0, 0.0], [2.0**-133, 2.0**127]])
@@ -127,8 +120,7 @@ def test_bilinear_numerator_survives_reshape_and_following_scalar_arithmetic(val
     assert len(proofs) == 3
     if any(values):
         assert all(p["reconstruction"] == "bounded_i2048" for p in proofs)
-    plans = rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0, 0], known_bounds=bounds)
-    assert plans
+    limbs(module, [0, 0], bounds)
     function = next(op for op in module.walk() if op.name == "func.func")
     _pure_dce(function)
     assert not unlowered_data_reductions(module, "test.limb")
@@ -150,6 +142,6 @@ def test_ieee_bit_epilogue_does_not_hide_the_complete_arithmetic_producer():
     )
     bounds, proofs = rewrite_floating_components(module, [(0, 2), (0, 2)])
     assert any(p["source_data_arithmetic"] for p in proofs)
-    assert rewrite_integer_components(module, limb_attribute="test.limb", input_bounds=[0, 0], known_bounds=bounds)
+    limbs(module, [0, 0], bounds)
     assert not unlowered_data_reductions(module, "test.limb")
     module.verify()
