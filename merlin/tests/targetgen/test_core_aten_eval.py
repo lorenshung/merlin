@@ -4,6 +4,7 @@ import json
 import sys
 from copy import deepcopy
 from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 
@@ -14,7 +15,7 @@ from merlin.targetgen.core_aten_bounded import (
     bounded_suite_digest,
 )
 from merlin.targetgen.core_aten_cases import case_document, core_aten_cases, eager_case_observation
-from merlin.targetgen.core_aten_cover import exact_minimum_cover, overload_digest
+from merlin.targetgen.core_aten_cover import overload_digest
 from merlin.targetgen.core_aten_eqsat import quotient_observational_equivalents
 from merlin.targetgen.core_aten_eval import (
     BoundedEagerSuiteAdapter,
@@ -100,37 +101,36 @@ def test_requested_hardware_rejects_host_execution() -> None:
     assert result["status_counts"] == {"execution_kind_mismatch": 1}
 
 
-def test_missing_result_fails_closed() -> None:
-    class MissingAdapter:
-        name = "missing"
+def _crash(corpus):
+    raise RuntimeError("queue unavailable")
 
-        def execute(self, corpus):
-            return {}
 
-    result = evaluate_core_aten_suite(
-        MissingAdapter(), corpus=_corpus("aten.add.Tensor"), validate_live_denominator=False
-    )
-    assert result["status_counts"] == {"missing_result": 1}
+@pytest.mark.parametrize(
+    "name,execute,overloads,counts",
+    [
+        pytest.param("missing", lambda corpus: {}, ["aten.add.Tensor"], {"missing_result": 1}, id="missing_result"),
+        pytest.param(
+            "malformed",
+            lambda corpus: {corpus["cases"][0]["overload"]: ["not", "a", "mapping"]},
+            ["aten.add.Tensor"],
+            {"invalid_result": 1},
+            id="malformed_observation",
+        ),
+        pytest.param(
+            "crashing", _crash, ["aten.add.Scalar", "aten.add.Tensor"], {"adapter_error": 2}, id="batch_adapter_crash"
+        ),
+    ],
+)
+def test_missing_malformed_or_crashed_results_fail_closed(name, execute, overloads, counts) -> None:
+    adapter = SimpleNamespace(name=name, execute=execute)
+    result = evaluate_core_aten_suite(adapter, corpus=_corpus(*overloads), validate_live_denominator=False)
+    assert result["status_counts"] == counts
 
 
 def test_compiler_failure_is_preserved() -> None:
-    class CompileFailureAdapter:
-        name = "compile-failure"
-
-        def execute(self, corpus):
-            return {
-                corpus["cases"][0]["overload"]: {
-                    "status": "compile_failure",
-                    "reason": "unsupported lowering",
-                    "evidence": {"stage": "merlin"},
-                }
-            }
-
-    result = evaluate_core_aten_suite(
-        CompileFailureAdapter(),
-        corpus=_corpus("aten.add.Tensor"),
-        validate_live_denominator=False,
-    )
+    failure = {"status": "compile_failure", "reason": "unsupported lowering", "evidence": {"stage": "merlin"}}
+    adapter = SimpleNamespace(name="compile-failure", execute=lambda corpus: {corpus["cases"][0]["overload"]: failure})
+    result = evaluate_core_aten_suite(adapter, corpus=_corpus("aten.add.Tensor"), validate_live_denominator=False)
     verdict = result["cases"]["aten.add.Tensor"]
     assert verdict["status"] == "compile_failure"
     assert verdict["reason"] == "unsupported lowering"
@@ -142,30 +142,9 @@ def test_output_mutation_and_alias_mismatches_fail() -> None:
     observations = adapter.execute(corpus)
     observations["aten.alias.default"]["output_input_aliases"] = []
     observations["aten.resize_.default"]["mutated_arguments"] = []
-
-    class FixedAdapter:
-        name = "fixed"
-
-        def execute(self, corpus):
-            return observations
-
-    result = evaluate_core_aten_suite(FixedAdapter(), corpus=corpus, validate_live_denominator=False)
+    adapter = SimpleNamespace(name="fixed", execute=lambda corpus: observations)
+    result = evaluate_core_aten_suite(adapter, corpus=corpus, validate_live_denominator=False)
     assert result["status_counts"] == {"semantic_mismatch": 2}
-
-
-def test_batch_adapter_crash_marks_every_case() -> None:
-    class CrashingAdapter:
-        name = "crashing"
-
-        def execute(self, corpus):
-            raise RuntimeError("queue unavailable")
-
-    result = evaluate_core_aten_suite(
-        CrashingAdapter(),
-        corpus=_corpus("aten.add.Scalar", "aten.add.Tensor"),
-        validate_live_denominator=False,
-    )
-    assert result["status_counts"] == {"adapter_error": 2}
 
 
 def test_json_command_adapter_invokes_one_external_batch(tmp_path) -> None:
@@ -199,19 +178,6 @@ pathlib.Path(sys.argv[2]).write_text(RESPONSE + "\\n", encoding="utf-8")
 
     assert result["status"] == "pass"
     assert result["status_counts"] == {"pass": 1}
-
-
-def test_malformed_observation_fails_closed() -> None:
-    class MalformedAdapter:
-        name = "malformed"
-
-        def execute(self, corpus):
-            return {corpus["cases"][0]["overload"]: ["not", "a", "mapping"]}
-
-    result = evaluate_core_aten_suite(
-        MalformedAdapter(), corpus=_corpus("aten.add.Tensor"), validate_live_denominator=False
-    )
-    assert result["status_counts"] == {"invalid_result": 1}
 
 
 def test_default_api_rejects_a_declared_complete_subset() -> None:
