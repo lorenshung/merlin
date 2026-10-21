@@ -1,7 +1,7 @@
 # Authored software semantics. RTL geometry/protocol and qualification are generated evidence.
 schema: merlin.software_spec.v1
 target: gemmini
-execution_provider_revision: 34e91bcb37cbd41d5630a4cbbe431ee187149a79
+execution_provider_revision: 86b5e3bca90ad4c0e527b84e62cbd26475876b1f
 status: reviewed
 # Scope: accelerator contraction and exact-op host declarations below. The
 # dequantization declaration is limited to its stated operand/result types and
