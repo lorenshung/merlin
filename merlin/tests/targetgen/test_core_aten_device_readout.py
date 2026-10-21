@@ -142,14 +142,15 @@ def test_seeded_admission_requires_selected_provider_coverage(selection, source_
         assert refused["sites"][0]["status"] == "refused"
 
 
-@pytest.mark.parametrize("key", ["qmin", "qmax", "mystery"])
-def test_unknown_quantization_attributes_are_rejected(source_text, key):
-    from xdsl.dialects.builtin import IntegerAttr, i64
+@pytest.mark.parametrize("key", ["qmin", "qmax", "mystery", "gradient"])
+def test_unknown_or_foreign_quantization_attributes_are_rejected(source_text, key):
+    """Unknown keys, and schema keys of another quantization kind (gradient), are not readout keys."""
+    from xdsl.dialects.builtin import IntegerAttr, StringAttr, i64
 
     with IR_LOCK:
         ((op, _shape),) = observe_contractions(mq.parse(source_text))
         reader = device_readout(op)["operation"]
-        reader.attributes[f"prov.quant.{key}"] = IntegerAttr(0, i64)
+        reader.attributes[f"prov.quant.{key}"] = StringAttr("input") if key == "gradient" else IntegerAttr(0, i64)
         with pytest.raises(ValueError, match="unknown readout quantization"):
             device_readout(op)
 
@@ -257,17 +258,6 @@ def test_real_host_only_metadata_refuses_device_placement(selection, source_text
         plan = admission_plan(module, selection, captured=True)
     assert plan["sites"][0]["status"] == "refused"
     assert "host-only" in " ".join(plan["sites"][0]["reasons"])
-
-
-def test_schema_keys_must_also_belong_to_the_readout_kind(source_text):
-    from xdsl.dialects.builtin import StringAttr
-
-    with IR_LOCK:
-        ((op, _),) = observe_contractions(mq.parse(source_text))
-        reader = device_readout(op)["operation"]
-        reader.attributes["prov.quant.gradient"] = StringAttr("input")
-        with pytest.raises(ValueError, match="unknown readout quantization"):
-            device_readout(op)
 
 
 @pytest.fixture(scope="module")
