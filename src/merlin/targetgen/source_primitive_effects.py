@@ -1,6 +1,21 @@
 """Closed effect check for capture-bound source specialization proofs."""
 
 
+def single_forward(directory, report):
+    """(record, original bytes, module, forward) of a one-record capsule with one forward function, else None."""
+    from merlin.frontends.linalg_mlir import parse_mlir_file
+
+    records = [r for r in report.get("cases", ()) if r.get("status") == "bundled"]
+    if len(records) != 1:
+        return None
+    original = (directory / "model.mlir").read_bytes()
+    module = parse_mlir_file(directory / "model.mlir")
+    functions = [op for op in module.walk() if op.name == "func.func"]
+    if len(functions) != 1 or functions[0].sym_name.data != "forward":
+        return None
+    return records[0], original, module, functions[0]
+
+
 def pure_tensor_source(function):
     from xdsl.dialects.builtin import IntegerType, TensorType
     from xdsl.traits import Pure

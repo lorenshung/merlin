@@ -214,23 +214,15 @@ def specialize(directory, report):
     from xdsl.ir import Block
     from xdsl.rewriter import Rewriter
 
-    from merlin.frontends.linalg_mlir import parse_mlir_file
     from merlin.llvmlower._ir import point
+    from merlin.targetgen.source_primitive_effects import pure_tensor_source, single_forward
 
-    records = [r for r in report.get("cases", ()) if r.get("status") == "bundled"]
-    if len(records) != 1:
+    found = single_forward(directory, report)
+    if found is None:
         return None
-    record = records[0]
-    original = (directory / "model.mlir").read_bytes()
-    module = parse_mlir_file(directory / "model.mlir")
-    functions = [op for op in module.walk() if op.name == "func.func"]
-    if len(functions) != 1 or functions[0].sym_name.data != "forward":
-        return None
-    function = functions[0]
+    record, original, module, function = found
     if len(function.body.blocks) != 1 or len(function.body.block.args) != 1:
         return None
-    from merlin.targetgen.source_primitive_effects import pure_tensor_source
-
     if not pure_tensor_source(function):
         return None
     source_type = function.body.block.args[0].type

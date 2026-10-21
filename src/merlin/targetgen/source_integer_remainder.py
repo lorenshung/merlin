@@ -48,25 +48,18 @@ def specialize(directory, report, software_spec):
     from xdsl.rewriter import Rewriter
 
     from merlin.common.yaml import load_yaml
-    from merlin.frontends.linalg_mlir import parse_mlir_file
     from merlin.llvmlower.quantized_native import parameters
     from merlin.targetgen.closed_scalar import UNKNOWN, evaluate
     from merlin.targetgen.source_power_specialization import _elementwise_root
-    from merlin.targetgen.source_primitive_effects import pure_tensor_source
+    from merlin.targetgen.source_primitive_effects import pure_tensor_source, single_forward
 
     if software_spec is None:
         return None
-    records = [r for r in report.get("cases", ()) if r.get("status") == "bundled"]
-    if len(records) != 1:
+    found = single_forward(directory, report)
+    if found is None:
         return None
-    record = records[0]
-    original = (directory / "model.mlir").read_bytes()
-    module = parse_mlir_file(directory / "model.mlir")
-    functions = [op for op in module.walk() if op.name == "func.func"]
-    if len(functions) != 1:
-        return None
-    function = functions[0]
-    if function.sym_name.data != "forward" or len(function.body.blocks) != 1 or len(function.body.block.args) != 1:
+    record, original, module, function = found
+    if len(function.body.blocks) != 1 or len(function.body.block.args) != 1:
         return None
     if not pure_tensor_source(function):
         return None
