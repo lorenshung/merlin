@@ -1,7 +1,5 @@
 """User-reviewed Phase 0 (functional, all native ops) semantic rules."""
 
-import math
-
 from .functional_truth_linear import (
     r_add_scalar,
     r_add_tensor,
