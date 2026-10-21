@@ -1,9 +1,12 @@
 """Drivers shared by the native component admission tests (merlin/tests/targetgen)."""
 
 import json
+import os
+import subprocess
 
 import numpy as np
 
+from merlin.common.paths import python_import_roots
 from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.targetgen.core_aten_components import prepare_integer_components
 
@@ -66,3 +69,15 @@ def assert_host_refusal(tmp_path, source, inputs, cases, code, provider=None):
     refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
     assert refusal["code"] == code
     return refusal
+
+
+def run_m2m_script(script):
+    """Run ``script`` under the declared torch interpreter (MERLIN_M2M_PYTHON) on this checkout."""
+    result = subprocess.run(
+        [os.environ["MERLIN_M2M_PYTHON"], "-c", script],
+        env={**os.environ, "PYTHONPATH": os.pathsep.join(str(p) for p in python_import_roots())},
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

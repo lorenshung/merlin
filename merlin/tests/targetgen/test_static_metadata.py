@@ -1,20 +1,6 @@
 """Static metadata specialization never reads tensor payload values."""
 
-import os
-import subprocess
-
-from merlin.common.paths import python_import_roots
-
-
-def _torch(script):
-    result = subprocess.run(
-        [os.environ["MERLIN_M2M_PYTHON"], "-c", script],
-        env={**os.environ, "PYTHONPATH": os.pathsep.join(str(p) for p in python_import_roots())},
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
+from targetgen_fixtures import run_m2m_script as _torch
 
 
 def test_static_metadata_queries_use_descriptors_and_preserve_inputs():

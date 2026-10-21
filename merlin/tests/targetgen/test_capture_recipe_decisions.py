@@ -1,23 +1,9 @@
 """Ineligible and empty sources remain clean host candidates."""
 
-import os
-import subprocess
-
 import pytest
+from targetgen_fixtures import run_m2m_script as _torch
 
-from merlin.common.paths import python_import_roots
 from merlin.targetgen.capsule_source import NoEligibleCaptureOperations, _require_integer_contraction
-
-
-def _torch(script):
-    result = subprocess.run(
-        [os.environ["MERLIN_M2M_PYTHON"], "-c", script],
-        env={**os.environ, "PYTHONPATH": os.pathsep.join(str(p) for p in python_import_roots())},
-        capture_output=True,
-        text=True,
-        timeout=120,
-    )
-    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_plain_module_is_not_an_integerizable_pt2e_graph():
