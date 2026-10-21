@@ -5,11 +5,10 @@ import math
 import random
 
 import pytest
-from mlir_fixtures import emitter, float_value, pointwise, run_ops
+from mlir_fixtures import emitter, float_value, forward, generic, pointwise, run_ops
 from xdsl.dialects.builtin import bf16, f16, f32, f64
 from xdsl.ir import Block
 
-from merlin.frontends.linalg_mlir import parse_mlir_text
 from merlin.llvmlower.floating_components import rewrite_floating_components
 from merlin.llvmlower.ieee_pointwise import special
 
@@ -89,24 +88,17 @@ def test_overlay_dependence_follows_permuted_and_broadcast_input_maps():
 
     from merlin.llvmlower.ieee_pointwise import dependence_proof
 
-    source = parse_mlir_text('''module {
-      func.func @forward(%x: tensor<3x2xf32>, %y: tensor<3xf32>, %unread: tensor<2x3xf32>) -> tensor<2x3xf32> {
-        %e=tensor.empty() : tensor<2x3xf32>
-        %r=linalg.generic {indexing_maps=[affine_map<(d0,d1)->(d1,d0)>,affine_map<(d0,d1)->(d1)>,affine_map<(d0,d1)->(d0,d1)>,affine_map<(d0,d1)->(d0,d1)>],iterator_types=["parallel","parallel"]}
-          ins(%x,%y,%unread : tensor<3x2xf32>,tensor<3xf32>,tensor<2x3xf32>) outs(%e : tensor<2x3xf32>) {
-        ^bb0(%a:f32,%b:f32,%ignored:f32,%unused:f32):
-          %v=arith.addf %a,%b : f32
-          linalg.yield %v : f32
-        } -> tensor<2x3xf32>
-        return %r : tensor<2x3xf32>
-      }}''')
-    generic = next(op for op in source.walk() if op.name == "linalg.generic")
-    proof = dependence_proof(generic)
+    maps = [f"affine_map<(d0,d1)->({m})>" for m in ("d1,d0", "d1", "d0,d1", "d0,d1")]
+    ins = [("%x", "tensor<3x2xf32>"), ("%y", "tensor<3xf32>"), ("%unread", "tensor<2x3xf32>")]
+    params = "%x: tensor<3x2xf32>, %y: tensor<3xf32>, %unread: tensor<2x3xf32>"
+    source = forward(params, "tensor<2x3xf32>", generic(ins, "tensor<2x3xf32>", "%v=arith.addf %a,%b : f32", maps=maps))
+    op = next(op for op in source.walk() if op.name == "linalg.generic")
+    proof = dependence_proof(op)
     assert proof["output_shape"] == [2, 3]
     assert [d["operand"] for d in proof["input_dependencies"]] == [0, 1]
     arrays = [np.array([[0., np.inf], [np.nan, 1.], [-0., 2.]]),
               np.array([0., 3., -np.inf]), np.full((2, 3), np.nan)]
-    maps = [m.data for m in generic.get_indexing_maps()]
+    maps = [m.data for m in op.get_indexing_maps()]
     affected = np.zeros((2, 3), dtype=bool)
     for index in np.ndindex(affected.shape):
         affected[index] = any(not np.isfinite(arrays[d["operand"]][maps[d["operand"]].eval(index, ())])
@@ -118,16 +110,9 @@ def test_overlay_dependence_follows_permuted_and_broadcast_input_maps():
 def test_overlay_refuses_reduction_dependence_without_a_closed_proof():
     from merlin.llvmlower.ieee_pointwise import dependence_proof
 
-    module = parse_mlir_text('''module {
-      func.func @forward(%x: tensor<3xf32>,%seed: tensor<f32>) -> tensor<f32> {
-        %r=linalg.generic {indexing_maps=[affine_map<(d0)->(d0)>,affine_map<(d0)->()>],iterator_types=["reduction"]}
-          ins(%x : tensor<3xf32>) outs(%seed : tensor<f32>) {
-          ^bb0(%a:f32,%b:f32):
-            %v=arith.addf %a,%b : f32
-            linalg.yield %v : f32
-        } -> tensor<f32>
-        return %r : tensor<f32>
-      }}''')
-    generic = next(op for op in module.walk() if op.name == "linalg.generic")
+    maps = ["affine_map<(d0)->(d0)>", "affine_map<(d0)->()>"]
+    total = generic([("%x", "tensor<3xf32>")], "tensor<f32>", "%v=arith.addf %a,%acc : f32", maps=maps, iterators=["reduction"], out="%seed", acc="%acc")
+    module = forward("%x: tensor<3xf32>,%seed: tensor<f32>", "tensor<f32>", total)
+    op = next(op for op in module.walk() if op.name == "linalg.generic")
     with pytest.raises(ValueError, match="closed parallel output index map"):
-        dependence_proof(generic)
+        dependence_proof(op)

@@ -44,30 +44,21 @@ def test_unit_scale_is_an_exact_identity():
 
 
 def test_round_trip_through_a_copied_unit_scale_is_the_input():
-    from merlin.frontends.linalg_mlir import parse_mlir_text
     from merlin.targetgen.core_aten_numeric import normalize_closed_identities
 
     # Frontend form of f16 x * 1.0: widen (and scale) in one generic, narrow in the next.
-    module = parse_mlir_text("""module { func.func @forward(%x: tensor<4xf16>) -> tensor<4xf16> {
-      %one = arith.constant 1.0 : f32
-      %s = tensor.splat %one : tensor<4xf32>
-      %e = tensor.empty() : tensor<4xf32>
-      %w = linalg.generic {indexing_maps = [affine_map<(i)->(i)>, affine_map<(i)->(i)>, affine_map<(i)->(i)>], iterator_types = ["parallel"]}
-        ins(%x, %s : tensor<4xf16>, tensor<4xf32>) outs(%e : tensor<4xf32>) {
-        ^bb0(%a: f16, %b: f32, %u: f32):
-          %c = arith.extf %a : f16 to f32
-          %m = arith.mulf %c, %b : f32
-          linalg.yield %m : f32
-      } -> tensor<4xf32>
-      %e2 = tensor.empty() : tensor<4xf16>
-      %n = linalg.generic {indexing_maps = [affine_map<(i)->(i)>, affine_map<(i)->(i)>], iterator_types = ["parallel"]}
-        ins(%w : tensor<4xf32>) outs(%e2 : tensor<4xf16>) {
-        ^bb0(%a: f32, %u: f16):
-          %t = arith.truncf %a : f32 to f16
-          linalg.yield %t : f16
-      } -> tensor<4xf16>
-      func.return %n : tensor<4xf16>
-    } }""")
+    prelude = "%one = arith.constant 1.0 : f32\n%s = tensor.splat %one : tensor<4xf32>\n"
+    widen = generic(
+        [("%x", "tensor<4xf16>"), ("%s", "tensor<4xf32>")],
+        "tensor<4xf32>",
+        "%c = arith.extf %a : f16 to f32\n%m = arith.mulf %c, %b : f32",
+        yields="%m",
+        name="%w",
+    )
+    narrow = generic(
+        [("%w", "tensor<4xf32>")], "tensor<4xf16>", "%t = arith.truncf %a : f32 to f16", yields="%t", name="%n"
+    )
+    module = forward("%x: tensor<4xf16>", "tensor<4xf16>", f"{prelude}{widen}\n{narrow}", ret="%n")
     normalize_closed_identities(module)
     returned = next(op for op in module.walk() if op.name == "func.return")
     assert returned.operands[0] is next(op for op in module.walk() if op.name == "func.func").body.block.args[0]

@@ -161,22 +161,19 @@ def test_clamp_epilogue_preserves_source_comparison_and_payloads(dtype, predicat
 
 
 def test_window_reduction_ignores_unread_shape_operand():
-    source = parse_mlir_text("""module {
-      func.func @forward(%x: tensor<4xi64>) -> tensor<2xi64> {
-        %shape = tensor.empty() : tensor<2xi64>
-        %z = arith.constant 0 : i64
-        %seed = tensor.splat %z : tensor<2xi64>
-        %r = linalg.generic {
-          indexing_maps = [affine_map<(d0,d1)->(d0*2+d1)>, affine_map<(d0,d1)->(d1)>, affine_map<(d0,d1)->(d0)>],
-          iterator_types = ["parallel", "reduction"]
-        } ins(%x, %shape : tensor<4xi64>, tensor<2xi64>) outs(%seed : tensor<2xi64>) {
-        ^bb0(%a: i64, %unused: i64, %acc: i64):
-          %v = arith.addi %a, %acc : i64
-          linalg.yield %v : i64
-        } -> tensor<2xi64>
-        return %r : tensor<2xi64>
-      }
-    }""")
+    prelude = "%shape = tensor.empty() : tensor<2xi64>\n%z = arith.constant 0 : i64\n%seed = tensor.splat %z : tensor<2xi64>\n"
+    maps = [f"affine_map<(d0,d1)->({m})>" for m in ("d0*2+d1", "d1", "d0")]
+    ins = [("%x", "tensor<4xi64>"), ("%shape", "tensor<2xi64>")]
+    window = generic(
+        ins,
+        "tensor<2xi64>",
+        "%v = arith.addi %a, %acc : i64",
+        maps=maps,
+        iterators=["parallel", "reduction"],
+        out="%seed",
+        acc="%acc",
+    )
+    source = forward("%x: tensor<4xi64>", "tensor<2xi64>", prelude + window)
     plans = rewrite_integer_components(source, limb_attribute="test.limb", input_bounds=[128])
     assert plans
     source.verify()
