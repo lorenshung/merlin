@@ -29,6 +29,14 @@ EXTREMA = {
     "arith.minui",
 }
 ROUNDING = {"math.floor", "math.ceil", "math.trunc", "math.round", "math.roundeven"}
+MOVEMENT = {
+    "tensor.extract",
+    "tensor.extract_slice",
+    "tensor.insert_slice",
+    "tensor.collapse_shape",
+    "tensor.expand_shape",
+    "tensor.concat",
+}
 
 
 def same_literal(first, second):
@@ -72,6 +80,7 @@ class Payloads:
         self._resolve_memo = {}
         self._contraction_memo = {}
         self._readout_memo = {}
+        self._store_memo = {}
         self._closed_memo = {}
 
     def resolve(self, value):
@@ -365,16 +374,8 @@ class Payloads:
                 continue
             if consumer.name == "func.return":
                 return True
-            movement = {
-                "tensor.extract",
-                "tensor.extract_slice",
-                "tensor.insert_slice",
-                "tensor.collapse_shape",
-                "tensor.expand_shape",
-                "tensor.concat",
-            }
             boolean_chain = consumer.name in {"arith.ori", "arith.andi", "arith.xori"} and str(value.type) == "i1"
-            if consumer.name in CASTS | movement | {"arith.fptosi", "arith.fptoui"} or boolean_chain:
+            if consumer.name in CASTS | MOVEMENT | {"arith.fptosi", "arith.fptoui"} or boolean_chain:
                 children.extend(consumer.results)
             if consumer.name == "arith.select" and use.index == 0:
                 if all(self.constant(v) is not None for v in consumer.operands[1:]):
@@ -391,6 +392,26 @@ class Payloads:
                 inputs = consumer.inputs if consumer.name == "linalg.generic" else (consumer.input,)
                 if use.index < len(inputs):
                     children.append(consumer.regions[0].block.args[use.index])
+        return tuple(children)
+
+    def terminal_store(self, value):
+        """Does every use of this value reach a result through storage conversions and movement only?"""
+        return dataflow(value, self._store_memo, self.store_dependencies, combine=all)
+
+    def store_dependencies(self, value):
+        children = []
+        for use in value.uses:
+            consumer = use.operation
+            if consumer not in self.operations or consumer.name == "func.return":
+                continue
+            if consumer.name in CASTS | MOVEMENT:
+                children.extend(consumer.results)
+            elif consumer.name in {"scf.yield", "linalg.yield"} and use.index < len(consumer.parent_op().results):
+                children.append(consumer.parent_op().results[use.index])
+            elif consumer.name == "linalg.generic" and use.index < len(consumer.inputs):
+                children.append(consumer.regions[0].block.args[use.index])
+            else:
+                return False
         return tuple(children)
 
     def patterns(self, op):
@@ -441,9 +462,11 @@ class Payloads:
         # encoder uses quotient/remainder and a conditional ties-even increment,
         # rather than an unconditional literal offset in a floating readout.
         # IEEE float-to-float RNE is a storage boundary, not an integer
-        # offset-rounding implementation. Its input may be an ordinary affine
-        # expression. Magic-bias arithmetic and float-to-integer rounding are
-        # still checked independently below.
+        # offset-rounding implementation, only when the narrowed value is
+        # stored: every use reaches a result through storage conversions and
+        # movement. Its input may then be an ordinary affine expression. A
+        # narrowed value that feeds further arithmetic can remove a magic bias
+        # in any spelling, so it is screened like every other rounding.
         storage_rne = name == "arith.truncf" and (str(op.operands[0].type), str(op.results[0].type)) in {
             ("f64", "f32"),
             ("f64", "f16"),
@@ -454,6 +477,7 @@ class Payloads:
         storage_rne = storage_rne and not any(
             key in op.properties or key in op.attributes for key in ("roundingmode", "roundingMode")
         )
+        storage_rne = storage_rne and self.terminal_store(op.results[0])
         if not storage_rne and name in ROUNDING | {
             "arith.fptosi",
             "arith.fptoui",
