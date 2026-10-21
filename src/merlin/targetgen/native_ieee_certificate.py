@@ -323,6 +323,18 @@ def generate():
     return result
 
 
+def _file_sha256(path):
+    status = Path(path).stat()
+    return _identified_sha256(path, (status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns))
+
+
+@functools.cache
+def _identified_sha256(path, identity):
+    """Hash once per file identity: a replaced, resized or rewritten library is hashed again."""
+    with Path(path).open("rb") as stream:
+        return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
 def certificate():
     path = Path(__file__).with_suffix(".json")
     value = json.loads(path.read_text())
@@ -330,9 +342,8 @@ def certificate():
     recorded = content.pop("content_sha256")
     if value.get("version") != VERSION or digest(content) != recorded or value["sources"] != proof_sources():
         raise ValueError("native IEEE certificate identity changed; regenerate its full-domain checks")
-    with Path(value["host"]["library"]).open("rb") as stream:
-        if hashlib.file_digest(stream, "sha256").hexdigest() != value["host"]["library_sha256"]:
-            raise ValueError("reference CPU library changed after its full-domain proof")
+    if _file_sha256(value["host"]["library"]) != value["host"]["library_sha256"]:
+        raise ValueError("reference CPU library changed after its full-domain proof")
     for filename, sha256 in value["loop_profile"]["source_files"].items():
         if hashlib.sha256(Path(filename).read_bytes()).hexdigest() != sha256:
             raise ValueError("CPU loop/vector header changed after its proof")

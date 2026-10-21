@@ -293,3 +293,37 @@ def test_dropped_destination_layout_cannot_claim_a_copy_profile(tmp_path, monkey
     )
     refusal = json.loads((tmp_path / "exact-dtype-refusal.json").read_text())
     assert refusal["code"] == "native_copy_layout_context_unproved"
+
+
+def test_library_is_hashed_once_per_process_until_it_changes(tmp_path, monkeypatch):
+    import hashlib
+    import json
+    from pathlib import Path
+
+    import merlin.targetgen.native_ieee_certificate as checker
+
+    library = tmp_path / "libtorch_cpu.so"
+    library.write_bytes(b"certified library")
+    document = json.loads(Path(checker.__file__).with_suffix(".json").read_text())
+    document["host"]["library"] = str(library)
+    document["host"]["library_sha256"] = hashlib.sha256(library.read_bytes()).hexdigest()
+    document.pop("content_sha256")
+    document["content_sha256"] = checker.digest(document)
+    fixture = tmp_path / "certificate.json"
+    fixture.write_text(json.dumps(document))
+    monkeypatch.setattr(checker, "__file__", str(fixture.with_suffix(".py")))
+    monkeypatch.setattr(checker, "proof_sources", lambda: document["sources"])
+    hashed = []
+    file_digest = hashlib.file_digest
+
+    def counted(stream, name):
+        hashed.append(stream.name)
+        return file_digest(stream, name)
+
+    monkeypatch.setattr(hashlib, "file_digest", counted)
+    checker.certificate()
+    checker.certificate()
+    assert hashed == [str(library)]
+    library.write_bytes(b"replaced library bytes")
+    with pytest.raises(ValueError, match="reference CPU library changed"):
+        checker.certificate()
