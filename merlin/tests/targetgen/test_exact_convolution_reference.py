@@ -76,7 +76,8 @@ def test_boundaries_and_python_integer_fallback(source, weight):
     np.testing.assert_array_equal(_convolution(x, w, None, 1, 1, 1, 1), _convolution_fraction(x, w, None, 1, 1, 1, 1))
 
 
-def test_overflow_bound_selects_python_integer_macs(monkeypatch):
+@pytest.mark.parametrize("first,expected", [(1 << 62, (1 << 63) + 1), ((1 << 61) - 1, (1 << 62) - 1)])
+def test_overflow_and_near_limit_bounds_use_python_integer_macs(monkeypatch, first, expected):
     original = np.matmul
     types = []
 
@@ -85,25 +86,9 @@ def test_overflow_bound_selects_python_integer_macs(monkeypatch):
         return original(a, b)
 
     monkeypatch.setattr(np, "matmul", matmul)
-    x = np.array([1 << 62, 1], dtype=object).reshape(1, 1, 2)
+    x = np.array([first, 1], dtype=object).reshape(1, 1, 2)
     w = np.array([2, 1], dtype=object).reshape(1, 1, 2)
-    actual = _convolution(x, w, None, 1, 0, 1, 1)
-    assert not types
-    assert actual.item() == (1 << 63) + 1
-
-
-def test_int64_prefix_bound_and_near_limit(monkeypatch):
-    original = np.matmul
-    types = []
-
-    def matmul(a, b):
-        types.append((a.dtype, b.dtype))
-        return original(a, b)
-
-    monkeypatch.setattr(np, "matmul", matmul)
-    x = np.array([(1 << 61) - 1, 1], dtype=object).reshape(1, 1, 2)
-    w = np.array([2, 1], dtype=object).reshape(1, 1, 2)
-    assert _convolution(x, w, None, 1, 0, 1, 1).item() == (1 << 62) - 1
+    assert _convolution(x, w, None, 1, 0, 1, 1).item() == expected
     assert not types
 
 
