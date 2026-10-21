@@ -48,7 +48,6 @@ def batch_provenance(
             "targetgen/core_aten_exact_dtype.py",
             "targetgen/core_aten_host_floor.py",
             "targetgen/core_aten_components.py",
-            "targetgen/native_rational_reference.py",
             "llvmlower/integer_components.py",
             "llvmlower/integer_float_boundaries.py",
             "llvmlower/native_sign_components.py",

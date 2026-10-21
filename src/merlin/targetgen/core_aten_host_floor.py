@@ -58,17 +58,6 @@ def grade_native_bits(record, outputs, *, execution_error=None):
         for i, raw in sorted(expected.items())
     ]
     passed = all(row["status"] == "pass" for row in comparisons)
-    if not passed and record.get("numeric_admission", {}).get("host_floor", {}).get("order_dependent_reduction"):
-        post_indices = set(indices["posts"])
-        if all(row["status"] == "pass" for row in comparisons if row["output_index"] in post_indices):
-            from merlin.targetgen.native_rational_reference import compare_reduction_floor
-
-            try:
-                floor = compare_reduction_floor(record, outputs)
-            except (ValueError, TypeError, OverflowError, ZeroDivisionError) as exc:
-                floor = dict(status="ungradable", reason=str(exc))
-            if floor["status"] == "pass":
-                return {**floor, "reason": "", "post_input_bits": "exact"}
     return dict(
         status="pass" if passed else "mismatch",
         comparison="exact_native_eager_storage_bits",
