@@ -62,6 +62,13 @@ def test_complete_integer_domain_including_tied_endpoints_proves_zero(dtype, see
     assert str(module) == original
     assert fold_singleton_selectors(module) == 1
     module.verify()
+    assert_zero_index_fill(module)
+
+
+NEGATIVE_INFINITY = {"f16": "0xFC00", "bf16": "0xFF80", "f32": "0xFF800000", "f64": "0xFFF0000000000000"}
+
+
+def assert_zero_index_fill(module):
     assert returned(module).owner.name == "tensor.splat"
     assert returned(module).owner.operands[0].owner.value.value.data == 0
     assert not any(op.name == "linalg.generic" for op in module.walk())
@@ -69,19 +76,7 @@ def test_complete_integer_domain_including_tied_endpoints_proves_zero(dtype, see
 
 @pytest.mark.parametrize("dtype", ["f16", "bf16", "f32", "f64"])
 def test_ordered_float_cells_and_nan_cell_are_all_covered(dtype):
-    module = source(
-        dtype,
-        "0xFF800000"
-        if dtype == "f32"
-        else "0xFFF0000000000000"
-        if dtype == "f64"
-        else "0xFF80"
-        if dtype == "bf16"
-        else "0xFC00",
-        "cmpf ogt",
-        "cmpf oeq",
-        nan=True,
-    )
+    module = source(dtype, NEGATIVE_INFINITY[dtype], "cmpf ogt", "cmpf oeq", nan=True)
     assert fold_singleton_selectors(module) == 1
     module.verify()
 
@@ -130,9 +125,7 @@ def test_a_real_parallel_clamp_is_not_a_storage_selector():
 def test_boundary_exposure_proves_a_closed_index_fill_before_splitting_its_tuple(floating):
     module = source("f32", "0xFF800000", "cmpf ogt", "cmpf oeq", nan=True) if floating else source()
     assert normalize_singleton_boundaries(module) == 1
-    assert returned(module).owner.name == "tensor.splat"
-    assert returned(module).owner.operands[0].owner.value.value.data == 0
-    assert not any(op.name == "linalg.generic" for op in module.walk())
+    assert_zero_index_fill(module)
 
 
 def test_boundary_exposure_does_not_erase_repeated_index_arithmetic():
