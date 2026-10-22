@@ -258,6 +258,72 @@ def test_runner_grades_candidate_emission_and_requires_rtl(packaged, tmp_path, m
     assert C.run_capsule(capsule, tmp_path, adapters={"L2": object()}, **options)["status"] == "incomplete"
 
 
+def test_operator_tier_floor_adds_mandatory_rtl_tier_to_scored_capsules_only(packaged, tmp_path, monkeypatch):
+    capsule, raw, readback, _, _ = packaged
+    capsule.update(cohort="public", scored=True)
+    config = SimpleNamespace(target="test_target", fourth_output_name="lowered.mlir", rtl_tiers={"L3"})
+    paths = SimpleNamespace(run_path=tmp_path / "runs")
+    options = dict(paths=paths, config=config, pkg=None, contract=None, timeout=1, no_oracle=False)
+    calls = []
+    monkeypatch.setattr(capsule_common, "run_entrypoints", lambda *a, **kw: (None, {}, "submitted LLVM"))
+
+    def adapter(tier, rtl):
+        def execute(**kwargs):
+            calls.append(tier)
+            observation = dict(output_bytes=raw, semantic_readback=readback, provenance={"tier": tier})
+            return dict(observation, engine=tier, derived_from_rtl=rtl)
+
+        return SimpleNamespace(run_full_call=execute)
+
+    adapters = {"L2": adapter("L2", False), "L3": adapter("L3", True)}
+    monkeypatch.delenv("MERLIN_CAPSULE_TIER_FLOOR", raising=False)
+    result = C.run_capsule(capsule, tmp_path, adapters=adapters, **options)
+    assert result["status"] == "pass" and set(result["tiers"]) == {"L2"} and calls == ["L2"]
+
+    monkeypatch.setenv("MERLIN_CAPSULE_TIER_FLOOR", "L3")
+    calls.clear()
+    result = C.run_capsule(capsule, tmp_path, adapters=adapters, **options)
+    assert result["status"] == "pass" and calls == ["L2", "L3"]
+    assert result["tiers"]["L3"]["status"] == "pass" and result["tiers"]["L3"]["derived_from_rtl"] is True
+    assert capsule["required_oracle_tiers"] == ["L2"]  # the declaration itself is untouched
+
+    for missing in ({"L2": adapters["L2"]}, {**adapters, "L3": object()}):
+        result = C.run_capsule(capsule, tmp_path, adapters=missing, **options)
+        assert result["status"] == "incomplete" and result["tiers"]["L3"]["not_run_is_not_pass"] is True
+        assert result["failure"] == {"plane": "oracle_unavailable", "category": "NOT_RUN_IS_NOT_PASS", "tier": "L3"}
+
+    capsule.update(cohort="host_guard", scored=False)
+    calls.clear()
+    result = C.run_capsule(capsule, tmp_path, adapters={"L2": adapters["L2"]}, **options)
+    assert result["status"] == "pass" and set(result["tiers"]) == {"L2"} and calls == ["L2"]
+
+    monkeypatch.setenv("MERLIN_CAPSULE_TIER_FLOOR", "rtl")
+    with pytest.raises(ValueError, match="MERLIN_CAPSULE_TIER_FLOOR"):
+        C.run_capsule(capsule | {"scored": True}, tmp_path, adapters=adapters, **options)
+
+
+@pytest.mark.parametrize(
+    ("floor", "capsule", "expected"),
+    [
+        (None, {"required_oracle_tiers": ["L2"]}, ["L2"]),
+        ("L3", {"required_oracle_tiers": ["L2"]}, ["L2", "L3"]),
+        ("L3", {"required_oracle_tiers": ["L2"], "scored": False}, ["L2"]),
+        ("L3", {"required_oracle_tiers": ["L2", "L3"]}, ["L2", "L3"]),
+        ("L4", {"required_oracle_tiers": ["L0", "L2"]}, ["L0", "L2", "L3", "L4"]),
+        ("L2", {"required_oracle_tiers": ["L3"]}, ["L3"]),
+    ],
+)
+def test_required_tiers_raise_declared_ladder_to_operator_floor(monkeypatch, floor, capsule, expected):
+    from merlin.targetgen.tier_policy import required_tiers
+
+    if floor is None:
+        monkeypatch.delenv("MERLIN_CAPSULE_TIER_FLOOR", raising=False)
+        assert required_tiers(capsule) is capsule["required_oracle_tiers"]
+    else:
+        monkeypatch.setenv("MERLIN_CAPSULE_TIER_FLOOR", floor)
+    assert required_tiers(capsule) == expected
+
+
 def test_source_bundle_scoring_requires_device_evidence_and_reports_guards(packaged, tmp_path, monkeypatch):
     capsule, raw, readback, _, _ = packaged
     capsule.update(cohort="public", scored=True, lane_expectation="device")

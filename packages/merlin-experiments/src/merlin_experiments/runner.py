@@ -593,7 +593,7 @@ def resolve_plan(
         if adapter.name == "capsule_bench" and command.get("module") == PHASE1_MODULE:
             # The native process inherits the caller's environment. Freeze selections
             # that otherwise could differ between preflight and launch/resume.
-            for key in ("MERLIN_TARGET_PATH", "MERLIN_TARGET_CONTRACT"):
+            for key in ("MERLIN_TARGET_PATH", "MERLIN_TARGET_CONTRACT", "MERLIN_CAPSULE_TIER_FLOOR"):
                 if key in os.environ:
                     command["env"][key] = os.environ[key]
             from merlin.targetgen.target_registry import effective_target_path

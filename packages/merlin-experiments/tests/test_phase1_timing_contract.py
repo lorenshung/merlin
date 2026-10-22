@@ -171,6 +171,17 @@ def test_functional_corpus_does_not_require_an_unexecuted_rtl_measurement(functi
     assert not timing.requires_chipyard_timing(descriptor)
 
 
+def test_operator_tier_floor_requires_timing_only_for_scored_capsules(functional_corpus, monkeypatch):
+    descriptor, public = functional_corpus
+    monkeypatch.setenv("MERLIN_CAPSULE_TIER_FLOOR", "L3")
+    assert timing.requires_chipyard_timing(descriptor)
+    (public / "capsule.yaml").write_text("required_oracle_tiers: [L2]\nscored: false\n")
+    assert not timing.requires_chipyard_timing(descriptor)
+    (public / "capsule.yaml").write_text("required_oracle_tiers: [L2]\n")
+    monkeypatch.setenv("MERLIN_CAPSULE_TIER_FLOOR", "L3-ish")
+    assert timing.requires_chipyard_timing(descriptor)  # an invalid floor fails closed
+
+
 @pytest.mark.parametrize("location", ["public", "hidden", "override"])
 def test_rtl_requirement_anywhere_retains_measured_timing_gate(functional_corpus, location):
     descriptor, public = functional_corpus

@@ -33,6 +33,7 @@ def requires_chipyard_timing(descriptor: Path | None, *, public_root: Path | Non
     if descriptor is None:
         return True
     from merlin.targetgen.target_experiment import load_target_experiment
+    from merlin.targetgen.tier_policy import required_tiers
 
     try:
         selected = load_target_experiment(descriptor)
@@ -60,7 +61,7 @@ def requires_chipyard_timing(descriptor: Path | None, *, public_root: Path | Non
                 return True
             if not isinstance(capsule, dict):
                 return True
-            tiers = capsule.get("required_oracle_tiers")
+            tiers = required_tiers(capsule)
             if (
                 not isinstance(tiers, list)
                 or not tiers

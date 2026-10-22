@@ -91,6 +91,25 @@ def test_cert_policy_intersects_all_public_roots_after_derivation(tmp_path, monk
     assert events == ["checkpoint", ("loop", {"L2", "L3"}), "public"]
 
 
+def test_operator_tier_floor_makes_the_cert_tier_mandatory_for_scored_capsules(tmp_path, monkeypatch):
+    from merlin.targetgen import capsule_runner as runner
+
+    monkeypatch.setattr(G, "load_target_experiment", lambda _: SimpleNamespace(target="fixture", sim_via="fixture"))
+    monkeypatch.setattr(runner, "qa_checkpoint_adapters", lambda *a: {"L2": 1, "L3": 2})
+    monkeypatch.setattr(runner, "qa_loop_adapters", lambda *a, **kw: {"L2": 1})
+    (tmp_path / "guard").mkdir()
+    (tmp_path / "guard" / "capsule.yaml").write_text("required_oracle_tiers: [L2]\nscored: false\n")
+    policy = dict(context=context(tmp_path), policy_roots=(), public_roots=lambda: (tmp_path / "guard",))
+    monkeypatch.setenv("MERLIN_CAPSULE_TIER_FLOOR", "L3")
+    assert G.cert_tiers_beyond_loop(**policy) == ({"L3"}, set())
+    (tmp_path / "device").mkdir()
+    (tmp_path / "device" / "capsule.yaml").write_text("required_oracle_tiers: [L2]\nscored: true\n")
+    policy["public_roots"] = lambda: (tmp_path / "guard", tmp_path / "device")
+    assert G.cert_tiers_beyond_loop(**policy) == ({"L3"}, {"L3"})
+    monkeypatch.delenv("MERLIN_CAPSULE_TIER_FLOOR")
+    assert G.cert_tiers_beyond_loop(**policy) == ({"L3"}, set())
+
+
 def test_interleaved_invocations_keep_snapshot_policy_order_and_publication(tmp_path, monkeypatch):
     from merlin_experiments.phase1.feedback import promotion
 

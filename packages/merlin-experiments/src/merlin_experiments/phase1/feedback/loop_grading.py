@@ -19,6 +19,7 @@ import yaml
 
 from merlin.common.tree_hash import hash_tree
 from merlin.targetgen.target_experiment import load_target_experiment
+from merlin.targetgen.tier_policy import required_tiers
 from merlin_experiments.phase1 import oot_history as OH
 from merlin_experiments.phase1 import run_inputs as RI
 from merlin_experiments.phase1 import treatments as T
@@ -106,7 +107,7 @@ def cert_tiers_beyond_loop(
                 doc = yaml.safe_load(cf.read_text()) or {}
             except Exception:  # noqa: BLE001
                 continue
-            mandatory |= set(doc.get("required_oracle_tiers") or [])
+            mandatory |= set(required_tiers(doc) or [])
     return cert_tiers, cert_tiers & mandatory
 
 

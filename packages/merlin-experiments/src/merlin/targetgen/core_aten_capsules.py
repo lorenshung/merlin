@@ -612,8 +612,9 @@ def run_capsule(capsule, package_dir, paths, config, adapters, pkg, contract, ti
         full_call_execution_identity,
         unqualified_spec_device,
     )
-    from merlin.targetgen.tier_policy import tier_depth_order
+    from merlin.targetgen.tier_policy import required_tiers, tier_depth_order
 
+    ladder = tier_depth_order(required_tiers(capsule))  # an invalid operator floor is not a capsule verdict
     paths.run_path.mkdir(parents=True, exist_ok=True)
     result = {
         "capsule": capsule["name"],
@@ -661,7 +662,7 @@ def run_capsule(capsule, package_dir, paths, config, adapters, pkg, contract, ti
         bundle = paths.run_path / ".private_full_call_runtime"
         bundle.mkdir(mode=0o700, exist_ok=True)
         runtime_bundle(capsule, bundle)
-        for tier in tier_depth_order(capsule["required_oracle_tiers"]):
+        for tier in ladder:
             adapter = (adapters or {}).get(tier)
             execute = getattr(adapter, "run_full_call", None)
             if no_oracle or execute is None:

@@ -4914,7 +4914,7 @@ def run_capsule(
     require_candidate_product_scope(pkg, adapters, capsule=capsule, package_dir=package_dir, contract=contract)
     if set(adapter_managed_tiers) - set(adapters or {}):
         raise ValueError("adapter-managed tiers require supplied oracle adapters")
-    required = set(capsule.get("required_oracle_tiers", []))
+    required = set(_tier_policy.required_tiers(capsule) or [])
 
     paths = make_run_paths(runs_root, run_id, suite=cfg.suite, target=cfg.target, dtype=cfg.dtype, benchmark=name)
 
