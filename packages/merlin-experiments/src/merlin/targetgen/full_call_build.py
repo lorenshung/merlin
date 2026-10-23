@@ -271,7 +271,7 @@ def build_in_sandbox(
         PYTHONPATH=os.environ.get("PYTHONPATH", ""),
     )
     argv = _jail(work, roots, environment, private)
-    command = [*argv, sys.executable, "-m", "merlin.targetgen.full_call_build", str(work / "request.json")]
+    command = [*argv, sys.executable, "-P", "-m", "merlin.targetgen.full_call_build", str(work / "request.json")]
     done = subprocess.run(command, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     result = work / "out" / "result.json"
     if not result.is_file() or result.is_symlink():
@@ -328,7 +328,7 @@ def run_elf_jailed(target: str, engine: str, elf: Path, work: Path, *, private, 
         "PYTHONDONTWRITEBYTECODE",
         "1",
     ]
-    command = [*argv, *environment, sys.executable, "-m", "merlin.targetgen.full_call_build", "--run-elf"]
+    command = [*argv, *environment, sys.executable, "-P", "-m", "merlin.targetgen.full_call_build", "--run-elf"]
     command += [target, engine, str(jailed), str(int(timeout))]
     done = subprocess.run(command, capture_output=True, text=True, timeout=timeout + 120, stdin=subprocess.DEVNULL)
     console = work / "console.txt"
