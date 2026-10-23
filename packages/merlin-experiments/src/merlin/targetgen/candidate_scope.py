@@ -4,6 +4,7 @@ from collections.abc import Callable
 
 from merlin.targetgen.core_aten_capsules import is_full_call
 from merlin.targetgen.package_runtime import CertFailure
+from merlin.targetgen.tier_policy import required_tiers
 
 
 def with_candidate_transport(adapters: dict[str, Callable], candidate_transport) -> dict[str, Callable]:
@@ -48,7 +49,7 @@ def require_candidate_product_scope(pkg, adapters, *, capsule=None, package_dir=
         )
     if capsule is not None and any(
         getattr((adapters or {}).get(tier), "_merlin_candidate_transport", None) is None
-        for tier in capsule.get("required_oracle_tiers", [])
+        for tier in required_tiers(capsule) or []
     ):
         raise CertFailure(
             "candidate_compilation",

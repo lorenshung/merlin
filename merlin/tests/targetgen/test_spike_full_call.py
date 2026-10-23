@@ -396,3 +396,20 @@ def test_rtl_board_comes_from_the_descriptor_host_board(tmp_path, monkeypatch, r
     else:
         assert selected is None and not calls
     assert spike_full_call.on_rtl_board(SimpleNamespace(), "vcs", "t") is None
+
+
+def test_source_product_scope_covers_the_floor_tier(monkeypatch):
+    def oracle(*args):
+        pass
+
+    oracle._merlin_candidate_transport = object()
+    package = SimpleNamespace(manifest={})
+    capsule = {"required_oracle_tiers": ["L2"], "scored": True}
+    from merlin.targetgen import candidate_scope
+
+    monkeypatch.setattr(candidate_scope, "is_full_call", lambda capsule: True)
+    monkeypatch.delenv("MERLIN_CAPSULE_TIER_FLOOR", raising=False)
+    candidate_scope.require_candidate_product_scope(package, {"L2": oracle, "L3": object()}, capsule=capsule)
+    monkeypatch.setenv("MERLIN_CAPSULE_TIER_FLOOR", "L3")
+    with pytest.raises(capsule_runner.CertFailure, match="every required full-call tier"):
+        candidate_scope.require_candidate_product_scope(package, {"L2": oracle, "L3": object()}, capsule=capsule)
