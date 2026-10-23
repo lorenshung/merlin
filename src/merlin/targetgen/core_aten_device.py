@@ -151,6 +151,150 @@ def select_source_routing(
     return routing, reason
 
 
+def submission_interface(provider: Path) -> list[dict]:
+    """Every submission member a Core ATen execution provider uses, read from its source (never run).
+
+    A provider loads modules from the submitted package (``load_module(package, "<module>")``, directly
+    or through a one-line helper that formats the module name). Returns one row per (module, member,
+    provider hook): how many positional arguments and which keywords the provider passes, and how many
+    values it unpacks from the result, or ``None`` when the member is read rather than called. This is
+    the call ABI the candidate's package must implement; no provider logic is reported.
+    """
+    import ast
+
+    tree = ast.parse(Path(provider).read_text(encoding="utf-8"))
+    functions = [node for node in tree.body if isinstance(node, ast.FunctionDef)]
+
+    def loads(call):
+        return isinstance(call, ast.Call) and isinstance(call.func, ast.Name) and call.func.id == "load_module"
+
+    helpers = {}  # helper name -> (module prefix, index of the parameter that completes the name)
+    for function in functions:
+        params = [arg.arg for arg in function.args.args]
+        for node in ast.walk(function):
+            if loads(node) and len(node.args) > 1 and isinstance(node.args[1], ast.JoinedStr):
+                parts = node.args[1].values
+                if (
+                    len(parts) == 2
+                    and isinstance(parts[0], ast.Constant)
+                    and isinstance(parts[1], ast.FormattedValue)
+                    and isinstance(parts[1].value, ast.Name)
+                    and parts[1].value.id in params
+                ):
+                    helpers[function.name] = (parts[0].value, params.index(parts[1].value.id))
+
+    def module_of(call):
+        if not isinstance(call, ast.Call) or not isinstance(call.func, ast.Name):
+            return None
+        if loads(call) and len(call.args) > 1 and isinstance(call.args[1], ast.Constant):
+            return call.args[1].value
+        prefix, index = helpers.get(call.func.id, (None, None))
+        argument = call.args[index] if prefix is not None and len(call.args) > index else None
+        return prefix + argument.value if isinstance(argument, ast.Constant) else None
+
+    rows: dict[tuple, dict] = {}
+    for function in functions:
+        bound = {}
+        for node in ast.walk(function):
+            if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+                module = module_of(node.value)
+                if module:
+                    bound[node.targets[0].id] = module
+        unpacked = {
+            id(node.value.func): len(node.targets[0].elts)
+            for node in ast.walk(function)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Tuple)
+            and isinstance(node.value, ast.Call)
+        }
+        called = {id(node.func): node for node in ast.walk(function) if isinstance(node, ast.Call)}
+        for node in ast.walk(function):
+            if (
+                isinstance(node, ast.Attribute)
+                and isinstance(node.value, ast.Name)
+                and node.value.id in bound
+                and not node.attr.startswith("__")
+            ):
+                call = called.get(id(node))
+                use = None
+                if call is not None:
+                    use = {
+                        "positional": len(call.args),
+                        "keywords": sorted(k.arg for k in call.keywords if k.arg),
+                        "unpacks": unpacked.get(id(node)),
+                    }
+                key = (bound[node.value.id], node.attr, function.name)
+                rows.setdefault(key, {"module": key[0], "member": key[1], "hook": key[2], "calls": [], "fields": []})
+                if use is not None and use not in rows[key]["calls"]:
+                    rows[key]["calls"].append(use)
+        # Fields the provider reads from a member's result, and work-directory files it reads afterwards
+        # (a path it only writes itself is not part of the submission's obligation).
+        results, written, files = {}, set(), []
+        for node in ast.walk(function):
+            if isinstance(node, ast.Assign) and isinstance(node.value, ast.Call):
+                func = node.value.func
+                targets = node.targets[0].elts if isinstance(node.targets[0], ast.Tuple) else node.targets
+                if isinstance(func, ast.Attribute) and isinstance(func.value, ast.Name) and func.value.id in bound:
+                    unpack = isinstance(node.targets[0], ast.Tuple)
+                    for index, target in enumerate(targets):
+                        if isinstance(target, ast.Name) and target.id != "_":
+                            source = ((bound[func.value.id], func.attr, function.name), index if unpack else None)
+                            results.setdefault(target.id, []).append((node.lineno, source))
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"write_text", "write_bytes"}
+                and isinstance(node.func.value, ast.Name)
+            ):
+                written.add(node.func.value.id)
+        named = {
+            node.targets[0].id: node.value
+            for node in ast.walk(function)
+            if isinstance(node, ast.Assign)
+            and isinstance(node.targets[0], ast.Name)
+            and isinstance(node.value, ast.BinOp)
+        }
+        for node in ast.walk(function):
+            field = None
+            if (
+                isinstance(node, ast.Subscript)
+                and isinstance(node.value, ast.Name)
+                and isinstance(node.slice, ast.Constant)
+            ):
+                owner, field = node.value.id, node.slice.value
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "get"
+                and isinstance(node.func.value, ast.Name)
+                and node.args
+                and isinstance(node.args[0], ast.Constant)
+            ):
+                owner, field = node.func.value.id, node.args[0].value
+            # A field belongs to the latest binding of its name before the read.
+            bindings = [b for b in results.get(owner, ()) if b[0] <= node.lineno] if isinstance(field, str) else []
+            if bindings:
+                key, index = max(bindings, key=lambda b: b[0])[1]
+                label = field if index is None else f"[{index}]{field}"
+                if label not in rows[key]["fields"]:
+                    rows[key]["fields"].append(label)
+            if (
+                isinstance(node, ast.BinOp)
+                and isinstance(node.op, ast.Div)
+                and isinstance(node.left, ast.Name)
+                and isinstance(node.right, ast.Constant)
+                and isinstance(node.right.value, str)
+                and "." in node.right.value
+                and not any(value is node and name in written for name, value in named.items())
+                and node.right.value not in files
+            ):
+                files.append(node.right.value)
+        for key, row in rows.items():
+            if key[2] == function.name:
+                row["reads"] = files
+    return [rows[key] for key in sorted(rows)]
+
+
 def region_routing_for_bundle(target: str, package: Path, region_offload):
     """A DeviceRouting that hands the prepared program to the provider's own region offload."""
     from merlin.llvmlower import toolchain

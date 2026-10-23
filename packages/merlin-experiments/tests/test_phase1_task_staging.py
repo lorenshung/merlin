@@ -208,3 +208,37 @@ def test_shared_coverage_prompt_uses_selected_contract_for_other_targets(tmp_pat
     assert "selected contract's declared internal MAC precision" in generic
     assert "exact raw i32 accumulator" in conditional
     assert "If the selected numeric policy is int8_w8a8:" in conditional
+
+
+def test_staged_task_names_the_full_call_submission_interface(tmp_path, monkeypatch):
+    provider = tmp_path / "support" / "provider.py"
+    provider.parent.mkdir()
+    provider.write_text(
+        "from merlin.targetgen.plugins import load_module\n"
+        "SECRET_SUPPORT_LOGIC = 'never staged'\n"
+        "def _module(package, name):\n"
+        "    return load_module(package, f'pkg.parts.{name}', package_name='x')\n"
+        "def routing(directory, *, package, eligible):\n"
+        "    parts = _module(package, 'catalog')\n"
+        "    _, inventory = parts.build(SECRET_SUPPORT_LOGIC)\n"
+        "    audit = load_module(package, 'pkg.audit')\n"
+        "    return inventory['covered'] and audit.final_check\n"
+        "def offload(prepared, workdir, *, package):\n"
+        "    parts = _module(package, 'catalog')\n"
+        "    parts.compile(prepared, workdir, tools=None)\n"
+        "    done = workdir / 'written.c'\n"
+        "    done.write_text('')\n"
+        "    return workdir / 'result.json'\n"
+    )
+    conf = config(tmp_path / "operator")
+    (conf.context.experiment / "task").mkdir()
+    (conf.context.experiment / "task/TASK_realistic.md").write_text("operator task\n")
+    monkeypatch.delenv("MERLIN_CORE_ATEN_EXECUTION_PROVIDER", raising=False)
+    assert "Full-call capsule interface" not in (stage(conf) / "TASK.md").read_text()
+    monkeypatch.setenv("MERLIN_CORE_ATEN_EXECUTION_PROVIDER", str(provider))
+    text = (stage(conf) / "TASK.md").read_text()
+    assert "| `pkg.parts.catalog` | `build(arg1)` -> unpacked into 2 values | `[1]covered` | routing |" in text
+    assert "`compile(arg1, arg2, tools=...)`" in text and "`final_check` (read as an attribute" in text
+    assert "reads `result.json` from its work directory" in text and "written.c" not in text
+    assert "region offload" in text and "device_signatures.json" in text
+    assert str(provider) not in text and "SECRET_SUPPORT_LOGIC" not in text and "never staged" not in text
