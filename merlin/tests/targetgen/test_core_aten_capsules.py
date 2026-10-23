@@ -302,6 +302,22 @@ def test_operator_tier_floor_adds_mandatory_rtl_tier_to_scored_capsules_only(pac
         C.run_capsule(capsule | {"scored": True}, tmp_path, adapters=adapters, **options)
 
 
+def test_feedback_grade_defers_the_floor_tier_without_running_it(packaged, tmp_path, monkeypatch):
+    from merlin.targetgen import capsule_runner as CR
+
+    capsule, raw, readback, _, _ = packaged
+    capsule.update(cohort="public", scored=True)
+    config = SimpleNamespace(target="test_target", fourth_output_name="lowered.mlir", rtl_tiers={"L3"})
+    options = dict(paths=SimpleNamespace(run_path=tmp_path / "runs"), config=config, pkg=None, contract=None)
+    monkeypatch.setattr(capsule_common, "run_entrypoints", lambda *a, **kw: (None, {}, "submitted LLVM"))
+    monkeypatch.setenv("MERLIN_CAPSULE_TIER_FLOOR", "L3")
+    observation = dict(output_bytes=raw, semantic_readback=readback, provenance={}, engine="L2", derived_from_rtl=False)
+    adapters = CR.defer_tiers({"L2": SimpleNamespace(run_full_call=lambda **kw: observation)}, ["L3"])
+    result = C.run_capsule(capsule, tmp_path, adapters=adapters, timeout=1, no_oracle=False, **options)
+    assert result["status"] == "pass" and result["tiers"]["L3"]["status"] == "skipped"
+    assert result["tiers"]["L3"]["not_run_is_not_pass"] is True  # recorded, never counted as an L3 pass
+
+
 @pytest.mark.parametrize(
     ("floor", "capsule", "expected"),
     [

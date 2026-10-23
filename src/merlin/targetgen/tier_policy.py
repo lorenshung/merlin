@@ -340,6 +340,21 @@ def tier_depth_order(tiers: Iterable[str]) -> list[str]:
 TIER_FLOOR_ENV = "MERLIN_CAPSULE_TIER_FLOOR"
 
 
+def raised_tiers(declared) -> list[str]:
+    """The rungs :data:`TIER_FLOOR_ENV` adds above the deepest of ``declared``; empty when unset."""
+    import os
+
+    floor = os.environ.get(TIER_FLOOR_ENV, "").strip()
+    if not floor:
+        return []
+    if not (floor[:1] == "L" and floor[1:].isdigit()):
+        raise ValueError(f"{TIER_FLOOR_ENV}={floor!r} is not an oracle tier such as L3")
+    depth = int(floor[1:])
+    tiers = [str(t) for t in declared or ()]
+    deepest = max((int(t[1:]) for t in tiers if t[:1] == "L" and t[1:].isdigit()), default=depth - 1)
+    return [f"L{i}" for i in range(deepest + 1, depth + 1)]
+
+
 def required_tiers(capsule: Mapping):
     """The capsule's mandatory tiers: ``required_oracle_tiers`` plus, under :data:`TIER_FLOOR_ENV`, every
     rung deeper than its deepest declared one up to the floor.
@@ -349,18 +364,9 @@ def required_tiers(capsule: Mapping):
     ladder. A raised tier is mandatory like a declared one: without an adapter that can run it the
     capsule is ``not_run_is_not_pass``, never skipped. Unset, this returns the declared value itself.
     """
-    import os
-
     declared = capsule.get("required_oracle_tiers")
-    floor = os.environ.get(TIER_FLOOR_ENV, "").strip()
-    if not floor or capsule.get("scored") is False:
-        return declared
-    if not (floor[:1] == "L" and floor[1:].isdigit()):
-        raise ValueError(f"{TIER_FLOOR_ENV}={floor!r} is not an oracle tier such as L3")
-    tiers = [str(t) for t in declared or ()]
-    depth = int(floor[1:])
-    deepest = max((int(t[1:]) for t in tiers if t[:1] == "L" and t[1:].isdigit()), default=depth - 1)
-    return tiers + [f"L{i}" for i in range(deepest + 1, depth + 1)]
+    raised = [] if capsule.get("scored") is False else raised_tiers(declared)
+    return [*(str(t) for t in declared or ()), *raised] if raised else declared
 
 
 def _rank(tier: str, universe: Sequence[str]) -> int:

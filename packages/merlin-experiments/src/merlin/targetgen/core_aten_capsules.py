@@ -664,6 +664,14 @@ def run_capsule(capsule, package_dir, paths, config, adapters, pkg, contract, ti
         runtime_bundle(capsule, bundle)
         for tier in ladder:
             adapter = (adapters or {}).get(tier)
+            if getattr(adapter, "_merlin_deferred", False) and not no_oracle:
+                result["tiers"][tier] = {
+                    "status": "skipped",
+                    "mandatory": True,
+                    "not_run_is_not_pass": True,
+                    "reason": "deferred: this feedback grade leaves the tier to the certification grades",
+                }
+                continue
             execute = getattr(adapter, "run_full_call", None)
             if no_oracle or execute is None:
                 result["tiers"][tier] = {

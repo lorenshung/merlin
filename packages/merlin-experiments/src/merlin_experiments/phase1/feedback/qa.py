@@ -35,6 +35,7 @@ from merlin.targetgen import capsule_grade as CG  # noqa: E402
 from merlin.targetgen import capsule_runner as CR  # noqa: E402
 from merlin.targetgen import tier_integrity as _TI  # noqa: E402
 from merlin.targetgen.capsule_common import host_guards_pass, lane_entry_fields  # noqa: E402
+from merlin.targetgen.tier_policy import raised_tiers  # noqa: E402
 from merlin_experiments.phase1.context import InvocationContext, add_context_arguments, oracle_kwargs, resolve_context
 
 # Allowed (answer-free) numeric fields. Everything else in the numeric block is dropped.
@@ -826,6 +827,9 @@ def run(
     # one submission passed the cheap functional tier on 20 of 20 capsules while the RTL tier passed 1.
     # A screen may eliminate; it may never certify (see merlin.targetgen.tier_policy).
     _loop_adapters = {} if no_oracle else CR.qa_checkpoint_adapters(_target, _sim_via, **oracle_kwargs(context))
+    # An operator tier floor is a certification requirement: certified at the checkpoint barrier, its fix
+    # rounds and the formal grades, never re-bought on every capsule in every 900 s feedback grade.
+    _loop_adapters = CR.defer_tiers(_loop_adapters, raised_tiers(_decl)) if _loop_adapters else _loop_adapters
     # Refuse ONLY when the endpoint exposes tiers but none of them is declared — substituting one there is
     # the defect. An endpoint that reaches nothing at all is an honestly ABSENT oracle: leave the adapter
     # set empty and let each capsule report its missing tier as unavailable, exactly as before.

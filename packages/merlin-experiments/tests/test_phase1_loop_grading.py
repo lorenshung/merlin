@@ -423,3 +423,33 @@ def test_fast_grade_uses_explicit_target_roots_and_withheld_tier(tmp_path, monke
     assert seen[0]["contract"] == str(inputs.contract)
     assert seen[0]["oracle_adapters"] == {"L2": "loop"}
     assert json.loads((ws / "qa/verdict.json").read_text()) == verdict
+
+
+@pytest.mark.parametrize("floor", [None, "L3"])
+def test_round_grade_defers_floor_tiers_to_certification(tmp_path, monkeypatch, floor):
+    from merlin.targetgen import capsule_runner as runner
+    from merlin.targetgen.contract import materialize
+    from merlin_experiments.phase1.feedback import qa
+
+    monkeypatch.setattr(qa, "_loop_target_sim_via", lambda context: ("fixture", "fixture"))
+    monkeypatch.setattr(materialize, "declared_oracle_tiers", lambda *roots: {"L2"})
+    rtl = object()
+    monkeypatch.setattr(runner, "qa_checkpoint_adapters", lambda *a, **k: {"L2": object(), "L3": rtl})
+    seen = {}
+
+    def grade(*args, oracle_adapters, **kwargs):
+        seen.update(oracle_adapters)
+        return {"per_capsule": [], "n_capsules": 0, "n_passed": 0}
+
+    monkeypatch.setattr(qa.CG, "grade", grade)
+    if floor:
+        monkeypatch.setenv("MERLIN_CAPSULE_TIER_FLOOR", floor)
+    else:
+        monkeypatch.delenv("MERLIN_CAPSULE_TIER_FLOOR", raising=False)
+    try:
+        qa.run(str(tmp_path), str(tmp_path), tmp_path / "runs", {"public"}, False, 1, context=context(tmp_path))
+    except Exception:  # noqa: BLE001 -- only the adapters handed to the grade are under test
+        pass
+    assert set(seen) == {"L2", "L3"}
+    assert (seen["L3"] is rtl) is (floor is None)
+    assert getattr(seen["L3"], "_merlin_deferred", False) is (floor is not None)

@@ -1367,6 +1367,19 @@ def _resolve_oracle_adapters(target: str) -> dict[str, Callable]:
     return oracle_adapters(target)
 
 
+def _deferred_tier(cb, llvm_text, workdir, timeout):
+    raise OracleUnavailable("tier deferred to certification; this feedback grade does not run it")
+
+
+_deferred_tier._merlin_deferred = True
+
+
+def defer_tiers(adapters: dict[str, Callable], tiers) -> dict[str, Callable]:
+    """``adapters`` with ``tiers`` deferred: a FEEDBACK grade records them as not run (``skipped``),
+    leaving them to the certification grades (checkpoint barrier, fix rounds, formal) that hold them."""
+    return {**adapters, **dict.fromkeys(tiers, _deferred_tier)}
+
+
 def qa_loop_adapters(
     target: str,
     sim_via: str | None = None,

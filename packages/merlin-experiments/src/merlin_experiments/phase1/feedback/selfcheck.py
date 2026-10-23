@@ -980,6 +980,12 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
     # barrier = the deepest resolved RTL tier: chipyard maps from --sim; any other target uses its
     # single contract-derived tier (e.g. L3 program oracle), so read it from the adapters.
     barrier_tier = SIM_TIER[sim] if _sim_via == "chipyard" else max(adapters) if adapters else "L3"
+    if not a.tiers:  # the operator floor's tiers are certified by the operator grades, not this check
+        from merlin.targetgen.contract.materialize import declared_oracle_tiers
+        from merlin.targetgen.tier_policy import raised_tiers
+
+        floor = raised_tiers(declared_oracle_tiers(capsules_root))
+        adapters = CR.defer_tiers(adapters, [tier for tier in floor if tier not in adapters])
     # subset selection (operator-side capsule dirs)
     if a.capsules.strip().lower() == "failing":
         want, _why_failing = _previously_failing()
