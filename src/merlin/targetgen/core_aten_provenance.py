@@ -56,6 +56,7 @@ def batch_provenance(
             "llvmlower/floating_components.py",
             "llvmlower/boolean_components.py",
             "llvmlower/pointwise_primitives.py",
+            "llvmlower/_ir.py",
             "targetgen/operation_numerics.py",
             "targetgen/core_aten_spec_int8.py",
             "targetgen/software_spec.py",
