@@ -76,3 +76,16 @@ model=Model()
 graph,proof=specialize_static_metadata(model,(x,))
 assert graph is model and proof is None, proof
 ''')
+
+
+def test_a_call_that_writes_an_input_does_not_fold_or_run_on_it():
+    _torch('''
+import torch
+from merlin.capture.static_metadata import specialize_static_metadata
+class Model(torch.nn.Module):
+ def forward(self,x):
+  torch.ops.aten._foreach_add_.Scalar([x],1.0)
+  return torch.ops.aten.scalar_tensor.default(torch.ops.aten.sym_numel.default(x))
+x=torch.ones(3)
+assert specialize_static_metadata(Model(),(x,))[1] is None and torch.equal(x,torch.ones(3)), x
+''')

@@ -41,15 +41,24 @@ def specialize_static_metadata(model, inputs):
     for node in [node for node in nodes if node.op == "call_function"]:
         if not any(source in meta for source in node.all_input_nodes):
             continue
-        if not set(node.all_input_nodes) <= meta.keys():
+        schema = getattr(node.target, "_schema", None)
+        # A call that returns nothing or writes an argument is not a query, and never runs on the inputs.
+        if (
+            not set(node.all_input_nodes) <= meta.keys()
+            or schema is None
+            or not schema.returns
+            or any(argument.alias_info is not None and argument.alias_info.is_write for argument in schema.arguments)
+        ):
             return model, None
         try:
             value = node.target(*map_arg(node.args, meta.__getitem__), **map_arg(node.kwargs, meta.__getitem__))
+            if type(value) not in {int, bool}:
+                return model, None
             observed = node.target(*map_arg(node.args, real.__getitem__), **map_arg(node.kwargs, real.__getitem__))
         except (RuntimeError, NotImplementedError, TypeError, ValueError):
             return model, None
         # A descriptor query gives the same answer with and without data (e.g. aten._version does not).
-        if type(value) not in {int, bool} or type(observed) is not type(value) or observed != value:
+        if type(observed) is not type(value) or observed != value:
             return model, None
         folded.append({"operator": str(node.target), "value": value})
         for user in list(node.users):
