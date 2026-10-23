@@ -35,7 +35,10 @@ def specialize_static_metadata(model, inputs):
         span = offset + (1 + sum((n - 1) * s for n, s in zip(shape, stride)) if value.numel() else 0)
         return torch.empty(span, dtype=value.dtype, device="meta").as_strided(shape, stride, offset)
 
-    meta = {node: descriptor(value) for node, value in zip(placeholders, inputs, strict=True)}
+    try:
+        meta = {node: descriptor(value) for node, value in zip(placeholders, inputs, strict=True)}
+    except RuntimeError:  # e.g. a quantized tensor has no strided meta form
+        return model, None
     real = dict(zip(placeholders, inputs, strict=True))
     folded = []
     for node in [node for node in nodes if node.op == "call_function"]:

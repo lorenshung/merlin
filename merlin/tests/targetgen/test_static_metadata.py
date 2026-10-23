@@ -52,6 +52,9 @@ for call in (torch.ops.aten._local_scalar_dense.default, torch.ops.aten.is_nonze
 class Seeded(torch.nn.Module):
  def forward(self,x): return torch.ops.aten.sym_numel.default(x)+torch.rand(())
 assert specialize_static_metadata(Seeded(),(x,))[1] is None
+# An input without a meta descriptor (a quantized tensor) keeps the ordinary path.
+q=torch.quantize_per_tensor(x.contiguous(),0.5,0,torch.qint8)
+assert specialize_static_metadata(model(torch.ops.aten.sym_numel.default),(q,))[1] is None
 # The capture loader selects the fold from the operator schema, not a roster.
 def flag(overload):
  tensor=dict(kind="tensor",dtype="float32",shape=[2],stride=[1],storage_offset=0,values=[1.,2.],requires_grad=False)
