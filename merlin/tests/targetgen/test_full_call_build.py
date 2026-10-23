@@ -242,3 +242,13 @@ def test_sandbox_text_reaching_feedback_is_a_short_path_free_line():
     assert full_call_build.sanitized("no eligible contraction in /a/b") == "no eligible contraction in <path>"
     record = full_call_build.sanitized_record([{"op": "/abs/path/leak", "n": 3, "deep": [[[["x"]]]]}] * 100)
     assert len(record) == 64 and record[0]["op"] == "<path>" and record[0]["n"] == 3
+
+
+def test_jail_libraries_leave_pinned_copies_to_the_library_path(tmp_path, monkeypatch):
+    pinned, live, other = tmp_path / "pinned", tmp_path / "live", tmp_path / "other"
+    for directory, name in ((pinned, "libstdc++.so.6"), (live, "libstdc++.so.6"), (other, "libextra.so")):
+        directory.mkdir(exist_ok=True)
+        (directory / name).write_text("")
+    listing = f"\tlibstdc++.so.6 => {live}/libstdc++.so.6 (0x1)\n\tlibextra.so => {other}/libextra.so (0x2)\n"
+    monkeypatch.setattr(full_call_build.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, listing))
+    assert full_call_build._libraries(["sim"], str(pinned)) == [other]

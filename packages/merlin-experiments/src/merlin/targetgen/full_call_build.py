@@ -159,8 +159,14 @@ def _merlin_roots(target: str) -> list:
 
 
 def _libraries(executables, library_path: str) -> list[Path]:
-    """Directories outside the system holding the shared libraries ``executables`` load (``ldd``)."""
+    """Directories outside the system holding the shared libraries ``executables`` load (``ldd``).
+
+    A library that ``library_path`` also provides is left to it: an executable's DT_RPATH (searched before
+    ``LD_LIBRARY_PATH``) may name a live install, which the jail then does not mount, so the loader falls
+    through to the pinned copy instead of binding the install.
+    """
     directories = []
+    provided = [Path(entry) for entry in library_path.split(os.pathsep) if entry]
     environment = {**os.environ, "LD_LIBRARY_PATH": library_path}
     for executable in executables:
         listing = subprocess.run(["ldd", str(executable)], capture_output=True, text=True, env=environment).stdout
@@ -168,6 +174,8 @@ def _libraries(executables, library_path: str) -> list[Path]:
             parts = line.split()
             if "=>" in parts and parts.index("=>") + 1 < len(parts) and parts[parts.index("=>") + 1].startswith("/"):
                 library = Path(parts[parts.index("=>") + 1]).resolve().parent
+                if any((entry / parts[0]).is_file() for entry in provided):
+                    continue
                 if not library.is_relative_to("/usr") and not library.is_relative_to("/lib"):
                     directories.append(library)
     return directories
