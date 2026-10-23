@@ -1,7 +1,7 @@
 {
   "schema": "merlin.exactness_final_gate.v1",
-  "model2mlir_revision": "941eac967bea7e99cf865f71709a2a86a1d979c8",
-  "gemmini_mlir_revision": "86b5e3bca90ad4c0e527b84e62cbd26475876b1f",
+  "model2mlir_revision": "26e0373f4cee2a6ac2a5741631494916f33e46ea",
+  "gemmini_mlir_revision": "b78bbca9b5b0e302ecd4fdf499e4d19e83bccd2c",
   "selected_cases": [
     {
       "arguments": {
@@ -8153,12 +8153,12 @@
   ],
   "source_exports": {
     "model2mlir": {
-      "revision": "941eac967bea7e99cf865f71709a2a86a1d979c8",
-      "sha256": "5af8aa71ef706c01c2aba16fcebf7c741172d79cfc5e61604a7b1804bfa08110"
+      "revision": "26e0373f4cee2a6ac2a5741631494916f33e46ea",
+      "sha256": "647c745a8baf208a7b2556cf7dcab81c4f8d327167e92598435e2160e90e29dc"
     },
     "gemmini_mlir": {
-      "revision": "86b5e3bca90ad4c0e527b84e62cbd26475876b1f",
-      "sha256": "f49b3829d721fd5caf186167fa700909bc4921477deade865948cb1dce63b1cc"
+      "revision": "b78bbca9b5b0e302ecd4fdf499e4d19e83bccd2c",
+      "sha256": "1a6d25ba231e8c10610fcf0091aebc633e80136e61e7e3fc1c7e4aa7cf2ae487"
     }
   }
 }
