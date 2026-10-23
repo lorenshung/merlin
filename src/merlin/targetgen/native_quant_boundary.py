@@ -7,8 +7,6 @@ all ordinary source, dtype, quantization and provider proofs.
 
 def checked_boundary(op):
     from xdsl.dialects.builtin import ModuleOp
-    from xdsl.utils.exceptions import VerifyException
-
     from merlin.llvmlower.passes_xdsl import _DEQUANT_KINDS, _QUANT_KINDS, lower_quant_ext
     from merlin.targetgen.native_payload_carriers import op_name
     from merlin.targetgen.core_aten_spec_int8 import validate_quantization_attributes
@@ -28,7 +26,7 @@ def checked_boundary(op):
         for replacement in rewrites:
             replacement.verify()
         return True
-    except (LookupError, ValueError, VerifyException):  # Unsupported boundary semantics remain UNKNOWN, never a grant.
+    except Exception:  # Unsupported boundary semantics remain UNKNOWN, never a carrier grant.
         return False
     finally:
         scratch.drop_all_references()

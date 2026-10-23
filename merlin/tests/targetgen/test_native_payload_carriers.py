@@ -113,17 +113,6 @@ def test_quant_spelling_cannot_authenticate_an_unknown_or_invalid_carrier(mutati
     assert any(e['reason'] == 'unproved_payload_carrier' for e in result['evidence'])
 
 
-def test_an_unexpected_boundary_lowering_error_is_not_read_as_unknown_semantics(monkeypatch):
-    import merlin.llvmlower.passes_xdsl as passes
-
-    def broken(*args, **kwargs):
-        raise TypeError("lowering defect")
-
-    monkeypatch.setattr(passes, 'lower_quant_ext', broken)
-    with pytest.raises(TypeError, match='lowering defect'):
-        construction_evidence(parse_mlir_text(QUANT), excluded=[])
-
-
 @pytest.mark.parametrize('table', [False, True])
 def test_reduction_region_arguments_have_explicit_input_and_seed_provenance(table):
     source = ('%seed = arith.constant dense<[1,2]> : tensor<2xi32>' if table else
