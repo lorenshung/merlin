@@ -93,13 +93,17 @@ def test_validated_numeric_boundary_preserves_its_data_provenance(table):
         assert any(e['reason'] == 'nonuniform_literal_result_construction' for e in result['evidence'])
 
 
-@pytest.mark.parametrize('mutation', ['unknown_boundary', 'invalid_arity', 'unproved_input', 'unknown_metadata'])
+@pytest.mark.parametrize('mutation', ['unknown_boundary', 'invalid_arity', 'unproved_input', 'unknown_metadata',
+                                      'channel_without_axis', 'channel_axis_out_of_range'])
 def test_quant_spelling_cannot_authenticate_an_unknown_or_invalid_carrier(mutation):
     text = QUANT
     if mutation == 'unknown_boundary':
         text = text.replace('dequantize_per_tensor', 'unknown_movement')
     elif mutation == 'invalid_arity':
         text = text.replace('%x,%scale,%zero','%x,%scale').replace('tensor<4xi8>,tensor<f32>,tensor<i64>','tensor<4xi8>,tensor<f32>')
+    elif mutation.startswith('channel'):
+        axis = '' if mutation == 'channel_without_axis' else ' <{axis = 1 : i64}>'
+        text = text.replace('per_tensor"(%x,%scale,%zero)', 'per_channel"(%x,%scale,%zero)' + axis)
     elif mutation == 'unproved_input':
         text = text.replace('%r =', '%opaque = "unknown.payload"(%x) : (tensor<4xi8>) -> tensor<4xi8>\n%r =').replace('(%x,%scale,%zero)','(%opaque,%scale,%zero)')
     else:

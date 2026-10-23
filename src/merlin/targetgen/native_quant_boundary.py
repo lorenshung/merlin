@@ -28,7 +28,7 @@ def checked_boundary(op):
         for replacement in rewrites:
             replacement.verify()
         return True
-    except (ValueError, VerifyException):  # Unsupported boundary semantics remain UNKNOWN, never a grant.
+    except (LookupError, ValueError, VerifyException):  # Unsupported boundary semantics remain UNKNOWN, never a grant.
         return False
     finally:
         scratch.drop_all_references()
