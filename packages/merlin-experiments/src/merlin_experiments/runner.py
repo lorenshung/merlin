@@ -598,6 +598,10 @@ def resolve_plan(
                 "MERLIN_TARGET_CONTRACT",
                 "MERLIN_CAPSULE_TIER_FLOOR",
                 "MERLIN_GRADE_WORKERS",
+                "MERLIN_SPIKE",
+                "MERLIN_RISCV_GCC",
+                "MERLIN_ORACLE_JAIL_ROOTS",
+                "MERLIN_ORACLE_LD_LIBRARY_PATH",
             ):
                 if key in os.environ:
                     command["env"][key] = os.environ[key]
