@@ -593,18 +593,28 @@ def resolve_plan(
         if adapter.name == "capsule_bench" and command.get("module") == PHASE1_MODULE:
             # The native process inherits the caller's environment. Freeze selections
             # that otherwise could differ between preflight and launch/resume.
-            for key in (
+            frozen = (
                 "MERLIN_TARGET_PATH",
                 "MERLIN_TARGET_CONTRACT",
                 "MERLIN_CAPSULE_TIER_FLOOR",
                 "MERLIN_GRADE_WORKERS",
                 "MERLIN_SPIKE",
                 "MERLIN_RISCV_GCC",
+                "MERLIN_CHIPYARD",
+                "MERLIN_EXT_CHIPYARD",
+                "MERLIN_CORE_ATEN_EXECUTION_PROVIDER",
                 "MERLIN_ORACLE_JAIL_ROOTS",
                 "MERLIN_ORACLE_LD_LIBRARY_PATH",
-            ):
-                if key in os.environ:
+                "MERLIN_ORACLE_PATH",
+                "MERLIN_ORACLE_TOOLCHAIN",
+            )
+            target_tools = f"MERLIN_{spec.target.upper().replace('-', '_')}_"  # its simulator and tool selections
+            for key in os.environ:
+                if key in frozen or key.startswith(target_tools):
                     command["env"][key] = os.environ[key]
+            if os.environ.get("MERLIN_ORACLE_TOOLCHAIN"):
+                # The operator's frozen simulator toolchain: its bytes are pinned and re-verified on resume.
+                command["inputs"]["oracle_toolchain"] = str(Path(os.environ["MERLIN_ORACLE_TOOLCHAIN"]).absolute())
             from merlin.targetgen.tier_policy import raised_tiers
 
             try:  # an invalid operator floor is refused here, never mid-grade
