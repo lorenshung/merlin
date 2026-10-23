@@ -1063,6 +1063,9 @@ def _bounded_grade_workers(requested: int, oracle_adapters: dict | None) -> int:
     """
     from .rtl_engine_policy import capsule_worker_cap
 
+    explicit = os.environ.get("MERLIN_GRADE_WORKERS", "")
+    if explicit.isdigit() and int(explicit) > 0:  # an operator who names a number gets it, here too
+        return min(requested, int(explicit))
     engines = {
         str(engine)
         for adapter in (oracle_adapters or {}).values()
