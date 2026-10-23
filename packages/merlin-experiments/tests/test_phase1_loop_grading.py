@@ -453,3 +453,43 @@ def test_round_grade_defers_floor_tiers_to_certification(tmp_path, monkeypatch, 
     assert set(seen) == {"L2", "L3"}
     assert (seen["L3"] is rtl) is (floor is None)
     assert getattr(seen["L3"], "_merlin_deferred", False) is (floor is not None)
+
+
+@pytest.mark.parametrize("member", ["private_dir", "truth_file", "relative_escape", "fifo"])
+def test_grade_copies_refuse_links_and_special_files_without_naming_paths(tmp_path, member):
+    import os
+
+    from merlin_experiments.phase1 import run_inputs as RI
+
+    secret = tmp_path / "payload" / "corpus" / "_private"
+    secret.mkdir(parents=True)
+    (secret / "golden.npz").write_text("ANSWER")
+    (tmp_path / "truth.json").write_text("TRUTH")
+    submission = tmp_path / "ws" / "submission"
+    (submission / "pkg").mkdir(parents=True)
+    (submission / "manifest.yaml").write_text("target: t\n")
+    (submission / "build").mkdir()
+    (submission / "build" / "cache").symlink_to(secret)  # inside an ignored tree: never copied or followed
+    if member == "private_dir":
+        (submission / "pkg" / "data").symlink_to(secret)
+    elif member == "truth_file":
+        (submission / "truth.json").symlink_to(tmp_path / "truth.json")
+    elif member == "relative_escape":
+        (submission / "pkg" / "up").symlink_to("../../../payload")
+    else:
+        os.mkfifo(submission / "pkg" / "pipe")
+    with pytest.raises(RI.IndirectSubmission) as refused:
+        RI.copy_candidate_tree(submission, tmp_path / "cand", ignore=RI.SUBMISSION_IGNORED)
+    assert str(tmp_path) not in str(refused.value) and "symbolic link or special file" in str(refused.value)
+    assert not (tmp_path / "cand").exists()
+
+
+def test_ordinary_submission_copies_without_its_ignored_build_tree(tmp_path):
+    from merlin_experiments.phase1 import run_inputs as RI
+
+    submission = tmp_path / "submission"
+    (submission / "build").mkdir(parents=True)
+    (submission / "build" / "link").symlink_to(tmp_path)
+    (submission / "manifest.yaml").write_text("target: t\n")
+    RI.copy_candidate_tree(submission, tmp_path / "cand", ignore=RI.SUBMISSION_IGNORED)
+    assert sorted(p.name for p in (tmp_path / "cand").iterdir()) == ["manifest.yaml"]

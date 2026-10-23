@@ -176,7 +176,7 @@ def finalize_report(
     if snap.exists():
         shutil.rmtree(snap.parent)
     snap.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(ws / "submission", snap, ignore=shutil.ignore_patterns("build", "__pycache__", ".git"))
+    RI.copy_candidate_tree(ws / "submission", snap, ignore=RI.SUBMISSION_IGNORED)
 
     LG.write_verdict(ws / "qa" / "verdict.json", verdict)
     (ws / "FINALIZE.md").write_text(
@@ -947,7 +947,7 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
                 "per_capsule": _rows,
                 "rtl_checks": None,
             }
-        shutil.copytree(ws / "submission", vcand, ignore=shutil.ignore_patterns("build", "__pycache__", ".git"))
+        RI.copy_candidate_tree(ws / "submission", vcand, ignore=RI.SUBMISSION_IGNORED)
         RI.strip_build_state(vcand)  # clean, relocatable build for the L3 cert (abc9 L3-0/20 'build' bug)
         vruns = run_dir / "_qa_work" / f"vruns_{attempt}"
         # Cycle-accurate checkpoint = the target's FULL oracle ladder, resolved from the descriptor's
@@ -1340,7 +1340,7 @@ def execute(prepared: PreparedRun, runtime: AuthoringRuntime) -> int:
         dst = run_dir / "submission"
         if dst.exists():
             shutil.rmtree(dst)
-        shutil.copytree(wsub, dst, ignore=shutil.ignore_patterns("build", "__pycache__", ".git"))
+        RI.copy_candidate_tree(wsub, dst, ignore=RI.SUBMISSION_IGNORED)
     incomplete_operator_seal = bool(operator_seal)
     if wsub.exists() and ((workflow_conformant and feedback_health["healthy"]) or incomplete_operator_seal):
         # Last gate before the official process performs its public grade + freeze + hidden grade.  The

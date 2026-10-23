@@ -8,10 +8,10 @@ host owner is absent from the component author view.
 from __future__ import annotations
 
 import json
-import shutil
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from merlin_experiments.phase1.run_inputs import copy_candidate_tree
 from merlin_experiments.phase2 import contracts as C
 from merlin_experiments.phase2.component_experiment import ComponentView, RuntimeGrant, verify_component_view
 
@@ -264,7 +264,7 @@ def qualify_component_compiler(
         raise C.StageGateError("component functional membership contains duplicate names")
     evidence_root.mkdir(parents=True, mode=0o700)
     clone = evidence_root / "compiler"
-    shutil.copytree(candidate, clone)
+    copy_candidate_tree(candidate, clone)
     if C.exact_tree_record(clone)["sha256"] != before:
         raise C.StageGateError("private component compiler changed while preparing its exact snapshot")
     score, failures, result_evidence, stage_witnesses, source_observations = None, list(compile_failures), [], [], []

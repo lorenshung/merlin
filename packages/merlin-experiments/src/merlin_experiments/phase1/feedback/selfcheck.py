@@ -943,7 +943,9 @@ def main(argv=None, *, context=None, capsules_root: Path | None = None, contract
     import tempfile
 
     _isodir = Path(tempfile.mkdtemp(prefix="selfcheck_iso_"))
-    shutil.copytree(sub, _isodir / "submission", ignore=shutil.ignore_patterns("build", "__pycache__", ".git"))
+    from merlin_experiments.phase1.run_inputs import SUBMISSION_IGNORED, copy_candidate_tree
+
+    copy_candidate_tree(sub, _isodir / "submission", ignore=SUBMISSION_IGNORED)
     sub = _isodir / "submission"
     _strip_build_state(sub)  # every grade builds from scratch in its OWN path — see helper
 

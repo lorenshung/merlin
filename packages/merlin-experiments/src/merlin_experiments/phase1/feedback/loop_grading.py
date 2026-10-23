@@ -181,7 +181,22 @@ def grade(
     if cand.exists():
         shutil.rmtree(cand.parent)
     _lok, _lwhy = _language_ok(ws / "submission", inputs.arm)
-    if not (ws / "submission" / "manifest.yaml").exists():
+    _indirect = None
+    if (ws / "submission" / "manifest.yaml").exists() and _lok:
+        try:
+            RI.copy_candidate_tree(ws / "submission", cand, ignore=RI.SUBMISSION_IGNORED)
+        except RI.IndirectSubmission as exc:
+            _indirect = str(exc)
+    if _indirect is not None:
+        verdict = {
+            "all_pass": False,
+            "n_passed": 0,
+            "n_capsules": 0,
+            "package_failure": {"plane": "schema", "detail": _indirect},
+            "per_capsule": [],
+            "note": "replace every symbolic link or special file in submission/ with an ordinary file.",
+        }
+    elif not (ws / "submission" / "manifest.yaml").exists():
         # ZERO, NOT A PLACEHOLDER. These two stubs are "nothing was graded", and they used to say
         # `n_capsules: 4`, which reads as a real cohort of four: `0/4` appears in the round log
         # identically to a genuine grade, and `per_capsule: []` is the only thing distinguishing them.
@@ -208,7 +223,6 @@ def grade(
             "(oot_starterkit + xdsl_dialects), declare language: python, no C++/cmake build.",
         }
     else:
-        shutil.copytree(ws / "submission", cand, ignore=shutil.ignore_patterns("build", "__pycache__", ".git"))
         RI.strip_build_state(cand)  # clean, relocatable build per grade (abc9 L3-build bug)
         # The harness commits exactly the bytes about to be graded; the agent never touches the repo.
         oot_commit = OH.commit_graded(run_dir, cand, label=label, key=_key, sandbox_roots=(ws.parent,))
@@ -421,7 +435,7 @@ def fast_grade(
     cand = run_dir / "_qa_work" / f"fcand_{tick}" / "submission"
     if cand.parent.exists():
         shutil.rmtree(cand.parent)
-    shutil.copytree(ws / "submission", cand, ignore=shutil.ignore_patterns("build", "__pycache__", ".git"))
+    RI.copy_candidate_tree(ws / "submission", cand, ignore=RI.SUBMISSION_IGNORED)
     RI.strip_build_state(cand)
     fruns = run_dir / "_qa_work" / f"fruns_{tick}"
     te = load_target_experiment(inputs.context.descriptor)
