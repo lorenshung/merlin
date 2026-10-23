@@ -359,7 +359,7 @@ def _translate_candidate(llvm_mlir: str):
 def full_call_adapter(
     target: str,
     *,
-    isa: str,
+    isa: str | None,
     backend: str = "scalar",
     runner_options: Mapping[str, Any] | None = None,
     engine: str = "spike",
@@ -369,7 +369,8 @@ def full_call_adapter(
 ):
     """Build an oracle callable exposing ``run_full_call`` for one plain Spike target.
 
-    ``isa`` is the Spike ISA string (derived from the target contract by the caller).
+    ``isa`` is the Spike ISA string (derived from the target contract by the caller), or None to read
+    it from each linked image (:func:`spike_model.declared_isa`).
     ``runner_options`` may select ``spike_binary``, ``extension``, ``extlib`` and ``path_prepend``.
     """
     options = dict(runner_options or {})
@@ -491,13 +492,16 @@ def full_call_adapter(
                 device=routing,
                 host_llvm_transform=_translate_candidate(llvm_mlir) if execution_provider is None else None,
             )
+            spike_isa = isa or spike_model.declared_isa(build["elf"])
+            if not spike_isa:
+                raise ValueError("linked image declares no ISA for the functional simulator")
             trace = bundle / "spike-trace.log" if routing is not None else None
             run = spike_model.run(
                 build["elf"],
                 mem_bytes=build["mem_bytes"],
                 timeout=timeout,
                 vlen=build.get("vlen"),
-                isa=isa,
+                isa=spike_isa,
                 trace_path=trace,
                 **options,
             )
@@ -553,7 +557,7 @@ def full_call_adapter(
             runner_options=options,
             rtl_facts=rtl_facts,
         )
-        provenance["isa"] = isa
+        provenance["isa"] = isa or "declared_by_linked_image"
         provenance["target"] = target
         if execution_provider is None:
             provenance["candidate_llvm_sha256"] = hashlib.sha256(llvm_mlir.encode()).hexdigest()
@@ -719,6 +723,37 @@ def declared(target: str):
     if source_identities() != identities:
         raise ValueError("full-call provider source changed during factory construction")
     return adapter
+
+
+def selected(target: str):
+    """The operator-selected Core ATen execution provider as the full-call oracle, when no support
+    contract declares one.
+
+    ``MERLIN_CORE_ATEN_EXECUTION_PROVIDER`` already selects the provider that routes submitted device
+    catalogs; it must be an ordinary file inside the selected support root. Its ``runner_options``
+    selects the Spike extension; the Spike ISA is read from each linked image.
+    """
+    import os
+
+    from merlin.targetgen.core_aten_device import load_execution_provider
+    from merlin.targetgen.plugins import resolve_support
+    from merlin.targetgen.rtl.facts import ensure_facts
+
+    explicit = os.environ.get("MERLIN_CORE_ATEN_EXECUTION_PROVIDER")
+    if not explicit:
+        return None
+    path = Path(explicit)
+    root = resolve_support(target).base.resolve()
+    if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root):
+        raise ValueError("selected execution provider must be an ordinary file inside the selected support")
+    options = getattr(load_execution_provider(target, path.resolve()), "runner_options", None)
+    return full_call_adapter(
+        target,
+        isa=None,
+        runner_options=options() if callable(options) else None,
+        execution_provider=path.resolve(),
+        rtl_facts=ensure_facts(target),
+    )
 
 
 def sim_available(target: str) -> tuple[bool, str]:

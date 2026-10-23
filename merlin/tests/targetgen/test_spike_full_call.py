@@ -305,3 +305,24 @@ def test_admitted_non_contraction_sites_take_the_provider_region_route(tmp_path,
         == "catalog"
     )
     assert D.select_source_routing(tmp_path, "t", tmp_path, provider, {}, report, None)[0] == "catalog"
+
+
+def test_selected_execution_provider_must_be_support_owned(tmp_path, monkeypatch):
+    from merlin.targetgen import core_aten_device, plugins
+    from merlin.targetgen.rtl import facts
+
+    support = tmp_path / "support"
+    support.mkdir()
+    (support / "provider.py").write_text("# selected\n")
+    (tmp_path / "outside.py").write_text("# foreign\n")
+    monkeypatch.setattr(plugins, "resolve_support", lambda target: SimpleNamespace(base=support))
+    monkeypatch.setattr(core_aten_device, "load_execution_provider", lambda *a: SimpleNamespace(runner_options=dict))
+    monkeypatch.setattr(facts, "ensure_facts", lambda target: tmp_path / "facts.json")
+    monkeypatch.delenv("MERLIN_CORE_ATEN_EXECUTION_PROVIDER", raising=False)
+    assert spike_full_call.selected("t") is None
+    monkeypatch.setenv("MERLIN_CORE_ATEN_EXECUTION_PROVIDER", str(tmp_path / "outside.py"))
+    with pytest.raises(ValueError, match="inside the selected support"):
+        spike_full_call.selected("t")
+    monkeypatch.setenv("MERLIN_CORE_ATEN_EXECUTION_PROVIDER", str(support / "provider.py"))
+    oracle = spike_full_call.selected("t")
+    assert oracle.compiles_source_bundle and callable(oracle.qualify_full_call)

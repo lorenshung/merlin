@@ -1102,7 +1102,8 @@ def _sim_engine_adapters(sim_via: str, target: str) -> dict[str, Callable]:
     tier still carries the grade). A new bespoke sim registers one branch here — the engine name is
     DERIVED from the target's contract, never assumed."""
     if sim_via == "chipyard":
-        adapters: dict[str, Callable] = {"L2": _spike_oracles.declared(target) or simulator_adapter("spike", target)}
+        functional = _spike_oracles.declared(target) or _spike_oracles.selected(target)
+        adapters: dict[str, Callable] = {"L2": functional or simulator_adapter("spike", target)}
         plan = _oracle_policy.chipyard_tier_plan(target)
         if plan.selection is None:
             # Reported, not substituted. A tier that cannot run must come back absent; resolving it to
