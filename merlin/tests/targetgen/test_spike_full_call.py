@@ -307,6 +307,52 @@ def test_admitted_non_contraction_sites_take_the_provider_region_route(tmp_path,
     assert D.select_source_routing(tmp_path, "t", tmp_path, provider, {}, report, None)[0] == "catalog"
 
 
+@pytest.mark.parametrize("available", [True, False])
+def test_board_linked_oracle_grades_the_rtl_run_of_the_same_image(tmp_path, monkeypatch, source_adapter, available):
+    from merlin.runtime.backends import base, spike_model
+    from merlin.targetgen import core_aten_device, rtl_simulator_execution
+
+    adapter, _ = source_adapter
+    layouts, executed = [], []
+
+    def build(*a, **kwargs):
+        a[1].mkdir()  # the board image is built beside, never over, the functional tier's build
+        layouts.append({k: kwargs.get(k) for k in ("dram_base", "dram_bytes", "code_reserve", "arena_mb")})
+        return {"elf": tmp_path / "board.elf", "mem_bytes": 256 << 20, "build_hash": "bound-build"}
+
+    def run_elf(elf, simulator, timeout):
+        executed.append((elf, simulator))
+        return "rtl console"
+
+    backend = SimpleNamespace(available=lambda engine: available, run_elf=run_elf)
+    monkeypatch.setattr(spike_model, "build", build)
+    monkeypatch.setattr(base, "get_backend", lambda target: backend)
+    monkeypatch.setattr(rtl_simulator_execution, "verify_selected", lambda *a: {"execution_identity": "simv"})
+    rtl_parse = {
+        "console": "rtl console",
+        "output_bytes": [b"rtl"],
+        "metrics": {"build_hash": "bound-build", "cycles": 9},
+    }
+    monkeypatch.setattr(spike_model, "parse_console", lambda console: rtl_parse)
+    monkeypatch.setattr(core_aten_device, "routing_for_bundle", lambda *a: (object(), "bound"))
+    board = dict(dram_base=0x80000000, dram_bytes=256 << 20, code_reserve=64 << 20)
+    rtl = adapter._merlin_on_board("vcs", board)
+    assert not hasattr(rtl, "qualify_full_call") and rtl._merlin_simulator_engine == "vcs"
+    result = rtl.run_full_call(
+        bundle=tmp_path, llvm_mlir="", package_dir=tmp_path, capsule={"scored": True, "lane_expectation": "device"}
+    )
+    assert layouts == [{**board, "arena_mb": 96}]
+    if available:
+        assert executed == [(tmp_path / "board.elf", "vcs")]
+        assert result["output_bytes"] == [b"rtl"] and result["derived_from_rtl"] is True and result["cycles"] == 9
+        assert result["lane"] == "device" and result["executed_instructions"] == 7
+        assert result["provenance"]["simulator"] == {"execution_identity": "simv"}
+    else:
+        assert not executed and result["derived_from_rtl"] is False and "not available" in result["execution_error"]
+    with pytest.raises(ValueError, match="elaborated-RTL engine"):
+        adapter._merlin_on_board("spike", board)
+
+
 def test_selected_execution_provider_must_be_support_owned(tmp_path, monkeypatch):
     from merlin.targetgen import core_aten_device, plugins
     from merlin.targetgen.rtl import facts
@@ -326,3 +372,23 @@ def test_selected_execution_provider_must_be_support_owned(tmp_path, monkeypatch
     monkeypatch.setenv("MERLIN_CORE_ATEN_EXECUTION_PROVIDER", str(support / "provider.py"))
     oracle = spike_full_call.selected("t")
     assert oracle.compiles_source_bundle and callable(oracle.qualify_full_call)
+
+
+@pytest.mark.parametrize("rtl_config", ["SelectedConfig", None])
+def test_rtl_board_comes_from_the_descriptor_host_board(tmp_path, monkeypatch, rtl_config):
+    from merlin.runtime import boards
+    from merlin.targetgen import corpora, target_experiment
+
+    experiment = SimpleNamespace(host_board="board", selected_board_catalog=lambda: tmp_path / "catalog.yaml")
+    board = SimpleNamespace(target="t", rtl_sim_config=rtl_config, dram_base=1, dram_bytes=2, code_reserve=None)
+    monkeypatch.setattr(corpora, "descriptor_path", lambda target: tmp_path / "descriptor.yaml")
+    monkeypatch.setattr(target_experiment, "load_target_experiment", lambda path: experiment)
+    monkeypatch.setattr(boards, "load_boards", lambda catalog: {"board": board})
+    calls = []
+    adapter = SimpleNamespace(_merlin_on_board=lambda engine, layout: calls.append((engine, layout)) or "rtl")
+    selected = spike_full_call.on_rtl_board(adapter, "vcs", "t")
+    if rtl_config:
+        assert selected == "rtl" and calls == [("vcs", dict(dram_base=1, dram_bytes=2, code_reserve=None))]
+    else:
+        assert selected is None and not calls
+    assert spike_full_call.on_rtl_board(SimpleNamespace(), "vcs", "t") is None

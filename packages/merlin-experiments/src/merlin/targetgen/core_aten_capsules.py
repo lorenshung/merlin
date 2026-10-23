@@ -736,6 +736,7 @@ def run_capsule(capsule, package_dir, paths, config, adapters, pkg, contract, ti
                 "not_run_is_not_pass": False,
                 "derived_from_rtl": bool(run.get("derived_from_rtl")),
                 "engine": run.get("engine"),
+                **({"cycles": run["cycles"]} if run.get("cycles") is not None else {}),
                 "semantic_scope": row.get("semantic_scope"),
                 "provenance": run["provenance"],
                 "spec_qualified_device": qualification,

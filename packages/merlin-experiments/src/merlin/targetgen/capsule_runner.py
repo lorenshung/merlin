@@ -1117,7 +1117,9 @@ def _sim_engine_adapters(sim_via: str, target: str) -> dict[str, Callable]:
         from . import rtl_engine_policy as _pol
 
         print(f"[oracle] {target} L3 engine: {_pol.describe(sel)}", flush=True)
-        adapters["L3"] = simulator_adapter(sel["engine"], target, selection=sel)
+        # A full-call oracle certifies the same boundary on the RTL with its image linked for the board.
+        rtl = functional and _spike_oracles.on_rtl_board(functional, sel["engine"], target)
+        adapters["L3"] = rtl or simulator_adapter(sel["engine"], target, selection=sel)
         return adapters
     return {}
 

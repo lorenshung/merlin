@@ -366,13 +366,20 @@ def full_call_adapter(
     execution_provider: Path | None = None,
     rtl_facts: Path | None = None,
     candidate_transport=None,
+    board: Mapping[str, int] | None = None,
 ):
     """Build an oracle callable exposing ``run_full_call`` for one plain Spike target.
 
     ``isa`` is the Spike ISA string (derived from the target contract by the caller), or None to read
     it from each linked image (:func:`spike_model.declared_isa`).
     ``runner_options`` may select ``spike_binary``, ``extension``, ``extlib`` and ``path_prepend``.
+
+    With ``board`` (``dram_base``/``dram_bytes``/``code_reserve`` of an elaborated-RTL board), ``engine``
+    names that board's RTL simulator: the image is linked inside the board's DRAM, Spike traces it for
+    device evidence, and the SAME bytes then run on the RTL, whose console is what is graded.
     """
+    if board is not None and engine == "spike":
+        raise ValueError("a board-linked full-call oracle needs an elaborated-RTL engine")
     options = dict(runner_options or {})
     if candidate_transport is not None:
         from merlin_experiments.phase1.candidate_products import CandidateProductTransport
@@ -395,7 +402,13 @@ def full_call_adapter(
         from merlin.targetgen.core_aten_provenance import batch_provenance
 
         bundle = Path(bundle)
-        result: dict[str, Any] = {"engine": engine, "derived_from_rtl": False}
+        result: dict[str, Any] = {"engine": engine, "derived_from_rtl": board is not None}
+        build_dir = bundle / ("spike-build" if board is None else f"{engine}-build")
+        trace_name = "spike-trace.log" if board is None else f"{engine}-spike-trace.log"
+        layout = {key: int(value) for key, value in (board or {}).items() if value is not None}
+        # On a board the arena must share the DRAM with the image: half of what the code reserve leaves.
+        free_mb = (layout.get("dram_bytes", 0) - layout.get("code_reserve", 64 << 20)) >> 21
+        arena_mb = DEFAULT_ARENA_MB if board is None else max(1, min(DEFAULT_ARENA_MB, free_mb))
         routing = None
         result.update(lane="host", executed_instructions=0)
         try:
@@ -484,18 +497,19 @@ def full_call_adapter(
                             result["routing"] = {"lane": "host", "routed": False, "reason": reason}
             build = spike_model.build(
                 bundle,
-                bundle / "spike-build",
+                build_dir,
                 inputs_npz=bundle / "inputs.npz",
-                arena_mb=DEFAULT_ARENA_MB,
+                arena_mb=arena_mb,
                 dump_all_outputs=True,
                 backend=backend,
                 device=routing,
                 host_llvm_transform=_translate_candidate(llvm_mlir) if execution_provider is None else None,
+                **layout,
             )
             spike_isa = isa or spike_model.declared_isa(build["elf"])
             if not spike_isa:
                 raise ValueError("linked image declares no ISA for the functional simulator")
-            trace = bundle / "spike-trace.log" if routing is not None else None
+            trace = bundle / trace_name if routing is not None else None
             run = spike_model.run(
                 build["elf"],
                 mem_bytes=build["mem_bytes"],
@@ -514,7 +528,6 @@ def full_call_adapter(
 
                 # A provider routes through a contraction catalog or a region offload; each build
                 # records its bindings in its own sidecar.
-                build_dir = bundle / "spike-build"
                 routed = (load_region_offload(build_dir) or load_sidecar(build_dir)).get("routed")
                 if not routed:
                     raise ValueError("submitted backend emitted no source-bound device calls")
@@ -536,7 +549,12 @@ def full_call_adapter(
                 )
                 if evidence["executed_instructions"] < 1:
                     raise ValueError("no target instruction executed for submitted device calls")
-            (bundle / "spike-console.txt").write_text(run["console"])
+            (bundle / "spike-console.txt" if board is None else build_dir / "spike-console.txt").write_text(
+                run["console"]
+            )
+            if board is not None:
+                run = _run_on_rtl(target, engine, build, timeout, result)
+                (bundle / f"{engine}-console.txt").write_text(run["console"])
             result.update(
                 output_bytes=run["output_bytes"],
                 output_shapes=run.get("output_shapes") or None,
@@ -544,6 +562,10 @@ def full_call_adapter(
                 execution_error=None,
             )
         except Exception as exc:  # noqa: BLE001 -- execution refusal is a verdict input
+            from merlin.targetgen.capsule_runner import OracleUnavailable
+
+            if isinstance(exc, OracleUnavailable):  # the RTL never ran: not run, never a failed program
+                result["derived_from_rtl"] = False
             result.update(
                 output_bytes=None,
                 output_shapes=None,
@@ -559,6 +581,10 @@ def full_call_adapter(
         )
         provenance["isa"] = isa or "declared_by_linked_image"
         provenance["target"] = target
+        if board is not None:
+            provenance["rtl_engine"] = engine
+            provenance["board_layout"] = layout
+            provenance["simulator"] = result.pop("simulator", None)
         if execution_provider is None:
             provenance["candidate_llvm_sha256"] = hashlib.sha256(llvm_mlir.encode()).hexdigest()
         else:
@@ -587,22 +613,49 @@ def full_call_adapter(
             timeout=timeout,
         )
 
-    run.qualify_full_call = qualify_full_call
+    def rebound(**changes):
+        selected = dict(isa=isa, backend=backend, runner_options=options, engine=engine, rtl_facts=rtl_facts)
+        selected.update(execution_provider=execution_provider, candidate_transport=candidate_transport, board=board)
+        return full_call_adapter(target, **{**selected, **changes})
+
+    if board is None:  # qualification binds the functional tier's own image and trace
+        run.qualify_full_call = qualify_full_call
     run.compiles_source_bundle = execution_provider is not None
     if candidate_transport is not None:
         run._merlin_candidate_transport = candidate_transport
     if execution_provider is not None:
-        run._merlin_with_candidate_transport = lambda transport: full_call_adapter(
-            target,
-            isa=isa,
-            backend=backend,
-            runner_options=options,
-            engine=engine,
-            execution_provider=execution_provider,
-            rtl_facts=rtl_facts,
-            candidate_transport=transport,
-        )
+        run._merlin_with_candidate_transport = lambda transport: rebound(candidate_transport=transport)
+    run._merlin_on_board = lambda engine, board: rebound(engine=engine, board=board)
     run._merlin_simulator_engine = engine
+    return run
+
+
+def _run_on_rtl(target: str, engine: str, build: Mapping, timeout, result: dict) -> dict:
+    """Execute a board-linked image on the selected elaborated-RTL engine; parse its console.
+
+    The engine's identity is re-verified around the run (``run_verified``) and recorded in
+    ``result["simulator"]``; the console must name the same build as the linked image.
+    """
+    from merlin.runtime.backends import base as backends
+    from merlin.runtime.backends import spike_model
+    from merlin.targetgen.capsule_runner import OracleUnavailable
+    from merlin.targetgen.rtl_simulator_execution import SimulatorExecution, run_verified
+
+    backend = backends.get_backend(target)
+    if not backend.available(engine):
+        raise OracleUnavailable(f"{engine} not available")
+    observed = run_verified(
+        SimulatorExecution(backend, engine, target, timeout, unavailable=OracleUnavailable),
+        lambda remaining: {
+            "console": backend.run_elf(build["elf"], simulator=engine, timeout=int(remaining)),
+            "oracle": {},
+        },
+    )
+    run = spike_model.parse_console(observed["console"])
+    if build.get("build_hash") is not None and run.get("metrics", {}).get("build_hash") != build["build_hash"]:
+        raise RuntimeError(f"{engine} console build hash does not match the linked executable")
+    result["simulator"] = observed["oracle"].get("provenance")
+    result["cycles"] = run.get("metrics", {}).get("cycles")
     return run
 
 
@@ -754,6 +807,27 @@ def selected(target: str):
         execution_provider=path.resolve(),
         rtl_facts=ensure_facts(target),
     )
+
+
+def on_rtl_board(adapter, engine: str, target: str):
+    """The full-call oracle ``adapter`` relinked for the descriptor's elaborated-RTL host board, or None.
+
+    The board (``host: {board, catalog}``) supplies the DRAM the image must fit; a board that names no
+    RTL simulator config, or a non-full-call adapter, yields None and the tier stays not-run.
+    """
+    rebind = getattr(adapter, "_merlin_on_board", None)
+    if rebind is None:
+        return None
+    from merlin.runtime.boards import load_boards
+    from merlin.targetgen.corpora import descriptor_path
+    from merlin.targetgen.target_experiment import load_target_experiment
+
+    experiment = load_target_experiment(descriptor_path(target))
+    catalog = experiment.selected_board_catalog()
+    board = load_boards(catalog).get(experiment.host_board) if catalog and experiment.host_board else None
+    if board is None or board.target != target or not board.rtl_sim_config:
+        return None
+    return rebind(engine, dict(dram_base=board.dram_base, dram_bytes=board.dram_bytes, code_reserve=board.code_reserve))
 
 
 def sim_available(target: str) -> tuple[bool, str]:
