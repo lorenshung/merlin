@@ -1325,8 +1325,12 @@ def run(
     path_prepend: Sequence[str | Path] = (),
     spike_binary: str | Path | None = None,
     trace_path: str | Path | None = None,
+    command_prefix: Sequence[str] = (),
 ) -> dict[str, Any]:
     """Run the ELF on spike; parse the HTIF output.
+
+    ``command_prefix`` wraps the Spike command (e.g. a sandbox that hides the host filesystem from the
+    guest's HTIF syscalls); the console and trace still stream to this process.
 
     Providers may select ``extension``, ``extlib``, ``spike_binary`` and tool
     ``path_prepend`` (for dtc). ``trace_path`` streams Spike's instruction log to
@@ -1365,6 +1369,7 @@ def run(
     if trace_path is not None:
         options.append("-l")
     cmd[1:1] = options
+    cmd[:0] = list(command_prefix)
     env = None
     if path_prepend:
         env = dict(os.environ)

@@ -37,8 +37,17 @@ def _write(path: Path, document: dict) -> None:
 
 
 def main(argv=None) -> int:
-    """Child: route and build one image, then report the build and its routing record."""
-    request = json.loads(Path((argv or sys.argv[1:])[0]).read_text(encoding="utf-8"))
+    """Child: route and build one image, then report the build and its routing record; or, with
+    ``--run-elf``, run one image on a backend engine and leave its console beside the image."""
+    argv = list(argv or sys.argv[1:])
+    if argv[0] == "--run-elf":
+        from merlin.runtime.backends import base
+
+        target, engine, elf, timeout = argv[1:5]
+        console = base.get_backend(target).run_elf(Path(elf), simulator=engine, timeout=int(timeout))
+        (Path(elf).parent / "console.txt").write_text(console)
+        return 0
+    request = json.loads(Path(argv[0]).read_text(encoding="utf-8"))
     out = Path(request["result"])
     try:
         from merlin.llvmlower.device_build import load_region_offload
@@ -95,6 +104,79 @@ def _covering(paths, *, excluded) -> list[Path]:
     return roots
 
 
+#: Operator-declared read-only roots a simulator jail may see (os.pathsep list), e.g. the RTL simulator
+#: binary and its database, and the frozen toolchain. Nothing else of the host filesystem is visible.
+ORACLE_ROOTS_ENV = "MERLIN_ORACLE_JAIL_ROOTS"
+#: Library search path inside a simulator jail (the frozen toolchain's libraries), so a binary whose
+#: RPATH names a host toolchain resolves the selected copy instead.
+ORACLE_LIBRARY_ENV = "MERLIN_ORACLE_LD_LIBRARY_PATH"
+
+
+def _merlin_roots(target: str) -> list:
+    """The interpreter, Merlin and the selected support provider: what a jailed Merlin child imports."""
+    from merlin.targetgen.plugins import resolve_support
+
+    return [
+        sys.prefix,
+        sys.base_prefix,
+        *(entry for entry in sys.path if entry and Path(entry).is_dir()),
+        resolve_support(target).base,
+        os.environ.get("MERLIN_REPO_ROOT"),
+    ]
+
+
+def _libraries(executables, library_path: str) -> list[Path]:
+    """Directories outside the system holding the shared libraries ``executables`` load (``ldd``)."""
+    directories = []
+    environment = {**os.environ, "LD_LIBRARY_PATH": library_path}
+    for executable in executables:
+        listing = subprocess.run(["ldd", str(executable)], capture_output=True, text=True, env=environment).stdout
+        for line in listing.splitlines():
+            parts = line.split()
+            if "=>" in parts and parts.index("=>") + 1 < len(parts) and parts[parts.index("=>") + 1].startswith("/"):
+                library = Path(parts[parts.index("=>") + 1]).resolve().parent
+                if not library.is_relative_to("/usr") and not library.is_relative_to("/lib"):
+                    directories.append(library)
+    return directories
+
+
+def _jail(work: Path, roots, environment: dict, private) -> list[str]:
+    """Deny-by-default bubblewrap prefix: system read-only, /scratch* hidden, ``roots`` read-only, ``work``
+    writable. Refused if any ``private`` path would be reachable. A variable naming a path passes only
+    when that path is visible; ``MERLIN_*`` selections and licence servers pass; everything else is cleared."""
+    from merlin.targetgen.sandbox import bwrap as BW
+    from merlin.targetgen.sandbox.answer_surfaces import AnswerSurface
+
+    excluded = [Path(p).resolve() for p in (work, *private)]
+    argv = BW.base_argv(work, {}, include_claude_home=False, inherit_environment=False)
+    bound = _covering(roots, excluded=excluded)
+    for root in bound:
+        argv += ["--ro-bind", str(root), str(root)]
+    visible = [Path(p) for p in ("/usr", "/bin", "/lib", "/lib64", "/etc", work, *bound)]
+    for key, value in os.environ.items():
+        if key in environment or key in ("PATH", "LD_LIBRARY_PATH", "PYTHONPATH"):
+            continue
+        if not value.startswith("/"):  # a selection or licence server, never a path
+            if key.startswith("MERLIN_") or key.endswith("LICENSE_FILE"):
+                environment[key] = value
+        elif any(Path(value).is_relative_to(root) for root in visible):  # names something visible
+            environment[key] = value
+        elif any(Path(value).resolve().is_relative_to(root) for root in bound):  # through a host link
+            environment[key] = str(Path(value).resolve())
+    for key in ("PATH", "LD_LIBRARY_PATH"):
+        entries = environment.get(key, os.environ.get(key, "/usr/bin:/bin" if key == "PATH" else ""))
+        environment[key] = os.pathsep.join(p for p in entries.split(os.pathsep) if p and BW.is_exposed(argv, Path(p)))
+    for key, value in sorted(environment.items()):
+        argv += ["--setenv", key, value]
+    surfaces = [
+        AnswerSurface("full-call private input", Path(p).resolve(), "dir" if Path(p).is_dir() else "file", "private")
+        for p in private
+    ]
+    if BW.coverage_gap(argv, surfaces):
+        raise RuntimeError("full-call sandbox would expose private grading inputs")
+    return argv
+
+
 def build_in_sandbox(
     request: dict, *, bundle: Path, work: Path, package: Path, provider: Path, facts: Path, denied, timeout
 ) -> dict:
@@ -106,8 +188,6 @@ def build_in_sandbox(
     from merlin.llvmlower import toolchain
     from merlin.runtime.backends.spike import gcc_path
     from merlin.targetgen.plugins import resolve_support
-    from merlin.targetgen.sandbox import bwrap as BW
-    from merlin.targetgen.sandbox.answer_surfaces import AnswerSurface
 
     if work.exists():
         shutil.rmtree(work)
@@ -136,27 +216,17 @@ def build_in_sandbox(
     }
     _write(work / "request.json", request)
     compiler = os.environ.get("MERLIN_COMPILER_PYTHON")
-    excluded = [Path(p).resolve() for p in (work, bundle, *denied)]
+    private = [bundle, *denied]
     required = [Path(package).resolve(), Path(resolve_support(request["target"]).base).resolve()]
-    if any(e == r or e.is_relative_to(r) for r in required for e in excluded):
-        raise RuntimeError("full-call build sandbox would expose private grading inputs")
-    roots = _covering(
-        [
-            sys.prefix,
-            sys.base_prefix,
-            *(entry for entry in sys.path if entry and Path(entry).is_dir()),
-            resolve_support(request["target"]).base,
-            package,
-            toolchain.llvm_install(),
-            gcc_path().parents[2],  # the environment the cross toolchain and its shared libraries live in
-            Path(compiler).parents[1] if compiler else None,
-            os.environ.get("MERLIN_REPO_ROOT"),
-        ],
-        excluded=excluded,
-    )
-    argv = BW.base_argv(work, {}, include_claude_home=False, inherit_environment=False)
-    for root in roots:
-        argv += ["--ro-bind", str(root), str(root)]
+    if any(Path(p).resolve() == r or Path(p).resolve().is_relative_to(r) for r in required for p in [work, *private]):
+        raise RuntimeError("full-call sandbox would expose private grading inputs")
+    roots = [
+        *_merlin_roots(request["target"]),
+        package,
+        toolchain.llvm_install(),
+        gcc_path().parents[2],  # the environment the cross toolchain and its shared libraries live in
+        Path(compiler).parents[1] if compiler else None,
+    ]
     environment.update(
         MERLIN_RISCV_GCC=str(gcc_path()),  # the bound cross compiler, not a toolchain root left outside
         HOME=str(work),
@@ -165,28 +235,63 @@ def build_in_sandbox(
         PYTHONDONTWRITEBYTECODE="1",
         PYTHONPATH=os.environ.get("PYTHONPATH", ""),
     )
-    # Every other MERLIN_* selection passes only when the path it names is visible in the sandbox.
-    for key, value in os.environ.items():
-        if key.startswith("MERLIN_") and key not in environment:
-            if not value.startswith("/") or BW.is_exposed(argv, Path(value)):
-                environment[key] = value
-    environment["PATH"] = os.pathsep.join(
-        p for p in os.environ.get("PATH", "/usr/bin:/bin").split(os.pathsep) if p and BW.is_exposed(argv, Path(p))
-    )
-    for key, value in sorted(environment.items()):
-        argv += ["--setenv", key, value]
-    surfaces = [
-        AnswerSurface("full-call private input", Path(p).resolve(), "dir" if Path(p).is_dir() else "file", "private")
-        for p in (bundle, *denied)
-    ]
-    if BW.coverage_gap(argv, surfaces):
-        raise RuntimeError("full-call build sandbox would expose private grading inputs")
+    argv = _jail(work, roots, environment, private)
     command = [*argv, sys.executable, "-m", "merlin.targetgen.full_call_build", str(work / "request.json")]
     done = subprocess.run(command, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     result = work / "out" / "result.json"
     if not result.is_file() or result.is_symlink():
         raise RuntimeError(f"isolated full-call build produced no report: {(done.stderr or done.stdout)[-1500:]}")
     return json.loads(result.read_text(encoding="utf-8"))
+
+
+def oracle_jail(elf: Path, work: Path, *, private, executables=(), roots=(), path=()) -> tuple[list[str], Path]:
+    """``(bwrap prefix, jailed image)`` for running a simulator on a copy of ``elf`` in a fresh ``work``.
+
+    A guest can reach the host filesystem through the simulator's HTIF/fesvr syscall proxy, so the
+    simulator sees only ``work`` (the image copy; writable), the operator's :data:`ORACLE_ROOTS_ENV`,
+    ``roots``, the libraries ``executables`` load, and ``path`` on ``PATH``. The trusted caller reads the
+    console back; a trace it streams to its own file descriptor never enters the jail.
+    """
+    if work.exists():
+        shutil.rmtree(work)
+    (work / "tmp").mkdir(parents=True)
+    jailed = work / Path(elf).name
+    shutil.copyfile(elf, jailed)
+    jailed.chmod(0o500)
+    library_path = os.environ.get(ORACLE_LIBRARY_ENV, "")
+    declared = [p for p in os.environ.get(ORACLE_ROOTS_ENV, "").split(os.pathsep) if p]
+    executables = [*executables, *(p for p in declared if Path(p).is_file() and os.access(p, os.X_OK))]
+    libraries = _libraries(executables, library_path)
+    environment = {
+        "HOME": str(work),
+        "TMPDIR": str(work / "tmp"),
+        "PATH": os.pathsep.join([*map(str, path), "/usr/bin", "/bin"]),
+        "LD_LIBRARY_PATH": os.pathsep.join([library_path, *map(str, libraries)]).strip(os.pathsep),
+    }
+    argv = _jail(
+        work, [*declared, *roots, *libraries, *path, *(Path(e).parent for e in executables)], environment, private
+    )
+    return argv, jailed
+
+
+def run_elf_jailed(target: str, engine: str, elf: Path, work: Path, *, private, timeout) -> str:
+    """Run ``elf`` on ``target``'s ``engine`` through its backend, inside :func:`oracle_jail`; the console."""
+    argv, jailed = oracle_jail(elf, work, private=private, roots=_merlin_roots(target))
+    environment = [
+        "--setenv",
+        "PYTHONPATH",
+        os.environ.get("PYTHONPATH", ""),
+        "--setenv",
+        "PYTHONDONTWRITEBYTECODE",
+        "1",
+    ]
+    command = [*argv, *environment, sys.executable, "-m", "merlin.targetgen.full_call_build", "--run-elf"]
+    command += [target, engine, str(jailed), str(int(timeout))]
+    done = subprocess.run(command, capture_output=True, text=True, timeout=timeout + 120, stdin=subprocess.DEVNULL)
+    console = work / "console.txt"
+    if done.returncode or not console.is_file() or console.is_symlink():
+        raise RuntimeError(f"{engine} run failed in its jail: {(done.stderr or done.stdout)[-2000:]}")
+    return console.read_text(errors="replace")
 
 
 if __name__ == "__main__":

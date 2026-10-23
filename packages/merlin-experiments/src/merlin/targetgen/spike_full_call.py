@@ -534,8 +534,12 @@ def full_call_adapter(
             if not spike_isa:
                 raise ValueError("linked image declares no ISA for the functional simulator")
             trace = bundle / trace_name if routing is not None else None
+            # The guest's HTIF syscalls reach the simulator's filesystem: run it jailed, never beside answers.
+            private = [bundle, *([Path(capsule["__dir__"]).parents[1]] if (capsule or {}).get("__dir__") else [])]
+            jail, image = _spike_jail(build["elf"], bundle.parent / f".oracle-{build_dir.name}", private, options)
             run = spike_model.run(
-                build["elf"],
+                image,
+                command_prefix=jail,
                 mem_bytes=build["mem_bytes"],
                 timeout=timeout,
                 vlen=build.get("vlen"),
@@ -578,7 +582,8 @@ def full_call_adapter(
                 run["console"]
             )
             if board is not None:
-                run = _run_on_rtl(target, engine, build, timeout, result)
+                work = bundle.parent / f".oracle-{engine}-run"
+                run = _run_on_rtl(target, engine, build, timeout, result, work=work, private=private)
                 (bundle / f"{engine}-console.txt").write_text(run["console"])
             result.update(
                 output_bytes=run["output_bytes"],
@@ -697,7 +702,18 @@ def _isolated_build(
     return build, reported.get("routed"), reported.get("reason") or reason
 
 
-def _run_on_rtl(target: str, engine: str, build: Mapping, timeout, result: dict) -> dict:
+def _spike_jail(elf, work: Path, private, options: Mapping) -> tuple[list[str], Path]:
+    """The simulator jail for Spike: its binary, extension library directory and tool path only."""
+    from merlin.runtime.backends.spike import spike_path
+    from merlin.targetgen.full_call_build import oracle_jail
+
+    binary = Path(options.get("spike_binary") or spike_path())
+    extension = [Path(options["extlib"]).parent] if options.get("extlib") else []
+    path = [Path(p) for p in options.get("path_prepend") or ()]
+    return oracle_jail(Path(elf), work, private=private, executables=[binary], roots=extension, path=path)
+
+
+def _run_on_rtl(target: str, engine: str, build: Mapping, timeout, result: dict, *, work: Path, private) -> dict:
     """Execute a board-linked image on the selected elaborated-RTL engine; parse its console.
 
     The engine's identity is re-verified around the run (``run_verified``) and recorded in
@@ -706,6 +722,7 @@ def _run_on_rtl(target: str, engine: str, build: Mapping, timeout, result: dict)
     from merlin.runtime.backends import base as backends
     from merlin.runtime.backends import spike_model
     from merlin.targetgen.capsule_runner import OracleUnavailable
+    from merlin.targetgen.full_call_build import run_elf_jailed
     from merlin.targetgen.rtl_simulator_execution import SimulatorExecution, run_verified
 
     backend = backends.get_backend(target)
@@ -714,7 +731,7 @@ def _run_on_rtl(target: str, engine: str, build: Mapping, timeout, result: dict)
     observed = run_verified(
         SimulatorExecution(backend, engine, target, timeout, unavailable=OracleUnavailable),
         lambda remaining: {
-            "console": backend.run_elf(build["elf"], simulator=engine, timeout=int(remaining)),
+            "console": run_elf_jailed(target, engine, Path(build["elf"]), work, private=private, timeout=remaining),
             "oracle": {},
         },
     )

@@ -91,3 +91,117 @@ def test_sandbox_refuses_a_bind_that_would_expose_private_inputs(tmp_path, monke
             denied=(),
             timeout=60,
         )
+
+
+HOSTILE_ELF = r"""
+#include <stdint.h>
+#include "htif.h"
+extern volatile uint64_t tohost, fromhost;
+static volatile uint64_t request[8] __attribute__((aligned(64)));
+static char seen[128];
+static long proxy(long number, long a0, long a1, long a2, long a3, long a4) {
+  request[0] = number; request[1] = a0; request[2] = a1; request[3] = a2; request[4] = a3; request[5] = a4;
+  __asm__ volatile("fence rw, rw" ::: "memory");
+  tohost = (uint64_t)(uintptr_t)request;
+  while (fromhost == 0) ;
+  fromhost = 0;
+  __asm__ volatile("fence rw, rw" ::: "memory");
+  return (long)request[0];
+}
+int main(void) {
+  console_init();
+  const char *path = PRIVATE_PATH;
+  long length = 0;
+  while (path[length]) length++;
+  long fd = proxy(56 /* openat */, -100, (long)path, length + 1, 0 /* O_RDONLY */, 0);
+  if (fd < 0) {
+    htif_puts("HOSTILE open refused\n");
+  } else {
+    long got = proxy(63 /* read */, fd, (long)seen, sizeof(seen) - 1, 0, 0);
+    seen[got > 0 ? got : 0] = 0;
+    htif_puts("HOSTILE read: ");
+    htif_puts(seen);
+    htif_puts("\n");
+  }
+  htif_exit(0);
+}
+"""
+
+
+def _hostile_image(tmp_path, private_file):
+    import os
+
+    from merlin.runtime.backends.spike import gcc_path
+    from merlin.runtime.backends.spike_model import _harness_dir
+
+    gcc, harness = gcc_path(), _harness_dir()
+    if not gcc.is_file():
+        pytest.skip("the RISC-V cross compiler is unavailable")
+    (tmp_path / "hostile.c").write_text(HOSTILE_ELF)
+    elf = tmp_path / "hostile.elf"
+    flags = ["-march=rv64gc", "-mabi=lp64d", "-mcmodel=medany", "-O1", "-ffreestanding", "-nostdlib", "-nostartfiles"]
+    subprocess.run(
+        [
+            str(gcc),
+            *flags,
+            f"-I{harness}",
+            f'-DPRIVATE_PATH="{private_file}"',
+            "-T",
+            str(harness / "link.ld"),
+            str(harness / "crt.S"),
+            str(harness / "htif.c"),
+            str(tmp_path / "hostile.c"),
+            "-o",
+            str(elf),
+        ],
+        check=True,
+        env={**os.environ},
+    )
+    return elf
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is unavailable")
+def test_htif_guest_cannot_open_private_files_from_the_spike_jail(tmp_path):
+    from merlin.runtime.backends.spike import spike_path
+
+    bundle = tmp_path / "run" / ".private_full_call_runtime"
+    bundle.mkdir(parents=True)
+    (bundle / "expected.txt").write_text("PRIVATE EXPECTED OUTPUT")
+    elf = _hostile_image(tmp_path, bundle / "expected.txt")
+    if not spike_path().is_file():
+        pytest.skip("spike is unavailable")
+    # Unjailed, the HTIF proxy really does hand the guest the file: the attack is real.
+    plain = subprocess.run([str(spike_path()), "--isa=rv64gc", str(elf)], capture_output=True, text=True, timeout=60)
+    assert "HOSTILE read: PRIVATE EXPECTED OUTPUT" in plain.stdout
+    jail, image = full_call_build.oracle_jail(
+        elf, tmp_path / "run" / ".oracle", private=[bundle], executables=[spike_path()]
+    )
+    jailed = subprocess.run(
+        [*jail, str(spike_path()), "--isa=rv64gc", str(image)], capture_output=True, text=True, timeout=60
+    )
+    assert "HOSTILE open refused" in jailed.stdout and "PRIVATE" not in jailed.stdout + jailed.stderr
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is unavailable")
+def test_htif_guest_cannot_open_private_files_from_the_rtl_jail(tmp_path):
+    import os
+
+    from merlin.runtime.backends import base
+
+    if not os.environ.get(full_call_build.ORACLE_ROOTS_ENV):
+        pytest.skip("no RTL simulator jail roots are selected")
+    try:
+        backend = base.get_backend("gemmini")
+        if not backend.available("vcs"):
+            pytest.skip("the VCS engine is unavailable")
+    except Exception:  # noqa: BLE001 -- no gemmini support selected in this environment
+        pytest.skip("the gemmini support backend is unavailable")
+    bundle = tmp_path / "run" / ".private_full_call_runtime"
+    bundle.mkdir(parents=True)
+    (bundle / "expected.txt").write_text("PRIVATE EXPECTED OUTPUT")
+    elf = _hostile_image(tmp_path, bundle / "expected.txt")
+    assert "HOSTILE read: PRIVATE EXPECTED OUTPUT" in backend.run_elf(elf, simulator="vcs", timeout=600)
+    console = full_call_build.run_elf_jailed(
+        "gemmini", "vcs", elf, tmp_path / "run" / ".oracle-vcs", private=[bundle], timeout=600
+    )
+    assert "HOSTILE open refused" in console and "PRIVATE" not in console
