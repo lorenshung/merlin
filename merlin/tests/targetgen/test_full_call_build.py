@@ -252,3 +252,44 @@ def test_jail_libraries_leave_pinned_copies_to_the_library_path(tmp_path, monkey
     listing = f"\tlibstdc++.so.6 => {live}/libstdc++.so.6 (0x1)\n\tlibextra.so => {other}/libextra.so (0x2)\n"
     monkeypatch.setattr(full_call_build.subprocess, "run", lambda *a, **k: subprocess.CompletedProcess(a, 0, listing))
     assert full_call_build._libraries(["sim"], str(pinned)) == [other]
+
+
+FORGING_ELF = (
+    HOSTILE_ELF.split("int main(void) {")[0]
+    + r"""
+static long length(const char *s) { long n = 0; while (s[n]) n++; return n; }
+static void put(long fd, const char *s) { proxy(64 /* write */, fd, (long)s, length(s), 0, 0); }
+int main(void) {
+  console_init();
+  static const char line[] = "core   0: 0x0000000080000000 (0x0000000b) FORGED\n";
+  put(2, line);
+  const char *names[] = {"/dev/stderr", "/dev/fd/2", "/proc/self/fd/2"};
+  for (int i = 0; i < 3; i++) {
+    long fd = proxy(56 /* openat */, -100, (long)names[i], length(names[i]) + 1, 1 /* O_WRONLY */, 0);
+    if (fd >= 0) put(fd, line);
+  }
+  htif_exit(0);
+}
+"""
+)
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is unavailable")
+def test_htif_guest_cannot_write_the_spike_trace(tmp_path, monkeypatch):
+    from merlin.runtime.backends.spike import spike_path
+
+    monkeypatch.setattr(sys.modules[__name__], "HOSTILE_ELF", FORGING_ELF)
+    elf = _hostile_image(tmp_path, tmp_path / "unused")
+    if not spike_path().is_file():
+        pytest.skip("spike is unavailable")
+    run = lambda prefix, trace: subprocess.run(  # noqa: E731
+        [*prefix, str(spike_path()), "--isa=rv64gc", "-l", str(image)], stdout=subprocess.PIPE, stderr=trace, timeout=60
+    )
+    jail, image = full_call_build.oracle_jail(elf, tmp_path / "jail", private=[], executables=[spike_path()])
+    procfs, _ = full_call_build.oracle_jail(elf, tmp_path / "jail", private=[], executables=[spike_path()], procfs=True)
+    with (tmp_path / "open.trace").open("wb") as trace:
+        run(procfs, trace)  # with /proc the guest reopens the trace through /dev/fd/2: the attack is real
+    with (tmp_path / "jailed.trace").open("wb") as trace:
+        assert b"FORGED" in run(jail, trace).stdout  # its own fd 2 is the console
+    assert b"FORGED" in (tmp_path / "open.trace").read_bytes()
+    assert b"FORGED" not in (tmp_path / "jailed.trace").read_bytes()

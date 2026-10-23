@@ -181,7 +181,7 @@ def _libraries(executables, library_path: str) -> list[Path]:
     return directories
 
 
-def _jail(work: Path, roots, environment: dict, private, *, network: bool = False) -> list[str]:
+def _jail(work: Path, roots, environment: dict, private, *, network: bool = False, procfs: bool = True) -> list[str]:
     """Deny-by-default bubblewrap prefix: system read-only, /scratch* hidden, ``roots`` read-only, ``work``
     writable. Refused if any ``private`` path would be reachable. A variable naming a path passes only
     when that path is visible; ``MERLIN_*`` selections and licence servers pass; everything else is cleared."""
@@ -192,6 +192,8 @@ def _jail(work: Path, roots, environment: dict, private, *, network: bool = Fals
     argv = BW.base_argv(work, {}, include_claude_home=False, inherit_environment=False)
     # No terminal to inject into; no network unless the caller runs a licensed simulator and no candidate code.
     argv += ["--new-session", *([] if network else ["--unshare-net"])]
+    if not procfs:  # /proc/self/fd and /dev/fd would hand a guest the simulator's own trace descriptor
+        argv += ["--tmpfs", "/proc"]
     bound = _covering(roots, excluded=excluded)
     for root in bound:
         argv += ["--ro-bind", str(root), str(root)]
@@ -288,14 +290,16 @@ def build_in_sandbox(
 
 
 def oracle_jail(
-    elf: Path, work: Path, *, private, executables=(), roots=(), path=(), network: bool = False
+    elf: Path, work: Path, *, private, executables=(), roots=(), path=(), network: bool = False, procfs: bool = False
 ) -> tuple[list[str], Path]:
     """``(bwrap prefix, jailed image)`` for running a simulator on a copy of ``elf`` in a fresh ``work``.
 
     A guest can reach the host filesystem through the simulator's HTIF/fesvr syscall proxy, so the
     simulator sees only ``work`` (the image copy; writable), the operator's :data:`ORACLE_ROOTS_ENV`,
     ``roots``, the libraries ``executables`` load, and ``path`` on ``PATH``. The trusted caller reads the
-    console back; a trace it streams to its own file descriptor never enters the jail.
+    console back. A trace the simulator streams to its own file descriptor never enters the jail, and the
+    guest cannot reopen that descriptor: fesvr maps guest fds 1 and 2 to host stdout, and without ``procfs``
+    neither ``/proc/self/fd`` nor ``/dev/fd`` exists.
     """
     if work.exists():
         shutil.rmtree(work)
@@ -319,6 +323,7 @@ def oracle_jail(
         environment,
         private,
         network=network,
+        procfs=procfs,
     )
     return argv, jailed
 
@@ -327,7 +332,7 @@ def run_elf_jailed(target: str, engine: str, elf: Path, work: Path, *, private, 
     """Run ``elf`` on ``target``'s ``engine`` through its backend, inside :func:`oracle_jail`; the console."""
     # The RTL engine checks out a network licence; the jail runs only Merlin, the backend and the guest image,
     # whose HTIF proxy offers no sockets.
-    argv, jailed = oracle_jail(elf, work, private=private, roots=_merlin_roots(target), network=True)
+    argv, jailed = oracle_jail(elf, work, private=private, roots=_merlin_roots(target), network=True, procfs=True)
     environment = [
         "--setenv",
         "PYTHONPATH",
