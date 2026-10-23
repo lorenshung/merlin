@@ -143,6 +143,8 @@ ORACLE_ROOTS_ENV = "MERLIN_ORACLE_JAIL_ROOTS"
 #: Library search path inside a simulator jail (the frozen toolchain's libraries), so a binary whose
 #: RPATH names a host toolchain resolves the selected copy instead.
 ORACLE_LIBRARY_ENV = "MERLIN_ORACLE_LD_LIBRARY_PATH"
+#: Tool directories on ``PATH`` inside a simulator jail (e.g. the frozen ``dtc`` Spike runs).
+ORACLE_PATH_ENV = "MERLIN_ORACLE_PATH"
 
 
 def _merlin_roots(target: str) -> list:
@@ -296,7 +298,8 @@ def oracle_jail(
 
     A guest can reach the host filesystem through the simulator's HTIF/fesvr syscall proxy, so the
     simulator sees only ``work`` (the image copy; writable), the operator's :data:`ORACLE_ROOTS_ENV`,
-    ``roots``, the libraries ``executables`` load, and ``path`` on ``PATH``. The trusted caller reads the
+    ``roots``, the libraries ``executables`` load, and ``path`` and :data:`ORACLE_PATH_ENV` on
+    ``PATH``. The trusted caller reads the
     console back. A trace the simulator streams to its own file descriptor never enters the jail, and the
     guest cannot reopen that descriptor: fesvr maps guest fds 1 and 2 to host stdout, and without ``procfs``
     neither ``/proc/self/fd`` nor ``/dev/fd`` exists.
@@ -311,6 +314,7 @@ def oracle_jail(
     declared = [p for p in os.environ.get(ORACLE_ROOTS_ENV, "").split(os.pathsep) if p]
     executables = [*executables, *(p for p in declared if Path(p).is_file() and os.access(p, os.X_OK))]
     libraries = _libraries(executables, library_path)
+    path = [*path, *(Path(p) for p in os.environ.get(ORACLE_PATH_ENV, "").split(os.pathsep) if p)]
     environment = {
         "HOME": str(work),
         "TMPDIR": str(work / "tmp"),

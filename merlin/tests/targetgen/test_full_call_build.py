@@ -293,3 +293,15 @@ def test_htif_guest_cannot_write_the_spike_trace(tmp_path, monkeypatch):
         assert b"FORGED" in run(jail, trace).stdout  # its own fd 2 is the console
     assert b"FORGED" in (tmp_path / "open.trace").read_bytes()
     assert b"FORGED" not in (tmp_path / "jailed.trace").read_bytes()
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is unavailable")
+def test_simulator_jail_puts_the_operator_tool_path_first(tmp_path, monkeypatch):
+    tools = tmp_path / "frozen" / "bin"
+    tools.mkdir(parents=True)
+    (tools / "dtc").write_text("#!/bin/sh\necho frozen-dtc\n")
+    (tools / "dtc").chmod(0o755)
+    (tmp_path / "image.elf").write_bytes(b"\x7fELF")
+    monkeypatch.setenv(full_call_build.ORACLE_PATH_ENV, str(tools))
+    jail, _ = full_call_build.oracle_jail(tmp_path / "image.elf", tmp_path / "jail", private=[])
+    assert subprocess.run([*jail, "sh", "-c", "dtc"], capture_output=True, text=True).stdout == "frozen-dtc\n"
