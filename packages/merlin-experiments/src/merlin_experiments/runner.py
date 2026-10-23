@@ -601,6 +601,12 @@ def resolve_plan(
             ):
                 if key in os.environ:
                     command["env"][key] = os.environ[key]
+            from merlin.targetgen.tier_policy import raised_tiers
+
+            try:  # an invalid operator floor is refused here, never mid-grade
+                raised_tiers(())
+            except ValueError as error:
+                raise SpecError(str(error)) from error
             from merlin.targetgen.target_registry import effective_target_path
 
             # An unset selection is the checkout's in-repo support default. Spell it out, so a

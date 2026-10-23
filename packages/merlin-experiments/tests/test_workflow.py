@@ -391,6 +391,9 @@ def test_phase1_and_phase2_real_adapter_contract(tmp_path, monkeypatch):
     assert functional["env"]["MERLIN_TARGET_PATH"] == str(tmp_path / "unselected-support")
     assert functional["env"]["MERLIN_CAPSULE_TIER_FLOOR"] == "L3"  # a resume cannot drop the floor
     assert functional["env"]["MERLIN_GRADE_WORKERS"] == "16"  # nor the selected grade parallelism
+    monkeypatch.setenv("MERLIN_CAPSULE_TIER_FLOOR", "RTL")
+    with pytest.raises(SpecError, match="MERLIN_CAPSULE_TIER_FLOOR"):
+        resolve_plan(load_spec(spec_path), run_dir=tmp_path / "run-invalid-floor")
     assert plan["input_paths"]["phase1:operator:clang"] == str(clang)
     assert plan["phases"]["2"]["resume_policy"] == "checkpoint_segment"
     assert plan["phases"]["2"]["mode"] == "model_portfolio"
