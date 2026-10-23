@@ -60,6 +60,7 @@ def flag(overload):
  return namespace["STATIC_METADATA_ONLY"]
 assert flag("aten.dim.default") and flag("aten.sym_numel.default") and flag("aten.is_contiguous.default")
 assert not flag("aten._local_scalar_dense.default") and not flag("aten.abs.default")
+assert not flag("aten._foreach_zero_.default")
 ''')
 
 

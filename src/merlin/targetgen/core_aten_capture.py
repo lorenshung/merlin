@@ -134,11 +134,12 @@ def _op(name):
     return getattr(getattr(torch.ops.aten, packet), overload)
 
 
-# A program whose schema results are all int/bool may be a descriptor query;
+# A program with results, all of them int/bool, may be a descriptor query;
 # the capture worker folds it only if it evaluates on data-free meta tensors.
-STATIC_METADATA_ONLY = all(
+_RETURNS = _op(_DOCUMENT["overload"])._schema.returns
+STATIC_METADATA_ONLY = bool(_RETURNS) and all(
     isinstance(result.type, (torch._C.IntType, torch._C.BoolType, torch._C.SymIntType, torch._C.SymBoolType))
-    for result in _op(_DOCUMENT["overload"])._schema.returns
+    for result in _RETURNS
 )
 
 
