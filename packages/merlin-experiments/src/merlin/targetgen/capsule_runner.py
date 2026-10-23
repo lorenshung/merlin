@@ -1102,6 +1102,8 @@ def _sim_engine_adapters(sim_via: str, target: str) -> dict[str, Callable]:
     tier still carries the grade). A new bespoke sim registers one branch here — the engine name is
     DERIVED from the target's contract, never assumed."""
     if sim_via == "chipyard":
+        # A full-call L2 (and its board-linked L3) serves only full_call_v1 capsules; a corpus that also
+        # holds command-buffer capsules must not select an execution provider for this target.
         functional = _spike_oracles.declared(target) or _spike_oracles.selected(target)
         adapters: dict[str, Callable] = {"L2": functional or simulator_adapter("spike", target)}
         plan = _oracle_policy.chipyard_tier_plan(target)
