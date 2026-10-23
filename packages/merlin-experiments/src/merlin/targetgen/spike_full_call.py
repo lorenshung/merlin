@@ -592,11 +592,14 @@ def full_call_adapter(
                 execution_error=None,
             )
         except Exception as exc:  # noqa: BLE001 -- execution refusal is a verdict input
+            from merlin.targetgen.full_call_build import sanitized
+
+            # Simulator errors carry the guest's console (candidate output); feedback gets one path-free line.
             result.update(
                 output_bytes=None,
                 output_shapes=None,
                 semantic_readback=None,
-                execution_error=f"{type(exc).__name__}: {exc}"[:2000],
+                execution_error=sanitized(f"{type(exc).__name__}: {exc}"),
             )
         provenance = batch_provenance(
             bundle,

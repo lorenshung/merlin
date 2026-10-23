@@ -10,6 +10,7 @@ import pytest
 
 capsule_runner = pytest.importorskip("merlin.targetgen.capsule_runner")
 spike_full_call = pytest.importorskip("merlin.targetgen.spike_full_call")
+_REAL_SPIKE_RUN = pytest.importorskip("merlin.runtime.backends.spike_model").run  # before fixtures patch it
 
 
 def test_isa_is_derived_not_defaulted(monkeypatch):
@@ -78,6 +79,23 @@ def test_build_refusal_returns_durable_execution_error(tmp_path, monkeypatch):
     assert result["output_bytes"] is None
     assert result["execution_error"] == "ValueError: candidate build refused"
     assert result["lane"] == "host" and result["executed_instructions"] == 0
+
+
+def test_guest_console_never_reaches_the_execution_error(tmp_path, monkeypatch, source_adapter):
+    from merlin.runtime.backends import spike_model
+    from merlin.targetgen import core_aten_device
+
+    adapter, _ = source_adapter
+    guest = tmp_path / "guest-sim"
+    guest.write_text("#!/bin/sh\necho 'SECRET-GOLDEN-BYTES /scratch/private/answers'\nexit 3\n")
+    guest.chmod(0o755)
+    monkeypatch.setattr(spike_model, "run", lambda *a, **k: _REAL_SPIKE_RUN(*a, **{**k, "spike_binary": guest}))
+    monkeypatch.setattr(core_aten_device, "routing_for_bundle", lambda *a: (None, "host"))
+    result = adapter.run_full_call(
+        bundle=tmp_path, llvm_mlir="", package_dir=tmp_path, capsule={"scored": True, "lane_expectation": "any"}
+    )
+    assert result["execution_error"].startswith("SpikeModelError: spike exited 3")
+    assert "SECRET" not in result["execution_error"] and "/" not in result["execution_error"]
 
 
 @pytest.fixture
