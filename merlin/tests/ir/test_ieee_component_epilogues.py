@@ -14,6 +14,7 @@ from merlin.targetgen.core_aten_components import unlowered_data_reductions
 
 def run_block(block, arguments):
     assert all(op.predicate.value.data == 1 for op in block.ops if op.name == "arith.cmpf")  # ordered equal
+    assert all(op.predicate.value.data in {0, 1, 6, 8} for op in block.ops if op.name == "arith.cmpi")  # eq ne slt sgt
     return mlir_fixtures.run_block(block, arguments)
 
 
