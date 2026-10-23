@@ -232,3 +232,13 @@ def test_candidate_sandboxes_have_no_network(tmp_path):
             assert done.stdout.startswith(expected), (done.stdout, done.stderr)
     finally:
         listener.close()
+
+
+def test_sandbox_text_reaching_feedback_is_a_short_path_free_line():
+    leak = "ValueError: read /scratch/x/merlin-support/core_aten/execution_provider.py " + "SECRET " * 80 + "\nline2"
+    text = full_call_build.sanitized(leak)
+    assert text.startswith("ValueError: read <path> SECRET") and len(text) <= len("ValueError: ") + 120
+    assert "/" not in text and "line2" not in text
+    assert full_call_build.sanitized("no eligible contraction in /a/b") == "no eligible contraction in <path>"
+    record = full_call_build.sanitized_record([{"op": "/abs/path/leak", "n": 3, "deep": [[[["x"]]]]}] * 100)
+    assert len(record) == 64 and record[0]["op"] == "<path>" and record[0]["n"] == 3

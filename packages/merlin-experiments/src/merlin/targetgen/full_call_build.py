@@ -32,6 +32,39 @@ PROGRAM_INPUTS = (
 ADMISSION = "spec-int8-admission.json"
 
 
+def _clean(text, limit: int) -> str:
+    lines = str(text).strip().splitlines()
+    words = lines[0].split() if lines else []
+    message = " ".join("<path>" if "/" in word or "\\" in word else word for word in words)
+    return "".join(ch for ch in message if ch.isprintable())[:limit]
+
+
+def sanitized(text, *, limit: int = 120) -> str:
+    """What sandboxed text may reach feedback: one path-free line of at most ``limit`` characters, keeping an
+    identifier-shaped ``Category:`` prefix (an exception name).
+
+    Anything the sandbox reports is candidate-influenced (its code shares the process with the support
+    provider and can read it), so nothing longer, multi-line or path-shaped passes.
+    """
+    head, separator, rest = str(text).strip().partition(":")
+    if separator and head.isidentifier() and len(head) <= 40:
+        return f"{head}: {_clean(rest, limit)}".rstrip(": ")
+    return _clean(text, limit)
+
+
+def sanitized_record(value, *, depth: int = 0):
+    """A JSON value from the sandbox with every string :func:`sanitized` and no deep or huge structure."""
+    if isinstance(value, bool | int | float) or value is None:
+        return value
+    if isinstance(value, str):
+        return sanitized(value, limit=80)
+    if depth < 3 and isinstance(value, list):
+        return [sanitized_record(item, depth=depth + 1) for item in value[:64]]
+    if depth < 3 and isinstance(value, dict):
+        return {sanitized(k, limit=40): sanitized_record(v, depth=depth + 1) for k, v in list(value.items())[:32]}
+    return None
+
+
 def _write(path: Path, document: dict) -> None:
     path.write_text(json.dumps(document, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
 
@@ -242,7 +275,7 @@ def build_in_sandbox(
     done = subprocess.run(command, capture_output=True, text=True, timeout=timeout, stdin=subprocess.DEVNULL)
     result = work / "out" / "result.json"
     if not result.is_file() or result.is_symlink():
-        raise RuntimeError(f"isolated full-call build produced no report: {(done.stderr or done.stdout)[-1500:]}")
+        raise RuntimeError("isolated full-call build produced no report: " + sanitized(done.stderr or done.stdout))
     return json.loads(result.read_text(encoding="utf-8"))
 
 
@@ -300,7 +333,8 @@ def run_elf_jailed(target: str, engine: str, elf: Path, work: Path, *, private, 
     done = subprocess.run(command, capture_output=True, text=True, timeout=timeout + 120, stdin=subprocess.DEVNULL)
     console = work / "console.txt"
     if done.returncode or not console.is_file() or console.is_symlink():
-        raise RuntimeError(f"{engine} run failed in its jail: {(done.stderr or done.stdout)[-2000:]}")
+        lines = [line for line in (done.stderr or done.stdout).splitlines() if line.strip()]
+        raise RuntimeError(f"{engine} run failed in its jail: " + sanitized(lines[-1] if lines else "no output"))
     return console.read_text(errors="replace")
 
 

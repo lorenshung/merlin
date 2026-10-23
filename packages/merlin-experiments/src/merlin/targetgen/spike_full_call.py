@@ -666,7 +666,7 @@ def _isolated_build(
     """
     from merlin.targetgen.core_aten_capsules import load_private
     from merlin.targetgen.core_aten_device import load_execution_provider, source_route
-    from merlin.targetgen.full_call_build import build_in_sandbox
+    from merlin.targetgen.full_call_build import build_in_sandbox, sanitized, sanitized_record
     from merlin.targetgen.rtl.facts import ensure_facts
 
     if package_dir is None:
@@ -690,7 +690,7 @@ def _isolated_build(
         timeout=timeout,
     )
     if reported.get("error"):
-        raise ValueError(reported["error"])
+        raise ValueError("isolated build refused: " + sanitized(reported["error"]))
     produced = work / "out" / "build"
     elf = Path(reported["build"]["elf"])
     if not elf.is_relative_to(produced) or any(p.is_symlink() for p in produced.rglob("*")):
@@ -699,7 +699,9 @@ def _isolated_build(
         shutil.rmtree(build_dir)
     shutil.copytree(produced, build_dir)
     build = {**reported["build"], "elf": str(build_dir / elf.relative_to(produced))}
-    return build, reported.get("routed"), reported.get("reason") or reason
+    routed = reported.get("routed")
+    reason = sanitized(reported["reason"]) if reported.get("reason") else reason
+    return build, (sanitized_record(routed) if routed is not None else None), reason
 
 
 def _spike_jail(elf, work: Path, private, options: Mapping) -> tuple[list[str], Path]:
