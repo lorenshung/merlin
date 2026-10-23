@@ -127,6 +127,8 @@ def run_ops(ops, values):
         typ = op.results[0].type if op.results else None
         if name in {"linalg.yield", "scf.yield"}:
             return a[0]
+        if name in {"arith.shli", "arith.shrui", "arith.shrsi"}:
+            assert 0 <= a[1] < op.operands[0].type.width.data, (name, a[1])
         if name == "cf.assert":
             assert a[0]
             continue
@@ -169,8 +171,6 @@ def run_ops(ops, values):
             x, y = [Fraction(float_value(v, o.type)) for v, o in zip(a, op.operands)]
             value = int.from_bytes(typ.pack([round_binary(x * y)]), "little")
         else:
-            if name in {"arith.shli", "arith.shrui"}:
-                assert 0 <= a[1] < op.operands[0].type.width.data, (name, a[1])
             value = _BINARY[name](*a)
         values[op.results[0]] = int(value) & ((1 << typ.width.data) - 1) if hasattr(typ, "width") else value
 
