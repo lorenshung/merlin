@@ -148,7 +148,7 @@ def build_in_sandbox(
             resolve_support(request["target"]).base,
             package,
             toolchain.llvm_install(),
-            gcc_path().resolve().parents[1],
+            gcc_path().parents[2],  # the environment the cross toolchain and its shared libraries live in
             Path(compiler).parents[1] if compiler else None,
             os.environ.get("MERLIN_REPO_ROOT"),
         ],
