@@ -205,3 +205,30 @@ def test_htif_guest_cannot_open_private_files_from_the_rtl_jail(tmp_path):
         "gemmini", "vcs", elf, tmp_path / "run" / ".oracle-vcs", private=[bundle], timeout=600
     )
     assert "HOSTILE open refused" in console and "PRIVATE" not in console
+
+
+@pytest.mark.skipif(shutil.which("bwrap") is None, reason="bubblewrap is unavailable")
+def test_candidate_sandboxes_have_no_network(tmp_path):
+    import socket
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+    probe = (
+        "import socket, sys\n"
+        "try:\n"
+        f"    socket.create_connection(('127.0.0.1', {port}), timeout=5); print('CONNECTED')\n"
+        "except OSError as exc:\n"
+        "    print('BLOCKED', type(exc).__name__)\n"
+    )
+    roots = [sys.prefix, sys.base_prefix]
+    try:
+        for network, expected in ((False, "BLOCKED"), (True, "CONNECTED")):
+            work = tmp_path / f"jail-{network}"
+            work.mkdir()
+            argv = full_call_build._jail(work, roots, {}, [], network=network)
+            done = subprocess.run([*argv, sys.executable, "-c", probe], capture_output=True, text=True, timeout=60)
+            assert done.stdout.startswith(expected), (done.stdout, done.stderr)
+    finally:
+        listener.close()

@@ -140,7 +140,7 @@ def _libraries(executables, library_path: str) -> list[Path]:
     return directories
 
 
-def _jail(work: Path, roots, environment: dict, private) -> list[str]:
+def _jail(work: Path, roots, environment: dict, private, *, network: bool = False) -> list[str]:
     """Deny-by-default bubblewrap prefix: system read-only, /scratch* hidden, ``roots`` read-only, ``work``
     writable. Refused if any ``private`` path would be reachable. A variable naming a path passes only
     when that path is visible; ``MERLIN_*`` selections and licence servers pass; everything else is cleared."""
@@ -149,6 +149,8 @@ def _jail(work: Path, roots, environment: dict, private) -> list[str]:
 
     excluded = [Path(p).resolve() for p in (work, *private)]
     argv = BW.base_argv(work, {}, include_claude_home=False, inherit_environment=False)
+    # No terminal to inject into; no network unless the caller runs a licensed simulator and no candidate code.
+    argv += ["--new-session", *([] if network else ["--unshare-net"])]
     bound = _covering(roots, excluded=excluded)
     for root in bound:
         argv += ["--ro-bind", str(root), str(root)]
@@ -244,7 +246,9 @@ def build_in_sandbox(
     return json.loads(result.read_text(encoding="utf-8"))
 
 
-def oracle_jail(elf: Path, work: Path, *, private, executables=(), roots=(), path=()) -> tuple[list[str], Path]:
+def oracle_jail(
+    elf: Path, work: Path, *, private, executables=(), roots=(), path=(), network: bool = False
+) -> tuple[list[str], Path]:
     """``(bwrap prefix, jailed image)`` for running a simulator on a copy of ``elf`` in a fresh ``work``.
 
     A guest can reach the host filesystem through the simulator's HTIF/fesvr syscall proxy, so the
@@ -269,14 +273,20 @@ def oracle_jail(elf: Path, work: Path, *, private, executables=(), roots=(), pat
         "LD_LIBRARY_PATH": os.pathsep.join([library_path, *map(str, libraries)]).strip(os.pathsep),
     }
     argv = _jail(
-        work, [*declared, *roots, *libraries, *path, *(Path(e).parent for e in executables)], environment, private
+        work,
+        [*declared, *roots, *libraries, *path, *(Path(e).parent for e in executables)],
+        environment,
+        private,
+        network=network,
     )
     return argv, jailed
 
 
 def run_elf_jailed(target: str, engine: str, elf: Path, work: Path, *, private, timeout) -> str:
     """Run ``elf`` on ``target``'s ``engine`` through its backend, inside :func:`oracle_jail`; the console."""
-    argv, jailed = oracle_jail(elf, work, private=private, roots=_merlin_roots(target))
+    # The RTL engine checks out a network licence; the jail runs only Merlin, the backend and the guest image,
+    # whose HTIF proxy offers no sockets.
+    argv, jailed = oracle_jail(elf, work, private=private, roots=_merlin_roots(target), network=True)
     environment = [
         "--setenv",
         "PYTHONPATH",
