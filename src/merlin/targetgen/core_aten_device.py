@@ -292,7 +292,35 @@ def submission_interface(provider: Path) -> list[dict]:
         for key, row in rows.items():
             if key[2] == function.name:
                 row["reads"] = files
-    return [rows[key] for key in sorted(rows)]
+    # Report each use under the PUBLIC provider hooks that reach it: a private helper's name says how the
+    # support is structured, not what the candidate implements. Uses no public hook reaches are dropped.
+    names = {function.name for function in functions}
+    callees = {
+        function.name: {
+            node.func.id
+            for node in ast.walk(function)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in names
+        }
+        for function in functions
+    }
+
+    def reach(name, seen):
+        for callee in callees[name] - seen:
+            seen.add(callee)
+            reach(callee, seen)
+        return seen
+
+    public = {name: reach(name, {name}) for name in names if not name.startswith("_")}
+    merged: dict[tuple, dict] = {}
+    for (module, member, hook), row in sorted(rows.items()):
+        if member.startswith("_"):
+            continue
+        for entry in sorted(name for name, reached in public.items() if hook in reached):
+            out = merged.setdefault((module, member, entry), {**row, "hook": entry, "calls": [], "fields": []})
+            out["calls"] += [call for call in row["calls"] if call not in out["calls"]]
+            out["fields"] += [field for field in row["fields"] if field not in out["fields"]]
+            out["reads"] = list(dict.fromkeys([*out.get("reads", []), *row.get("reads", [])]))
+    return [merged[key] for key in sorted(merged)]
 
 
 def region_routing_for_bundle(target: str, package: Path, region_offload):

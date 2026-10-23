@@ -218,7 +218,11 @@ def test_staged_task_names_the_full_call_submission_interface(tmp_path, monkeypa
         "SECRET_SUPPORT_LOGIC = 'never staged'\n"
         "def _module(package, name):\n"
         "    return load_module(package, f'pkg.parts.{name}', package_name='x')\n"
+        "def _private_step(package):\n"
+        "    helper = _module(package, 'catalog')\n"
+        "    return helper.check(1)\n"
         "def routing(directory, *, package, eligible):\n"
+        "    _private_step(package)\n"
         "    parts = _module(package, 'catalog')\n"
         "    _, inventory = parts.build(SECRET_SUPPORT_LOGIC)\n"
         "    audit = load_module(package, 'pkg.audit')\n"
@@ -242,3 +246,5 @@ def test_staged_task_names_the_full_call_submission_interface(tmp_path, monkeypa
     assert "reads `result.json` from its work directory" in text and "written.c" not in text
     assert "region offload" in text and "device_signatures.json" in text
     assert str(provider) not in text and "SECRET_SUPPORT_LOGIC" not in text and "never staged" not in text
+    assert "| `pkg.parts.catalog` | `check(arg1)` | - | routing |" in text  # a private helper's use, under its hook
+    assert "_private_step" not in text and "_module" not in text and "`_" not in text
