@@ -135,9 +135,11 @@ def task_full_call_interface_block(config: TaskStagingConfig) -> str:
         "`region_offload.json`); a contraction catalog builder returns (manifest path, object path) and the "
         "build records `device_signatures.json`. A device capsule passes only if one of those records binds "
         "calls and the run retires at least one device instruction; a declined route is a failure for a "
-        "capsule whose lane is `device`. These modules run in an isolated build sandbox that sees only your "
-        "submission and the prepared program; they must not import `merlin`, and grading runs the linked image "
-        "it returns.\n"
+        "capsule whose lane is `device`. These modules run in an isolated build sandbox with no network: it "
+        "holds your submission, the prepared program's public inputs and, read-only, the support, Merlin and "
+        "the toolchains, but no capsule answers or truth. They must not import `merlin`; grading runs the "
+        "linked image the sandbox returns, and a failure there reaches feedback as one short line without "
+        "paths.\n"
     )
     return "\n".join(lines)
 
