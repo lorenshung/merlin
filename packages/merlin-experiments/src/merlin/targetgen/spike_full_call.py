@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import subprocess
 import tempfile
 from collections.abc import Mapping
@@ -409,12 +410,36 @@ def full_call_adapter(
         # On a board the arena must share the DRAM with the image: half of what the code reserve leaves.
         free_mb = (layout.get("dram_bytes", 0) - layout.get("code_reserve", 64 << 20)) >> 21
         arena_mb = DEFAULT_ARENA_MB if board is None else max(1, min(DEFAULT_ARENA_MB, free_mb))
-        routing = None
+        routing = routed = None
         result.update(lane="host", executed_instructions=0)
+        numeric_flow = (capsule or {}).get("operation", {}).get("attributes", {}).get("numeric_flow")
+        # Submitted code (the provider's routing imports it) never runs in this process: a capsule that
+        # may route to the device is built in the isolated sandbox unless a candidate product transport
+        # already isolates the submitted compiler.
+        isolated = (
+            execution_provider is not None
+            and candidate_transport is None
+            and ((capsule or {}).get("scored", True) or (capsule or {}).get("lane_expectation") == "any")
+        )
         try:
             if (capsule or {}).get("lane_expectation") == "any" and (capsule or {}).get("scored") is False:
                 raise ValueError("optional-device capsules must retain scored full-call correctness")
-            if execution_provider is not None:
+            if isolated:
+                build, routed, reason = _isolated_build(
+                    target=target,
+                    bundle=bundle,
+                    build_dir=build_dir,
+                    capsule=capsule or {},
+                    package_dir=package_dir,
+                    execution_provider=execution_provider,
+                    rtl_facts=rtl_facts,
+                    request=dict(backend=backend, arena_mb=arena_mb, layout=layout, prepare=not numeric_flow),
+                    timeout=timeout,
+                )
+                routing = routed if routed is not None else None
+                if routing is None:
+                    result["routing"] = {"lane": "host", "routed": False, "reason": reason}
+            elif execution_provider is not None:
                 from merlin.targetgen.core_aten_device import (
                     load_execution_provider,
                     select_source_routing,
@@ -424,9 +449,7 @@ def full_call_adapter(
                 provider = load_execution_provider(target, execution_provider)
                 with selected_facts(target, rtl_facts) as facts:
                     prepare = getattr(provider, "prepare_bundle", None)
-                    if prepare is not None and not (capsule or {}).get("operation", {}).get("attributes", {}).get(
-                        "numeric_flow"
-                    ):
+                    if prepare is not None and not numeric_flow:
                         prepare(bundle, target=target, facts=facts)
                     lane = (capsule or {}).get("lane_expectation")
                     compile_products = None
@@ -495,17 +518,18 @@ def full_call_adapter(
                             raise ValueError("submitted backend did not route this capsule: " + reason)
                         if routing is None:
                             result["routing"] = {"lane": "host", "routed": False, "reason": reason}
-            build = spike_model.build(
-                bundle,
-                build_dir,
-                inputs_npz=bundle / "inputs.npz",
-                arena_mb=arena_mb,
-                dump_all_outputs=True,
-                backend=backend,
-                device=routing,
-                host_llvm_transform=_translate_candidate(llvm_mlir) if execution_provider is None else None,
-                **layout,
-            )
+            if not isolated:
+                build = spike_model.build(
+                    bundle,
+                    build_dir,
+                    inputs_npz=bundle / "inputs.npz",
+                    arena_mb=arena_mb,
+                    dump_all_outputs=True,
+                    backend=backend,
+                    device=routing,
+                    host_llvm_transform=_translate_candidate(llvm_mlir) if execution_provider is None else None,
+                    **layout,
+                )
             spike_isa = isa or spike_model.declared_isa(build["elf"])
             if not spike_isa:
                 raise ValueError("linked image declares no ISA for the functional simulator")
@@ -528,7 +552,8 @@ def full_call_adapter(
 
                 # A provider routes through a contraction catalog or a region offload; each build
                 # records its bindings in its own sidecar.
-                routed = (load_region_offload(build_dir) or load_sidecar(build_dir)).get("routed")
+                if not isolated:
+                    routed = (load_region_offload(build_dir) or load_sidecar(build_dir)).get("routed")
                 if not routed:
                     raise ValueError("submitted backend emitted no source-bound device calls")
                 with selected_facts(target, rtl_facts):
@@ -624,6 +649,52 @@ def full_call_adapter(
     run._merlin_on_board = lambda engine, board: rebound(engine=engine, board=board)
     run._merlin_simulator_engine = engine
     return run
+
+
+def _isolated_build(
+    *, target, bundle, build_dir, capsule, package_dir, execution_provider, rtl_facts, request, timeout
+):
+    """``(build, routed, reason)``: decide the route here from trusted inputs, build in the sandbox.
+
+    The returned image is copied into the private ``build_dir`` before anything executes it, so the
+    grader runs and grades exactly the bytes the sandbox produced and nothing the sandbox can still edit.
+    """
+    from merlin.targetgen.core_aten_capsules import load_private
+    from merlin.targetgen.core_aten_device import load_execution_provider, source_route
+    from merlin.targetgen.full_call_build import build_in_sandbox
+    from merlin.targetgen.rtl.facts import ensure_facts
+
+    if package_dir is None:
+        raise ValueError("source-bound execution requires the submitted package")
+    lane = capsule.get("lane_expectation")
+    report = load_private(capsule)["batch_map"]
+    plan = report.get("numeric_preparation") if report.get("numeric_policy") == "spec_int8" else None
+    provider = load_execution_provider(target, execution_provider)  # support code only; no submitted module
+    region_capable = callable(getattr(provider, "core_aten_offload", None))
+    route, reason = source_route(Path(bundle), report, plan, region_capable=region_capable)
+    work = Path(bundle).parent / f".isolated-{build_dir.name}"
+    reported = build_in_sandbox(
+        {**request, "target": target, "route": route, "reason": reason, "validate": lane == "any"}
+        | {"require_device": lane != "any"},
+        bundle=Path(bundle),
+        work=work,
+        package=Path(package_dir),
+        provider=Path(execution_provider),
+        facts=ensure_facts(target, explicit=rtl_facts),
+        denied=(Path(capsule["__dir__"]).parents[1],) if capsule.get("__dir__") else (),
+        timeout=timeout,
+    )
+    if reported.get("error"):
+        raise ValueError(reported["error"])
+    produced = work / "out" / "build"
+    elf = Path(reported["build"]["elf"])
+    if not elf.is_relative_to(produced) or any(p.is_symlink() for p in produced.rglob("*")):
+        raise ValueError("isolated build reported an image outside its own build directory")
+    if build_dir.exists():
+        shutil.rmtree(build_dir)
+    shutil.copytree(produced, build_dir)
+    build = {**reported["build"], "elf": str(build_dir / elf.relative_to(produced))}
+    return build, reported.get("routed"), reported.get("reason") or reason
 
 
 def _run_on_rtl(target: str, engine: str, build: Mapping, timeout, result: dict) -> dict:

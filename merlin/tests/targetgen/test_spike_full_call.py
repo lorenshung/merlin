@@ -106,7 +106,32 @@ def source_adapter(tmp_path, monkeypatch):
     monkeypatch.setattr(device_offload, "load_sidecar", lambda p: {"routed": ["source-bound-call"]})
     monkeypatch.setattr(core_aten_device, "executed_device_instructions", lambda *a: {"executed_instructions": 7})
     monkeypatch.setattr(core_aten_capsules, "load_private", lambda c: {"batch_map": {"cases": [{"case_id": "source"}]}})
+    monkeypatch.setattr("merlin.targetgen.rtl.facts.ensure_facts", lambda target, explicit=None: tmp_path / "facts")
+    monkeypatch.setattr("merlin.targetgen.full_call_build.build_in_sandbox", child_in_process)
     return spike_full_call.full_call_adapter("t", isa="declared-isa", execution_provider=provider_path), builds
+
+
+def child_in_process(request, *, bundle, work, package, provider, facts, denied, timeout):
+    """The sandboxed child's own code, run in-process so routing semantics stay unit-testable."""
+    import json
+
+    from merlin.targetgen import full_call_build
+
+    import shutil
+
+    shutil.rmtree(work, ignore_errors=True)  # a fresh work directory per build, as the sandbox runner makes
+    produced = work / "out" / "build"
+    produced.parent.mkdir(parents=True)
+    request = {**request, "bundle": str(bundle), "build": str(produced), "package": str(package)}
+    request |= {"provider": str(provider), "facts": str(facts), "result": str(work / "out" / "result.json")}
+    (work / "request.json").write_text(json.dumps(request))
+    full_call_build.main([str(work / "request.json")])
+    report = json.loads((work / "out" / "result.json").read_text())
+    if report.get("build"):
+        produced.mkdir(exist_ok=True)
+        (produced / "model.elf").write_bytes(b"image")
+        report["build"]["elf"] = str(produced / "model.elf")
+    return report
 
 
 def test_selected_transport_validates_inventory_before_host_fallback(tmp_path, monkeypatch, source_adapter):
@@ -347,7 +372,7 @@ def test_board_linked_oracle_grades_the_rtl_run_of_the_same_image(tmp_path, monk
     if available == "crashes":  # no RTL console: the tier is not run, never an RTL verdict
         assert result["derived_from_rtl"] is False and "before a console" in result["execution_error"]
     elif available:
-        assert executed == [(tmp_path / "board.elf", "vcs")]
+        assert executed == [(str(tmp_path / "vcs-build" / "model.elf"), "vcs")]  # the private copy is run
         assert result["output_bytes"] == [b"rtl"] and result["derived_from_rtl"] is True and result["cycles"] == 9
         assert result["lane"] == "device" and result["executed_instructions"] == 7
         assert result["provenance"]["simulator"] == {"execution_identity": "simv"}

@@ -176,6 +176,7 @@ def paths(
         ("full_call_capsules", "merlin.targetgen.core_aten_capsules"),
         ("full_call_runner", "merlin.targetgen.capsule_runner"),
         ("full_call_device", "merlin.targetgen.core_aten_device"),
+        ("full_call_isolated_build", "merlin.targetgen.full_call_build"),
         ("full_call_numeric_admission", "merlin.targetgen.core_aten_spec_int8"),
         ("full_call_lane_scores", "merlin.targetgen.capsule_common"),
         ("rtl_check_runner", "merlin.targetgen.rtl_check_runner"),

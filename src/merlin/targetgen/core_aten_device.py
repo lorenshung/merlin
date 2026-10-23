@@ -102,53 +102,63 @@ def routing_for_bundle(directory: Path, target: str, package: Path, provider, fa
     return routing, "provider selected source-bound contractions"
 
 
-def select_source_routing(
-    directory: Path, target: str, device_package: Path, provider, facts, report, plan, *, compile_products=None
-):
-    """``(routing, reason)`` for one prepared bundle: the Phase 0 lane's own device-route decision.
+def source_route(directory: Path, report, plan, *, region_capable: bool) -> tuple[str | None, str]:
+    """``(route, reason)`` the Phase 0 lane selects for one prepared bundle, from trusted inputs only.
 
-    ``plan`` is the bundle's spec_int8 numeric preparation (None for other policies). Admitted exact
-    non-contraction sites go to the provider's region offload; contractions go through
-    :func:`routing_for_bundle`. Shared with the full-call grader so both select the same route.
+    ``route`` is ``"region"`` (admitted exact non-contraction sites, for a provider with a region
+    offload), ``"contraction"`` (the provider's catalog routing decides) or None (host, with the reason).
+    ``plan`` is the bundle's spec_int8 numeric preparation (None for other policies). No provider or
+    submitted code runs here, so a grader can decide the route before isolating that code.
     """
-    routing, reason = None, "scalar mode"
-    region_offload = getattr(provider, "core_aten_offload", None)
+    if plan is None:
+        return "contraction", "provider routing"
     # Borrowed outputs need source-bound movement plus an exact
     # result-layout copy-out, rather than a disjoint result alone.
     bundled = [case for case in report["cases"] if case.get("status") == "bundled"]
     views = [case.get("overload") for case in bundled if (case.get("case") or {}).get("output_input_aliases")]
     from merlin.targetgen.materialized_movement import alias_materialization_valid
 
-    materialized_views = plan is not None and alias_materialization_valid(directory, report, plan)
-    if views and not materialized_views:
-        region_offload = None
+    materialized_views = alias_materialization_valid(directory, report, plan)
+    if plan["quantized_contractions"] or plan.get("native_contractions", 0):
+        return "contraction", "provider routing"
     if (
-        plan is not None
-        and not (plan["quantized_contractions"] or plan.get("native_contractions", 0))
-        and (plan.get("quantized_non_contraction_sites", 0) or plan.get("exact_dtype_sites", 0))
-        and callable(region_offload)
+        (plan.get("quantized_non_contraction_sites", 0) or plan.get("exact_dtype_sites", 0))
+        and region_capable
+        and (materialized_views or not views)
     ):
         # Admitted int8 non-contraction sites: the provider binds and lowers its own regions.
+        return "region", "provider region offload of admitted exact source regions"
+    if views and not materialized_views:
+        return None, f"view result aliases its input ({views[0]}); host metadata, not device work"
+    reason = "; ".join(dict.fromkeys(reason for site in plan["sites"] for reason in site["reasons"]))
+    return None, reason or plan.get(
+        "host_reason"
+    ) or "no contraction in captured source; original host execution retained"
+
+
+def bind_source_route(
+    route, reason, directory: Path, target: str, device_package: Path, provider, facts, *, compile_products=None
+):
+    """``(routing, reason)``: the provider's DeviceRouting for a route :func:`source_route` selected."""
+    if route == "region":
         if compile_products is not None:
             return None, "provider region offload does not consume candidate product transport"
-        routing = region_routing_for_bundle(target, device_package, region_offload)
-        reason = "provider region offload of admitted exact source regions"
-    elif (
-        plan is not None
-        and views
-        and not materialized_views
-        and not (plan["quantized_contractions"] or plan.get("native_contractions", 0))
-    ):
-        reason = f"view result aliases its input ({views[0]}); host metadata, not device work"
-    elif plan is not None and not (plan["quantized_contractions"] or plan.get("native_contractions", 0)):
-        reason = "; ".join(dict.fromkeys(reason for site in plan["sites"] for reason in site["reasons"]))
-        reason = (
-            reason or plan.get("host_reason") or "no contraction in captured source; original host execution retained"
-        )
-    else:
+        return region_routing_for_bundle(target, device_package, provider.core_aten_offload), reason
+    if route == "contraction":
         options = {} if compile_products is None else {"compile_products": compile_products}
-        routing, reason = routing_for_bundle(directory, target, device_package, provider, facts, **options)
-    return routing, reason
+        return routing_for_bundle(directory, target, device_package, provider, facts, **options)
+    return None, reason
+
+
+def select_source_routing(
+    directory: Path, target: str, device_package: Path, provider, facts, report, plan, *, compile_products=None
+):
+    """``(routing, reason)`` for one prepared bundle: the Phase 0 lane's own device-route decision."""
+    region_capable = callable(getattr(provider, "core_aten_offload", None))
+    route, reason = source_route(directory, report, plan, region_capable=region_capable)
+    return bind_source_route(
+        route, reason, directory, target, device_package, provider, facts, compile_products=compile_products
+    )
 
 
 def submission_interface(provider: Path) -> list[dict]:
