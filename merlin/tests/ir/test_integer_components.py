@@ -22,7 +22,9 @@ def module(dtype, expression):
 
 def evaluate(module, arrays):
     """Small integer tensor interpreter over storage words; all generated tensors have identity maps."""
-
+    for op in module.walk():
+        assert op.name != "arith.cmpi" or op.predicate.value.data in (1, 2, 8)
+        assert op.name != "arith.cmpf" or (str(op.operands[0].type), op.predicate.value.data) == ("f16", 4)
     function = next(op for op in module.walk() if op.name == "func.func")
     values = {
         arg: np.frompyfunc(lambda v, t=arg.type.element_type: word(v, t), 1, 1)(np.array(a, dtype=object))

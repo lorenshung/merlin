@@ -1,14 +1,20 @@
 # ruff: noqa: E501 -- MLIR fixtures retain one operation per line
 """Exact bit checks for signed-zero and separable invalid-result epilogues."""
 
+import mlir_fixtures
 import pytest
-from mlir_fixtures import forward, generic, run_block
+from mlir_fixtures import forward, generic
 
 from merlin.llvmlower.fixed_point_ir import FORMAT
 from merlin.llvmlower.floating_components import rewrite_floating_components
 from merlin.llvmlower.ieee_aggregate import propagation_source
 from merlin.llvmlower.ieee_zero_division import rewrite_zero_division
 from merlin.targetgen.core_aten_components import unlowered_data_reductions
+
+
+def run_block(block, arguments):
+    assert all(op.predicate.value.data == 1 for op in block.ops if op.name == "arith.cmpf")  # ordered equal
+    return mlir_fixtures.run_block(block, arguments)
 
 
 def module(token, operation, divisor=None):

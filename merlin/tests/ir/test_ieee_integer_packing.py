@@ -33,6 +33,7 @@ def test_exact_packing_has_no_out_of_range_shift(dtype, width, exponent, values)
         return op.results[0]
 
     result = pack_ieee_integer(argument, exponent, IntegerType(width), emit)
+    assert {op.predicate.value.data for op in operations if op.name == "arith.cmpi"} <= {0, 1, 5}
     for value in values:
         raw = int.from_bytes(struct.pack("<d" if dtype == "f64" else "<f", value), "little")
         data = {argument: raw}
