@@ -402,7 +402,7 @@ def full_call_adapter(
         from merlin.targetgen.core_aten_provenance import batch_provenance
 
         bundle = Path(bundle)
-        result: dict[str, Any] = {"engine": engine, "derived_from_rtl": board is not None}
+        result: dict[str, Any] = {"engine": engine, "derived_from_rtl": False}
         build_dir = bundle / ("spike-build" if board is None else f"{engine}-build")
         trace_name = "spike-trace.log" if board is None else f"{engine}-spike-trace.log"
         layout = {key: int(value) for key, value in (board or {}).items() if value is not None}
@@ -562,10 +562,6 @@ def full_call_adapter(
                 execution_error=None,
             )
         except Exception as exc:  # noqa: BLE001 -- execution refusal is a verdict input
-            from merlin.targetgen.capsule_runner import OracleUnavailable
-
-            if isinstance(exc, OracleUnavailable):  # the RTL never ran: not run, never a failed program
-                result["derived_from_rtl"] = False
             result.update(
                 output_bytes=None,
                 output_shapes=None,
@@ -651,6 +647,8 @@ def _run_on_rtl(target: str, engine: str, build: Mapping, timeout, result: dict)
             "oracle": {},
         },
     )
+    # Only a console the RTL actually produced makes this an RTL verdict; anything earlier is not run.
+    result["derived_from_rtl"] = True
     run = spike_model.parse_console(observed["console"])
     if build.get("build_hash") is not None and run.get("metrics", {}).get("build_hash") != build["build_hash"]:
         raise RuntimeError(f"{engine} console build hash does not match the linked executable")

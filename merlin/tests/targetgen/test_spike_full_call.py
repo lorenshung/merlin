@@ -307,7 +307,7 @@ def test_admitted_non_contraction_sites_take_the_provider_region_route(tmp_path,
     assert D.select_source_routing(tmp_path, "t", tmp_path, provider, {}, report, None)[0] == "catalog"
 
 
-@pytest.mark.parametrize("available", [True, False])
+@pytest.mark.parametrize("available", [True, False, "crashes"])
 def test_board_linked_oracle_grades_the_rtl_run_of_the_same_image(tmp_path, monkeypatch, source_adapter, available):
     from merlin.runtime.backends import base, spike_model
     from merlin.targetgen import core_aten_device, rtl_simulator_execution
@@ -322,9 +322,11 @@ def test_board_linked_oracle_grades_the_rtl_run_of_the_same_image(tmp_path, monk
 
     def run_elf(elf, simulator, timeout):
         executed.append((elf, simulator))
+        if available == "crashes":
+            raise RuntimeError("simulator exited before a console")
         return "rtl console"
 
-    backend = SimpleNamespace(available=lambda engine: available, run_elf=run_elf)
+    backend = SimpleNamespace(available=lambda engine: bool(available), run_elf=run_elf)
     monkeypatch.setattr(spike_model, "build", build)
     monkeypatch.setattr(base, "get_backend", lambda target: backend)
     monkeypatch.setattr(rtl_simulator_execution, "verify_selected", lambda *a: {"execution_identity": "simv"})
@@ -342,7 +344,9 @@ def test_board_linked_oracle_grades_the_rtl_run_of_the_same_image(tmp_path, monk
         bundle=tmp_path, llvm_mlir="", package_dir=tmp_path, capsule={"scored": True, "lane_expectation": "device"}
     )
     assert layouts == [{**board, "arena_mb": 96}]
-    if available:
+    if available == "crashes":  # no RTL console: the tier is not run, never an RTL verdict
+        assert result["derived_from_rtl"] is False and "before a console" in result["execution_error"]
+    elif available:
         assert executed == [(tmp_path / "board.elf", "vcs")]
         assert result["output_bytes"] == [b"rtl"] and result["derived_from_rtl"] is True and result["cycles"] == 9
         assert result["lane"] == "device" and result["executed_instructions"] == 7
