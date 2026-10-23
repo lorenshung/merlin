@@ -102,6 +102,55 @@ def routing_for_bundle(directory: Path, target: str, package: Path, provider, fa
     return routing, "provider selected source-bound contractions"
 
 
+def select_source_routing(
+    directory: Path, target: str, device_package: Path, provider, facts, report, plan, *, compile_products=None
+):
+    """``(routing, reason)`` for one prepared bundle: the Phase 0 lane's own device-route decision.
+
+    ``plan`` is the bundle's spec_int8 numeric preparation (None for other policies). Admitted exact
+    non-contraction sites go to the provider's region offload; contractions go through
+    :func:`routing_for_bundle`. Shared with the full-call grader so both select the same route.
+    """
+    routing, reason = None, "scalar mode"
+    region_offload = getattr(provider, "core_aten_offload", None)
+    # Borrowed outputs need source-bound movement plus an exact
+    # result-layout copy-out, rather than a disjoint result alone.
+    bundled = [case for case in report["cases"] if case.get("status") == "bundled"]
+    views = [case.get("overload") for case in bundled if (case.get("case") or {}).get("output_input_aliases")]
+    from merlin.targetgen.materialized_movement import alias_materialization_valid
+
+    materialized_views = plan is not None and alias_materialization_valid(directory, report, plan)
+    if views and not materialized_views:
+        region_offload = None
+    if (
+        plan is not None
+        and not (plan["quantized_contractions"] or plan.get("native_contractions", 0))
+        and (plan.get("quantized_non_contraction_sites", 0) or plan.get("exact_dtype_sites", 0))
+        and callable(region_offload)
+    ):
+        # Admitted int8 non-contraction sites: the provider binds and lowers its own regions.
+        if compile_products is not None:
+            return None, "provider region offload does not consume candidate product transport"
+        routing = region_routing_for_bundle(target, device_package, region_offload)
+        reason = "provider region offload of admitted exact source regions"
+    elif (
+        plan is not None
+        and views
+        and not materialized_views
+        and not (plan["quantized_contractions"] or plan.get("native_contractions", 0))
+    ):
+        reason = f"view result aliases its input ({views[0]}); host metadata, not device work"
+    elif plan is not None and not (plan["quantized_contractions"] or plan.get("native_contractions", 0)):
+        reason = "; ".join(dict.fromkeys(reason for site in plan["sites"] for reason in site["reasons"]))
+        reason = (
+            reason or plan.get("host_reason") or "no contraction in captured source; original host execution retained"
+        )
+    else:
+        options = {} if compile_products is None else {"compile_products": compile_products}
+        routing, reason = routing_for_bundle(directory, target, device_package, provider, facts, **options)
+    return routing, reason
+
+
 def region_routing_for_bundle(target: str, package: Path, region_offload):
     """A DeviceRouting that hands the prepared program to the provider's own region offload."""
     from merlin.llvmlower import toolchain
@@ -279,76 +328,34 @@ def run_spike_bundle(
                     preparation = prepare(directory, target=target, facts=facts)
                     report["source_preparation"] = preparation
                     bundled[0]["source_preparation"] = preparation
-                region_offload = getattr(provider, "core_aten_offload", None)
-                # Borrowed outputs need source-bound movement plus an exact
-                # result-layout copy-out, rather than a disjoint result alone.
-                views = [
-                    case.get("overload") for case in bundled if (case.get("case") or {}).get("output_input_aliases")
-                ]
-                from merlin.targetgen.materialized_movement import alias_materialization_valid
-
-                materialized_views = numeric_policy == "spec_int8" and alias_materialization_valid(
-                    directory, report, report["numeric_preparation"]
+                routing, reason = select_source_routing(
+                    directory,
+                    target,
+                    device_package,
+                    provider,
+                    facts,
+                    report,
+                    report["numeric_preparation"] if numeric_policy == "spec_int8" else None,
                 )
-                if views and not materialized_views:
-                    region_offload = None
-                if (
-                    numeric_policy == "spec_int8"
-                    and not (
-                        report["numeric_preparation"]["quantized_contractions"]
-                        or report["numeric_preparation"].get("native_contractions", 0)
-                    )
-                    and (
-                        report["numeric_preparation"].get("quantized_non_contraction_sites", 0)
-                        or report["numeric_preparation"].get("exact_dtype_sites", 0)
-                    )
-                    and callable(region_offload)
+                if numeric_policy == "int8_w8a8" and report.get("numeric_preparation", {}).get(
+                    "quantized_contractions"
                 ):
-                    # Admitted int8 non-contraction sites: the provider binds and lowers its own regions.
-                    routing = region_routing_for_bundle(target, device_package, region_offload)
-                    reason = "provider region offload of admitted exact source regions"
-                elif (
-                    numeric_policy == "spec_int8"
-                    and views
-                    and not materialized_views
-                    and not (
-                        report["numeric_preparation"]["quantized_contractions"]
-                        or report["numeric_preparation"].get("native_contractions", 0)
-                    )
-                ):
-                    reason = f"view result aliases its input ({views[0]}); host metadata, not device work"
-                elif numeric_policy == "spec_int8" and not (
-                    report["numeric_preparation"]["quantized_contractions"]
-                    or report["numeric_preparation"].get("native_contractions", 0)
-                ):
-                    plan = report["numeric_preparation"]
-                    reason = "; ".join(dict.fromkeys(reason for site in plan["sites"] for reason in site["reasons"]))
-                    reason = (
-                        reason
-                        or plan.get("host_reason")
-                        or "no contraction in captured source; original host execution retained"
-                    )
-                else:
-                    routing, reason = routing_for_bundle(directory, target, device_package, provider, facts)
-                    if numeric_policy == "int8_w8a8" and report.get("numeric_preparation", {}).get(
-                        "quantized_contractions"
-                    ):
-                        from dataclasses import replace
+                    from dataclasses import replace
 
-                        from merlin.targetgen.core_aten_numeric import checked_w8a8_builder
+                    from merlin.targetgen.core_aten_numeric import checked_w8a8_builder
 
-                        if routing is None or routing.catalog_builder is None:
-                            raise ValueError("W8A8 requires source-bound provider primitive dispatch evidence")
-                        routing = replace(
-                            routing,
-                            catalog_builder=checked_w8a8_builder(
-                                routing.catalog_builder,
-                                target=target,
-                                package=device_package,
-                                directory=directory,
-                                report=report,
-                            ),
-                        )
+                    if routing is None or routing.catalog_builder is None:
+                        raise ValueError("W8A8 requires source-bound provider primitive dispatch evidence")
+                    routing = replace(
+                        routing,
+                        catalog_builder=checked_w8a8_builder(
+                            routing.catalog_builder,
+                            target=target,
+                            package=device_package,
+                            directory=directory,
+                            report=report,
+                        ),
+                    )
                 options = provider.runner_options()
             for case in bundled:
                 case["routing"] = {

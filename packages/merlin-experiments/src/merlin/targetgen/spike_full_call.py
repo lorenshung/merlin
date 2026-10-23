@@ -403,7 +403,7 @@ def full_call_adapter(
             if execution_provider is not None:
                 from merlin.targetgen.core_aten_device import (
                     load_execution_provider,
-                    routing_for_bundle,
+                    select_source_routing,
                     selected_facts,
                 )
 
@@ -456,9 +456,23 @@ def full_call_adapter(
                     if (capsule or {}).get("scored", True) or lane == "any":
                         if package_dir is None:
                             raise ValueError("source-bound execution requires the submitted package")
-                        routing_options = {} if compile_products is None else {"compile_products": compile_products}
-                        routing, reason = routing_for_bundle(
-                            bundle, target, Path(package_dir), provider, facts, **routing_options
+                        from merlin.targetgen.core_aten_capsules import load_private
+
+                        # The Phase 0 lane's own route: admitted exact non-contraction sites go to the
+                        # provider's region offload, contractions to its catalog.
+                        report = load_private(capsule)["batch_map"]
+                        plan = (
+                            report.get("numeric_preparation") if report.get("numeric_policy") == "spec_int8" else None
+                        )
+                        routing, reason = select_source_routing(
+                            bundle,
+                            target,
+                            Path(package_dir),
+                            provider,
+                            facts,
+                            report,
+                            plan,
+                            compile_products=compile_products,
                         )
                         # Only an ordinary structural/provider decline may fall
                         # back. Exceptions from source/catalog/binding checks
@@ -490,10 +504,15 @@ def full_call_adapter(
             if build.get("build_hash") is not None and run.get("metrics", {}).get("build_hash") != build["build_hash"]:
                 raise RuntimeError("console build hash does not match the linked executable")
             if routing is not None:
+                from merlin.llvmlower.device_build import load_region_offload
                 from merlin.llvmlower.device_offload import load_sidecar
                 from merlin.targetgen.core_aten_device import executed_device_instructions, selected_facts
 
-                if not load_sidecar(bundle / "spike-build").get("routed"):
+                # A provider routes through a contraction catalog or a region offload; each build
+                # records its bindings in its own sidecar.
+                build_dir = bundle / "spike-build"
+                routed = (load_region_offload(build_dir) or load_sidecar(build_dir)).get("routed")
+                if not routed:
                     raise ValueError("submitted backend emitted no source-bound device calls")
                 with selected_facts(target, rtl_facts):
                     evidence = executed_device_instructions(trace, Path(build["elf"]), target)
@@ -508,7 +527,7 @@ def full_call_adapter(
                     lane="device",
                     routed=True,
                     target=target,
-                    routed_operations=load_sidecar(bundle / "spike-build")["routed"],
+                    routed_operations=routed,
                     execution_evidence=evidence,
                 )
                 if evidence["executed_instructions"] < 1:

@@ -264,3 +264,44 @@ def test_optional_fallback_requires_independent_validation(tmp_path, monkeypatch
         bundle=tmp_path, llvm_mlir="", package_dir=tmp_path, capsule={"scored": True, "lane_expectation": "any"}
     )
     assert result["execution_error"] and not builds and result["output_bytes"] is None
+
+
+@pytest.mark.parametrize("sidecar", ["catalog", "region", "none"])
+def test_either_build_sidecar_is_device_call_evidence(tmp_path, monkeypatch, source_adapter, sidecar):
+    from merlin.llvmlower import device_build, device_offload
+    from merlin.targetgen import core_aten_device
+
+    adapter, builds = source_adapter
+    monkeypatch.setattr(core_aten_device, "routing_for_bundle", lambda *a: (object(), "bound"))
+    monkeypatch.setattr(
+        device_offload, "load_sidecar", lambda p: {"routed": ["catalog"]} if sidecar == "catalog" else {}
+    )
+    monkeypatch.setattr(
+        device_build, "load_region_offload", lambda p: {"routed": ["region"]} if sidecar == "region" else {}
+    )
+    result = adapter.run_full_call(
+        bundle=tmp_path, llvm_mlir="", package_dir=tmp_path, capsule={"scored": True, "lane_expectation": "device"}
+    )
+    if sidecar == "none":
+        assert "no source-bound device calls" in result["execution_error"]
+    else:
+        assert result["execution_error"] is None and result["routing"]["routed_operations"] == [sidecar]
+
+
+def test_admitted_non_contraction_sites_take_the_provider_region_route(tmp_path, monkeypatch):
+    from merlin.targetgen import core_aten_device as D
+
+    provider = SimpleNamespace(core_aten_offload=lambda *a, **k: None)
+    report = {"cases": [{"status": "bundled", "case": {}}]}
+    plan = {"quantized_contractions": 0, "exact_dtype_sites": 1, "sites": []}
+    monkeypatch.setattr(D, "routing_for_bundle", lambda *a, **k: pytest.fail("no contraction to catalog"))
+    routing, reason = D.select_source_routing(tmp_path, "t", tmp_path, provider, {}, report, plan)
+    assert routing.region_offload is not None and "region offload" in reason
+    routing, reason = D.select_source_routing(tmp_path, "t", tmp_path, provider, {}, report, plan, compile_products=1)
+    assert routing is None and "candidate product transport" in reason
+    monkeypatch.setattr(D, "routing_for_bundle", lambda *a, **k: ("catalog", "bound"))
+    assert (
+        D.select_source_routing(tmp_path, "t", tmp_path, provider, {}, report, {**plan, "quantized_contractions": 2})[0]
+        == "catalog"
+    )
+    assert D.select_source_routing(tmp_path, "t", tmp_path, provider, {}, report, None)[0] == "catalog"
