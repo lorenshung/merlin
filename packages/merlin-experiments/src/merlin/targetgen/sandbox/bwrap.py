@@ -23,6 +23,7 @@ import os
 import shutil
 import stat
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from itertools import chain
 from pathlib import Path
 
@@ -37,6 +38,7 @@ _HIDE_DEST_OPS = ("--tmpfs",)  # single-arg-dest hide ops
 _DEVNULL = "/dev/null"
 _SNAPSHOT_DIR = "bundle_inputs"
 _SNAPSHOT_COMPLETE = "snapshot.json"
+_VIEW_DIR = "bundle_views"
 
 
 def path_kind(p: Path) -> str:
@@ -607,13 +609,13 @@ def _make_snapshot_writable(root: Path) -> None:
 
 
 def remove_bundle_snapshot(ws: Path) -> None:
-    """Remove a generated snapshot after restoring owner write permission."""
-    root = bundle_snapshot_root(ws)
-    if root.is_symlink():
-        raise RuntimeError(f"refusing to remove symlinked bundle snapshot: {root}")
-    if root.exists():
-        _make_snapshot_writable(root)
-        shutil.rmtree(root)
+    """Remove a generated snapshot and its answer-free views after restoring owner write permission."""
+    for root in (bundle_snapshot_root(ws), ws.parent / _VIEW_DIR):
+        if root.is_symlink():
+            raise RuntimeError(f"refusing to remove symlinked bundle snapshot: {root}")
+        if root.exists():
+            _make_snapshot_writable(root)
+            shutil.rmtree(root)
 
 
 def materialize_bundle_inputs(
@@ -1071,6 +1073,10 @@ def _mounts(argv: list[str]) -> list[tuple[str, str, str]]:
     return ops
 
 
+class _UnsettledPath(RuntimeError):
+    """Guest symlink traversal did not settle on one serving bind."""
+
+
 class _MountVisibility:
     """One-call mount index; never caches filesystem visibility or mutable argv.
 
@@ -1116,14 +1122,17 @@ class _MountVisibility:
             return Path(os.path.normpath(str(rewritten.joinpath(*parts[index + 1 :]))))
         return None
 
-    def is_exposed(self, path: Path) -> bool:
+    def serving(self, path: Path) -> tuple[Path, Path] | None:
+        """``(bind source, source path)`` of the bind that serves ``path``; ``None`` when hidden.
+
+        Raises :class:`_UnsettledPath` when guest symlinks cycle or do not settle.
+        """
         current = path
         seen: set[Path] = set()
-        # The same bounded traversal as filesystem symlink resolution; cycles
-        # and unstable paths fail closed as exposed, never as a clean mask.
+        # The same bounded traversal as filesystem symlink resolution.
         for _ in range(41):
             if current in seen:
-                return True
+                break
             seen.add(current)
             best = None
             for ancestor in (current, *current.parents):
@@ -1131,23 +1140,31 @@ class _MountVisibility:
                 if record is not None and (best is None or record[:2] >= best[:2]):
                     best = record
             if best is None or best[2] == "hide":
-                return False
+                return None
             _, _, _, src, dest = best
             relative = current.relative_to(dest)
             alias = self._source_alias(Path(src), Path(dest), relative)
             if alias is not None:
                 current = alias
                 continue
-            # A frozen snapshot may be mounted over a live tree. Test the
-            # effective source bytes, not the destination's host contents.
-            mapped = Path(src) / relative
-            try:
-                return mapped.exists()
-            except PermissionError:
-                return True  # locked-but-present still exposes content
-            except OSError:
-                return False
-        return True
+            return Path(src), Path(src) / relative
+        raise _UnsettledPath(path)
+
+    def is_exposed(self, path: Path) -> bool:
+        try:
+            served = self.serving(path)
+        except _UnsettledPath:
+            return True  # cycles and unstable paths fail closed as exposed, never as a clean mask
+        if served is None:
+            return False
+        # A frozen snapshot may be mounted over a live tree. Test the
+        # effective source bytes, not the destination's host contents.
+        try:
+            return served[1].exists()
+        except PermissionError:
+            return True  # locked-but-present still exposes content
+        except OSError:
+            return False
 
 
 def is_exposed(argv: list[str], path: Path) -> bool:
@@ -1181,6 +1198,154 @@ def apply_answer_masks(argv: list[str], surfaces: list[AnswerSurface]) -> list[s
             out += ["--tmpfs", str(s.path)]
         visibility.append("hide", "", str(s.path))
     return out
+
+
+def answer_free_views(
+    argv: list[str], surfaces: list[AnswerSurface], ws: Path
+) -> tuple[list[str], list[AnswerSurface]]:
+    """Serve each frozen grant that holds exposed answer surfaces from a mirror without them.
+
+    One overlay per surface does not scale: bwrap caps its whole argument list, ``--args`` files
+    included, at 9,000 (``MAX_ARGS``), and a release corpus carries an answer file in every capsule
+    directory beside the files the agent must read. The snapshot is host-owned, so the grant is
+    instead served from a hard-link mirror of its frozen tree that omits those surfaces: they are
+    absent from the agent's view rather than overlaid, at no argument per surface.
+
+    Returns the rewritten argv and the surfaces the mask pass must cover: the caller's plus, for every
+    surface below a mirrored source, its twin in the mirror, which projects through the rewritten bind
+    to the same agent path the frozen bind exposed. A surface that a later mount needs as its mount
+    point stays in the mirror and keeps its overlay. A source covered by a surface, or holding one that
+    declares a public subtree, is never mirrored: its projection depends on the source path itself.
+    """
+    root = bundle_snapshot_root(ws).absolute()
+    marker = root / _SNAPSHOT_COMPLETE
+    if marker.is_symlink() or not marker.is_file():
+        return argv, surfaces
+    mounts = _mounts(argv)
+    visibility = _MountVisibility(argv, mounts)
+    created = [argv[i + 1] for i in range(len(argv) - 1) if argv[i] in ("--dir", "--chdir")]
+    mount_points = {
+        path for dest in [*created, *(d for _, _, d in mounts)] for path in (Path(dest), *Path(dest).parents)
+    }
+    destinations: dict[Path, list[Path]] = {}
+    for state, src, dest in mounts:
+        if state == "expose":
+            destinations.setdefault(Path(src), []).append(Path(dest))
+    # The agent names of frozen surfaces: the snapshot holds no symlinks, so its binds project
+    # lexically. A surface spelled any other way is not mirrored and keeps its overlay.
+    projected = list(surfaces)
+    for surface in surfaces:
+        for source in surface.path.parents:
+            if source in destinations and source.is_relative_to(root):
+                relative = surface.path.relative_to(source)
+                projected += [replace(surface, path=dest / relative) for dest in destinations[source]]
+    # Only a directory surface can cover a source or hold a public subtree; check both spellings.
+    spelled = [
+        (surface, path)
+        for surface in projected
+        if surface.kind == "dir"
+        for path in {surface.path.absolute(), surface.path.resolve()}
+    ]
+    covering = {path for _, path in spelled}
+    fixed = {ancestor for surface, path in spelled if surface.grantable for ancestor in (path, *path.parents)}
+    blocked: dict[Path, bool] = {}
+    omitted: dict[Path, set[Path]] = {}
+    for surface in projected:
+        if surface.grantable:
+            continue
+        try:
+            served = visibility.serving(surface.path)
+        except _UnsettledPath:
+            continue
+        if served is None or served[0] == served[1] or not served[0].is_relative_to(root):
+            continue
+        source, frozen = served
+        if source not in blocked:
+            spellings = {source, source.resolve()}
+            blocked[source] = any(
+                spelling in fixed or any(path in covering for path in (spelling, *spelling.parents))
+                for spelling in spellings
+            )
+        if blocked[source]:
+            continue
+        relative = frozen.relative_to(source)
+        if path_kind(frozen) == "missing" or any(dest / relative in mount_points for dest in destinations[source]):
+            continue
+        omitted.setdefault(source, set()).add(relative)
+    if not omitted:
+        return argv, surfaces
+    salt = hashlib.sha256(marker.read_bytes()).hexdigest()
+    views = {source: _answer_free_view(source, names, ws.parent / _VIEW_DIR, salt) for source, names in omitted.items()}
+    out = list(argv)
+    i = 0
+    while i < len(out):  # the same walk as _mounts, so exactly the parsed binds are rewritten
+        if out[i] in _EXPOSE_OPS and i + 2 < len(out):
+            if out[i + 1] != _DEVNULL and Path(out[i + 1]) in views:
+                out[i + 1] = str(views[Path(out[i + 1])])
+            i += 3
+        elif (out[i] in _HIDE_DEST_OPS or out[i] in ("--dev", "--proc")) and i + 1 < len(out):
+            i += 2
+        else:
+            i += 1
+    twins = [
+        AnswerSurface(surface.label, views[source] / surface.path.relative_to(source), surface.kind, surface.origin)
+        for surface in projected
+        for source in views
+        if surface.path.is_relative_to(source) and surface.path != source
+    ]
+    return out, [*surfaces, *twins]
+
+
+def _answer_free_view(source: Path, omitted: set[Path], views: Path, salt: str) -> Path:
+    """A read-only hard-link mirror of one frozen directory without ``omitted`` (relative paths).
+
+    The name binds the snapshot marker, the source and the omitted set, so a view is built once per
+    run and policy; a link the filesystem refuses becomes a read-only copy of the same bytes.
+    """
+    key = hashlib.sha256("\0".join([salt, str(source), *sorted(p.as_posix() for p in omitted)]).encode()).hexdigest()
+    view = views / key[:32]
+    if view.is_dir() and not view.is_symlink():
+        return view
+    views.mkdir(mode=0o700, exist_ok=True)
+    pending = views / f".{view.name}.{os.getpid()}.pending"
+    if pending.exists():
+        _make_snapshot_writable(pending)
+        shutil.rmtree(pending)
+    modes: list[tuple[Path, int]] = []
+
+    def fail(error: OSError) -> None:
+        raise error
+
+    try:
+        for directory, dirs, files in os.walk(source, onerror=fail):
+            here = Path(directory)
+            relative = here.relative_to(source)
+            target = pending / relative
+            target.mkdir(mode=0o700)
+            modes.append((target, here.stat().st_mode & 0o7555))
+            dirs[:] = [name for name in dirs if relative / name not in omitted]
+            for name in [*dirs, *files]:
+                if (here / name).is_symlink():
+                    raise RuntimeError(f"bundle input snapshot contains a symlink: {here / name}")
+            for name in files:
+                if relative / name in omitted:
+                    continue
+                try:
+                    os.link(here / name, target / name)
+                except OSError:
+                    shutil.copy2(here / name, target / name)
+                    (target / name).chmod((target / name).stat().st_mode & ~0o222)
+        for path, mode in reversed(modes):
+            path.chmod(mode)
+        pending.rename(view)
+    except BaseException:
+        if pending.exists():
+            _make_snapshot_writable(pending)
+            shutil.rmtree(pending)
+        if view.is_dir() and not view.is_symlink():
+            return view  # a concurrent caller published the same view first
+        raise
+    return view
 
 
 def _bind_alias(private: Path, kind: str, source: Path, destination: Path) -> tuple[Path, str] | None:
@@ -1338,7 +1503,8 @@ def apply_final_answer_masks(
     Callers first compose their runtime/toolchain/provider binds and reassert their
     frozen bundle. This shared final policy examines that complete mount list:
     canonical-path masks alone cannot withhold a private input mounted under a
-    different name. No grants or snapshot authority are created here.
+    different name. No grants or snapshot authority are created here: a frozen grant holding
+    answer surfaces is re-served from a mirror of its own bytes without them (``answer_free_views``).
     """
     from merlin.targetgen.sandbox.host_surfaces import host_input_surfaces
 
@@ -1359,7 +1525,8 @@ def apply_final_answer_masks(
         else _frozen_answer_surfaces(ws, bundle, te, answers, (repo or repo_root()).absolute())
     )
     support = [surface for surface in [*answers, *frozen_support] if surface.origin == "backend"]
-    result = apply_answer_masks(argv, [*answers, *frozen_support, *frozen_answers, *private])
+    argv, surfaces = answer_free_views(argv, [*answers, *frozen_support, *frozen_answers, *private], ws)
+    result = apply_answer_masks(argv, surfaces)
     if coverage_gap(result, support):
         raise RuntimeError("selected support package remains exposed after final masking")
     # The host-child context names private source authority. Provider/runtime
