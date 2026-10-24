@@ -1211,16 +1211,31 @@ def _support_bind_surfaces(mounts: list[tuple[str, str, str]], surfaces: list[An
         if path not in known:
             result.setdefault(path, surface)
 
+    # A bind projects a surface only when one of its source spellings or its destination is the
+    # surface's path, an ancestor or a descendant of it. Index those relations once per call, so a
+    # release corpus's ~30k surfaces each visit their few related binds (in mount order) rather than
+    # resolving and comparing every bind.
+    binds = []
+    at: dict[Path, set[int]] = {}
+    below: dict[Path, set[int]] = {}
+    for state, raw_source, raw_destination in mounts:
+        if state == "expose":
+            source, destination = Path(raw_source).absolute(), Path(raw_destination)
+            spellings = {source, source.resolve()}
+            for key in (destination, *spellings):
+                at.setdefault(key, set()).add(len(binds))
+                for ancestor in key.parents:
+                    below.setdefault(ancestor, set()).add(len(binds))
+            binds.append((source, destination, spellings))
     for surface in surfaces:
         for private in {surface.path.absolute(), surface.path.resolve()}:
             exemptions = tuple(private / sub for sub in surface.grantable)
             project(private, AnswerSurface(surface.label, private, surface.kind, surface.origin, surface.grantable))
-            for state, raw_source, raw_destination in mounts:
-                if state != "expose":
-                    continue
-                source, destination = Path(raw_source).absolute(), Path(raw_destination)
+            related = set(below.get(private, ()))
+            related.update(index for path in (private, *private.parents) for index in at.get(path, ()))
+            for source, destination, spellings in (binds[index] for index in sorted(related)):
                 aliases = []
-                for resolved in {source, source.resolve()}:
+                for resolved in spellings:
                     if any(resolved == public or public in resolved.parents for public in exemptions):
                         continue
                     translated = _bind_alias(private, surface.kind, resolved, destination)
