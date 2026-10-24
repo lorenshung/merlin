@@ -22,6 +22,7 @@ import json
 import os
 import shutil
 import stat
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from itertools import chain
@@ -39,6 +40,7 @@ _DEVNULL = "/dev/null"
 _SNAPSHOT_DIR = "bundle_inputs"
 _SNAPSHOT_COMPLETE = "snapshot.json"
 _VIEW_DIR = "bundle_views"
+_VIEW_RECORD_SUFFIX = ".source"
 
 
 def path_kind(p: Path) -> str:
@@ -1179,6 +1181,7 @@ def coverage_gap(argv: list[str], surfaces: list[AnswerSurface]) -> list[AnswerS
     """The answer surfaces STILL reachable under ``argv`` — the drift/cheat guard. Empty == full mask."""
     mounts = _mounts(argv)  # one parse per batch, shared by the index and the bind projection
     visibility = _MountVisibility(argv, mounts)
+    surfaces = [*surfaces, *_view_twins(_view_sources(mounts), surfaces)]
     return [s for s in _support_bind_surfaces(mounts, surfaces) if visibility.is_exposed(s.path)]
 
 
@@ -1189,6 +1192,7 @@ def apply_answer_masks(argv: list[str], surfaces: list[AnswerSurface]) -> list[s
     out = list(argv)
     mounts = _mounts(out)  # one parse per batch, shared by the index and the bind projection
     visibility = _MountVisibility(out, mounts)
+    surfaces = [*surfaces, *_view_twins(_view_sources(mounts), surfaces)]
     for s in _support_bind_surfaces(mounts, surfaces):
         if not visibility.is_exposed(s.path):
             continue
@@ -1200,9 +1204,103 @@ def apply_answer_masks(argv: list[str], surfaces: list[AnswerSurface]) -> list[s
     return out
 
 
-def answer_free_views(
-    argv: list[str], surfaces: list[AnswerSurface], ws: Path
-) -> tuple[list[str], list[AnswerSurface]]:
+def _view_sources(mounts: list[tuple[str, str, str]]) -> dict[Path, Path]:
+    """The answer-free views these binds serve, each with the frozen source it stands in for.
+
+    A view records what it was built from beside itself, never inside, so the agent does not see the
+    record. Masks and proofs read it back from the argv alone: a caller holding only the frozen surfaces
+    still reaches the bytes a rewritten bind serves, wherever that bind puts them. A record counts only
+    when it reproduces the view's name; a view without one is not recorded.
+    """
+    sources: dict[Path, Path] = {}
+    for state, src, _ in mounts:
+        view = Path(src).absolute()
+        record = view.parent / f"{view.name}{_VIEW_RECORD_SUFFIX}"
+        if state != "expose" or view.parent.name != _VIEW_DIR or record.is_symlink() or not record.is_file():
+            continue
+        try:
+            built = json.loads(record.read_text())
+            if _view_name(built["salt"], built["source"], built["omitted"]) == view.name:
+                sources[view] = Path(built["source"])
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return sources
+
+
+def _view_name(salt: str, source: str, omitted: list[str]) -> str:
+    return hashlib.sha256("\0".join([salt, source, *sorted(omitted)]).encode()).hexdigest()[:32]
+
+
+def _view_twins(views: dict[Path, Path], surfaces: list[AnswerSurface]) -> list[AnswerSurface]:
+    """Every surface below a mirrored source, named inside the view that serves the source's bytes.
+
+    A twin projects through the view's bind to the same agent path the frozen bind exposed, so an
+    answer a view keeps (a later mount point) or one that reaches it later is still masked and proven.
+    A directory surface that is or holds the source denies the whole view. Both spellings of a surface
+    and of a source are compared: one surface spelled through a symlink is not omitted from the view,
+    so it is masked through its twin instead.
+    """
+    sources = {view: {source, source.resolve()} for view, source in views.items()}
+    twins: dict[Path, AnswerSurface] = {}
+    for surface in surfaces:
+        for path in {surface.path, surface.path.resolve()}:
+            for view, spellings in sources.items():
+                for source in spellings:
+                    if path.is_relative_to(source) and path != source:
+                        twin, kind = view / path.relative_to(source), surface.kind
+                    elif surface.kind == "dir" and source.is_relative_to(path):
+                        twin, kind = view, "dir"
+                    else:
+                        continue
+                    twins.setdefault(twin, AnswerSurface(surface.label, twin, kind, surface.origin))
+    return list(twins.values())
+
+
+def _hide_host_storage(argv: list[str], storage: Path, snapshot: Path) -> list[str]:
+    """Hide the run's host storage wherever a bind of a directory above it serves it.
+
+    A provider may alias the run directory, which serves the frozen snapshot and view storage beside
+    the workspace. Storage holds views of other commands, kept for mount points this argv does not
+    have, and staging trees, which no surface names; a snapshot served whole there brings back one
+    overlay per answer, past bwrap's argument cap. Each such bind is followed at once by a tmpfs over
+    the storage it serves, so a later bind there still takes effect. A bind of view storage itself
+    is hidden the same way; a bind of anything inside it but a whole recorded view is refused.
+    """
+    mounts = _mounts(argv)
+    recorded = {spelling for view in _view_sources(mounts) for spelling in (view, view.resolve())}
+    stores = [(storage, False), *([(snapshot, True)] if snapshot.is_dir() else [])]  # a tmpfs needs its mount point
+    roots = [(root, kept) for path, kept in stores for root in {path.absolute(), path.resolve()}]
+    out: list[str] = []
+    hidden = False
+    i = 0
+    while i < len(argv):  # the same walk as _mounts, so exactly the parsed binds are followed
+        if argv[i] in _EXPOSE_OPS and i + 2 < len(argv):
+            out += argv[i : i + 3]
+            if argv[i + 1] != _DEVNULL:
+                source = Path(argv[i + 1]).absolute()
+                aliases: list[str] = []
+                for spelling in {source, source.resolve()}:
+                    for root, kept in roots:
+                        if root.is_relative_to(spelling) and not (kept and root == spelling):
+                            aliases.append(str(Path(argv[i + 2]) / root.relative_to(spelling)))
+                        elif not kept and spelling.is_relative_to(root) and spelling not in recorded:
+                            raise RuntimeError(f"bind {argv[i + 1]} reaches inside answer-free view storage {storage}")
+                for alias in dict.fromkeys(aliases):
+                    out += ["--tmpfs", alias]
+                    hidden = True
+            i += 3
+        elif (argv[i] in _HIDE_DEST_OPS or argv[i] in ("--dev", "--proc")) and i + 1 < len(argv):
+            out += argv[i : i + 2]
+            i += 2
+        else:
+            out.append(argv[i])
+            i += 1
+    if hidden:
+        storage.mkdir(mode=0o700, exist_ok=True)  # a tmpfs needs its mount point; views may come later
+    return out
+
+
+def answer_free_views(argv: list[str], surfaces: list[AnswerSurface], ws: Path) -> list[str]:
     """Serve each frozen grant that holds exposed answer surfaces from a mirror without them.
 
     One overlay per surface does not scale: bwrap caps its whole argument list, ``--args`` files
@@ -1211,16 +1309,22 @@ def answer_free_views(
     instead served from a hard-link mirror of its frozen tree that omits those surfaces: they are
     absent from the agent's view rather than overlaid, at no argument per surface.
 
-    Returns the rewritten argv and the surfaces the mask pass must cover: the caller's plus, for every
-    surface below a mirrored source, its twin in the mirror, which projects through the rewritten bind
-    to the same agent path the frozen bind exposed. A surface that a later mount needs as its mount
-    point stays in the mirror and keeps its overlay. A source covered by a surface, or holding one that
-    declares a public subtree, is never mirrored: its projection depends on the source path itself.
+    Returns the rewritten argv. The mask pass and the coverage proof read each view's source back
+    from it (:func:`_view_twins`), so every surface below a mirrored source is still checked where the
+    view serves it. A surface that a later mount needs as its mount point stays in the mirror and keeps
+    its overlay. A source covered by a surface, or holding one that declares a public subtree, is never
+    mirrored: its projection depends on the source path itself. A bind that reaches view storage in any
+    other way is hidden or refused (:func:`_hide_host_storage`).
     """
+    storage = ws.parent / _VIEW_DIR
+    return _hide_host_storage(_answer_free_argv(argv, surfaces, ws, storage), storage, bundle_snapshot_root(ws))
+
+
+def _answer_free_argv(argv: list[str], surfaces: list[AnswerSurface], ws: Path, storage: Path) -> list[str]:
     root = bundle_snapshot_root(ws).absolute()
     marker = root / _SNAPSHOT_COMPLETE
     if marker.is_symlink() or not marker.is_file():
-        return argv, surfaces
+        return argv
     mounts = _mounts(argv)
     visibility = _MountVisibility(argv, mounts)
     created = [argv[i + 1] for i in range(len(argv) - 1) if argv[i] in ("--dir", "--chdir")]
@@ -1273,9 +1377,9 @@ def answer_free_views(
             continue
         omitted.setdefault(source, set()).add(relative)
     if not omitted:
-        return argv, surfaces
+        return argv
     salt = hashlib.sha256(marker.read_bytes()).hexdigest()
-    views = {source: _answer_free_view(source, names, ws.parent / _VIEW_DIR, salt) for source, names in omitted.items()}
+    views = {source: _answer_free_view(source, names, storage, salt) for source, names in omitted.items()}
     out = list(argv)
     i = 0
     while i < len(out):  # the same walk as _mounts, so exactly the parsed binds are rewritten
@@ -1287,30 +1391,26 @@ def answer_free_views(
             i += 2
         else:
             i += 1
-    twins = [
-        AnswerSurface(surface.label, views[source] / surface.path.relative_to(source), surface.kind, surface.origin)
-        for surface in projected
-        for source in views
-        if surface.path.is_relative_to(source) and surface.path != source
-    ]
-    return out, [*surfaces, *twins]
+    return out
 
 
 def _answer_free_view(source: Path, omitted: set[Path], views: Path, salt: str) -> Path:
     """A read-only hard-link mirror of one frozen directory without ``omitted`` (relative paths).
 
     The name binds the snapshot marker, the source and the omitted set, so a view is built once per
-    run and policy; a link the filesystem refuses becomes a read-only copy of the same bytes.
+    run and policy; a link the filesystem refuses becomes a read-only copy of the same bytes. The
+    source is recorded beside the view before it is published (:func:`_view_sources`).
     """
-    key = hashlib.sha256("\0".join([salt, str(source), *sorted(p.as_posix() for p in omitted)]).encode()).hexdigest()
-    view = views / key[:32]
-    if view.is_dir() and not view.is_symlink():
+    built = {"salt": salt, "source": str(source.absolute()), "omitted": sorted(p.as_posix() for p in omitted)}
+    view = views / _view_name(built["salt"], built["source"], built["omitted"])
+    record = views / f"{view.name}{_VIEW_RECORD_SUFFIX}"
+    if view.is_dir() and not view.is_symlink() and record.is_file() and not record.is_symlink():
         return view
     views.mkdir(mode=0o700, exist_ok=True)
-    pending = views / f".{view.name}.{os.getpid()}.pending"
-    if pending.exists():
-        _make_snapshot_writable(pending)
-        shutil.rmtree(pending)
+    # Private staging per call, beside the view so publishing it is a same-directory rename: concurrent
+    # builders of the same view never share or delete each other's tree.
+    pending = Path(tempfile.mkdtemp(prefix=f".{view.name}.", suffix=".pending", dir=views))
+    staged_record = pending.with_suffix(".record")
     modes: list[tuple[Path, int]] = []
 
     def fail(error: OSError) -> None:
@@ -1321,7 +1421,8 @@ def _answer_free_view(source: Path, omitted: set[Path], views: Path, salt: str) 
             here = Path(directory)
             relative = here.relative_to(source)
             target = pending / relative
-            target.mkdir(mode=0o700)
+            if target != pending:
+                target.mkdir(mode=0o700)
             modes.append((target, here.stat().st_mode & 0o7555))
             dirs[:] = [name for name in dirs if relative / name not in omitted]
             for name in [*dirs, *files]:
@@ -1337,14 +1438,19 @@ def _answer_free_view(source: Path, omitted: set[Path], views: Path, salt: str) 
                     (target / name).chmod((target / name).stat().st_mode & ~0o222)
         for path, mode in reversed(modes):
             path.chmod(mode)
-        pending.rename(view)
+        staged_record.write_text(json.dumps(built))
+        os.replace(staged_record, record)
+        if not (view.is_dir() and not view.is_symlink()):
+            pending.rename(view)
     except BaseException:
+        if not (view.is_dir() and not view.is_symlink() and record.is_file()):
+            raise
+        # a concurrent caller published the same view first
+    finally:
+        staged_record.unlink(missing_ok=True)
         if pending.exists():
             _make_snapshot_writable(pending)
             shutil.rmtree(pending)
-        if view.is_dir() and not view.is_symlink():
-            return view  # a concurrent caller published the same view first
-        raise
     return view
 
 
@@ -1525,8 +1631,8 @@ def apply_final_answer_masks(
         else _frozen_answer_surfaces(ws, bundle, te, answers, (repo or repo_root()).absolute())
     )
     support = [surface for surface in [*answers, *frozen_support] if surface.origin == "backend"]
-    argv, surfaces = answer_free_views(argv, [*answers, *frozen_support, *frozen_answers, *private], ws)
-    result = apply_answer_masks(argv, surfaces)
+    surfaces = [*answers, *frozen_support, *frozen_answers, *private]
+    result = apply_answer_masks(answer_free_views(argv, surfaces, ws), surfaces)
     if coverage_gap(result, support):
         raise RuntimeError("selected support package remains exposed after final masking")
     # The host-child context names private source authority. Provider/runtime
