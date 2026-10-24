@@ -355,3 +355,17 @@ def test_later_bind_over_hidden_storage_still_takes_effect(snapshot, tmp_path):
             [*rewritten, "cat", "/alias/bundle_views/readme"], capture_output=True, text=True, timeout=60
         )
         assert done.stdout == "public\n", done.stderr
+
+
+def test_denied_directory_costs_one_mask_however_many_answers_it_holds(snapshot):
+    """A denied source is never mirrored; its answers sit under its own mask, not one overlay each."""
+    repo, ws, bundle, answers = snapshot(3100)
+    frozen_corpus = BW._snapshot_path(BW.bundle_snapshot_root(ws), repo / "corpus/public", repo)
+    surfaces = [*_frozen(ws, answers, repo), AnswerSurface("hidden corpus", frozen_corpus, "dir", "hidden")]
+    argv = BW.base_argv(ws, bundle, repo=repo)
+
+    masked = BW.apply_answer_masks(BW.answer_free_views(argv, surfaces, ws), surfaces)
+
+    assert len(masked) < len(argv) + 10
+    assert BW._DEVNULL not in masked
+    assert BW.coverage_gap(masked, surfaces) == []

@@ -1188,12 +1188,15 @@ def coverage_gap(argv: list[str], surfaces: list[AnswerSurface]) -> list[AnswerS
 def apply_answer_masks(argv: list[str], surfaces: list[AnswerSurface]) -> list[str]:
     """Append masks for every answer surface a bind would otherwise re-expose. A surface already hidden
     by deny-by-default is skipped (no redundant overlay, and no mount whose parent tmpfs would fail).
-    File surfaces are /dev/null-overlaid; dir surfaces are tmpfs'd. Masks go LAST so they win."""
+    File surfaces are /dev/null-overlaid; dir surfaces are tmpfs'd. Masks go LAST so they win.
+    Directories are masked first, outermost first, so nothing beneath a masked directory costs an
+    overlay of its own: bwrap caps the whole argument list at 9,000."""
     out = list(argv)
     mounts = _mounts(out)  # one parse per batch, shared by the index and the bind projection
     visibility = _MountVisibility(out, mounts)
     surfaces = [*surfaces, *_view_twins(_view_sources(mounts), surfaces)]
-    for s in _support_bind_surfaces(mounts, surfaces):
+    projected = _support_bind_surfaces(mounts, surfaces)
+    for s in sorted(projected, key=lambda s: (s.kind != "dir", len(s.path.parts) if s.kind == "dir" else 0)):
         if not visibility.is_exposed(s.path):
             continue
         if s.kind == "file":
